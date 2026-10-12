@@ -172,8 +172,17 @@ function extractKeywords(text: string): Set<string> {
  */
 const PROPER_NOUN_PATTERN = /\b([A-Z][a-z]+(?:\s+[A-Z][a-z]+)+)\b/g;
 
-function extractProperNouns(text: string): string[] {
-  return text.match(PROPER_NOUN_PATTERN) ?? [];
+/**
+ * Distinct (case-insensitive) multi-word proper nouns in `text`, first
+ * spelling kept. Repeating one name must not count as several entities.
+ */
+export function extractProperNouns(text: string): string[] {
+  const unique = new Map<string, string>();
+  for (const match of text.match(PROPER_NOUN_PATTERN) ?? []) {
+    const key = match.toLowerCase();
+    if (!unique.has(key)) unique.set(key, match);
+  }
+  return [...unique.values()];
 }
 
 /**
@@ -236,12 +245,14 @@ const MIN_KEYWORD_OVERLAP = 0.15;
 function checkKeywordOverlap(
   sourceText: string,
   generatedText: string
-): { passed: boolean; overlap: number; reasons: string[] } {
+): { passed: boolean; overlap: number | null; reasons: string[] } {
   const sourceKeywords = extractKeywords(sourceText);
   const generatedKeywords = extractKeywords(generatedText);
 
+  // No content keywords on one side: the check is not applicable. It does not
+  // block, but it is not evidence of grounding either (overlap: null).
   if (sourceKeywords.size === 0 || generatedKeywords.size === 0) {
-    return { passed: true, overlap: 1, reasons: [] };
+    return { passed: true, overlap: null, reasons: [] };
   }
 
   let shared = 0;
@@ -322,10 +333,10 @@ const EMBEDDING_MAX_SIMILARITY = 0.98;
 async function checkEmbeddingGrounding(
   sourceText: string,
   generatedText: string
-): Promise<{ passed: boolean; score: number; reasons: string[] }> {
+): Promise<{ passed: boolean; score: number | null; reasons: string[] }> {
   // Empty/whitespace-only inputs produce meaningless embeddings — skip.
   if (!sourceText.trim() || !generatedText.trim()) {
-    return { passed: true, score: 1, reasons: [] };
+    return { passed: true, score: null, reasons: [] };
   }
 
   const [sourceEmb, generatedEmb] = await Promise.all([
@@ -333,8 +344,9 @@ async function checkEmbeddingGrounding(
     getEmbedding(generatedText),
   ]);
 
+  // Embeddings unavailable: not blocking, but contributes no evidence.
   if (!sourceEmb || !generatedEmb) {
-    return { passed: true, score: 1, reasons: [] };
+    return { passed: true, score: null, reasons: [] };
   }
 
   const similarity = cosineSimilarity(sourceEmb, generatedEmb);
@@ -445,11 +457,19 @@ export async function validateGrounding(
   sourceText: string,
   generatedText: string
 ): Promise<GroundingResult> {
-  // Fast path: empty/whitespace-only inputs are trivially grounded
+  // Empty source or output: grounding cannot be established.
   const trimmedSource = sourceText.trim();
   const trimmedGenerated = generatedText.trim();
   if (!trimmedSource || !trimmedGenerated) {
-    return { grounded: true, confidence: 1, reasons: [] };
+    return {
+      grounded: false,
+      confidence: 0,
+      reasons: [
+        !trimmedSource
+          ? 'Insufficient evidence: source text is empty'
+          : 'Insufficient evidence: generated text is empty',
+      ],
+    };
   }
 
   const reasons: string[] = [];
@@ -457,7 +477,7 @@ export async function validateGrounding(
 
   // 1. Keyword overlap (free, <1ms)
   const keywords = checkKeywordOverlap(sourceText, generatedText);
-  scores.push(keywords.overlap);
+  if (keywords.overlap !== null) scores.push(keywords.overlap);
   if (!keywords.passed) reasons.push(...keywords.reasons);
 
   // 2. Entity consistency (free, <1ms)
@@ -467,7 +487,7 @@ export async function validateGrounding(
 
   // 3. Embedding grounding (~100ms, ~$0.0002)
   const embedding = await checkEmbeddingGrounding(sourceText, generatedText);
-  scores.push(embedding.score);
+  if (embedding.score !== null) scores.push(embedding.score);
   if (!embedding.passed) reasons.push(...embedding.reasons);
 
   const confidence =

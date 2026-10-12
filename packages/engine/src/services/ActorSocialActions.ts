@@ -7,19 +7,22 @@
 
 import {
   and,
-  chatParticipants,
+  asc,
   chats,
+  count,
   db,
   eq,
   groupMembers,
   groups,
   gte,
-  messages,
+  inArray,
+  sql,
   userInteractions,
 } from '@feed/db';
-import { generateSnowflakeId, logger } from '@feed/shared';
+import { logger } from '@feed/shared';
 import { NPC_SOCIAL_ACTIONS_CONFIG } from '../config/npc-activity';
 import { clamp01 } from '../utils/math-utils';
+import { findDMChat, getOrCreateDMChat, sendMessageToChat } from './dm-service';
 import { GroupChatService } from './group-chat-service';
 import { StaticDataRegistry } from './static-data-registry';
 
@@ -40,64 +43,53 @@ export class ActorSocialActions {
   static async processRandomSocialActions(): Promise<SocialAction[]> {
     const actions: SocialAction[] = [];
 
-    // Get all actors from static registry (limit to prevent overload)
-    const actorList = StaticDataRegistry.getAllActors().slice(0, 50);
+    const actorList = StaticDataRegistry.getAllActors();
+    const actorIds = actorList.map((actor) => actor.id);
+    if (actorIds.length === 0) return actions;
 
-    // Get all active users with interactions
+    // Aggregate every interaction per (npc, user) pair in the database so the
+    // count/quality thresholds see real totals, and IDs are never re-parsed
+    // from a composite string (actor IDs routinely contain hyphens).
     const sevenDaysAgo = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000);
-    const usersWithInteractions = await db
-      .selectDistinctOn([userInteractions.userId, userInteractions.npcId], {
-        userId: userInteractions.userId,
+    const interactionStats = await db
+      .select({
         npcId: userInteractions.npcId,
-        qualityScore: userInteractions.qualityScore,
+        userId: userInteractions.userId,
+        interactionCount: count(),
+        avgQuality: sql<number>`avg(${userInteractions.qualityScore})::float8`,
       })
       .from(userInteractions)
-      .where(gte(userInteractions.timestamp, sevenDaysAgo));
+      .where(
+        and(
+          gte(userInteractions.timestamp, sevenDaysAgo),
+          inArray(userInteractions.npcId, actorIds)
+        )
+      )
+      .groupBy(userInteractions.npcId, userInteractions.userId);
 
-    // Group interactions by actor-user pairs
-    const interactionMap = new Map<
+    const statsByActor = new Map<
       string,
-      Array<{ userId: string; qualityScore: number }>
+      Array<{ userId: string; interactionCount: number; avgQuality: number }>
     >();
-
-    for (const interaction of usersWithInteractions) {
-      const key = `${interaction.npcId}-${interaction.userId}`;
-      if (!interactionMap.has(key)) {
-        interactionMap.set(key, []);
-      }
-      const interactions = interactionMap.get(key);
-      if (interactions) {
-        interactions.push({
-          userId: interaction.userId,
-          qualityScore: interaction.qualityScore,
-        });
-      }
+    for (const row of interactionStats) {
+      const list = statsByActor.get(row.npcId) ?? [];
+      list.push({
+        userId: row.userId,
+        interactionCount: row.interactionCount,
+        avgQuality: row.avgQuality,
+      });
+      statsByActor.set(row.npcId, list);
     }
 
-    // Process each actor-user pair
     for (const actor of actorList) {
-      const actorInteractions = Array.from(interactionMap.entries())
-        .filter(([key]) => key.startsWith(`${actor.id}-`))
-        .map(([key, interactions]) => {
-          const parts = key.split('-');
-          return {
-            userId: parts.length > 1 ? parts[1] : '',
-            interactions,
-          };
-        });
-
-      for (const { userId, interactions } of actorInteractions) {
+      for (const { userId, interactionCount, avgQuality } of statsByActor.get(
+        actor.id
+      ) ?? []) {
         if (
-          !userId ||
-          interactions.length <
-            NPC_SOCIAL_ACTIONS_CONFIG.minInteractionsForAction
+          interactionCount < NPC_SOCIAL_ACTIONS_CONFIG.minInteractionsForAction
         ) {
           continue;
         }
-
-        const avgQuality =
-          interactions.reduce((sum, i) => sum + i.qualityScore, 0) /
-          interactions.length;
         if (avgQuality < NPC_SOCIAL_ACTIONS_CONFIG.minInteractionQuality) {
           continue;
         }
@@ -116,41 +108,7 @@ export class ActorSocialActions {
           )
           .limit(1);
 
-        // Check if there's already a DM chat between this actor and user
-        let hasExistingDM = false;
-        if (userId && actor.id) {
-          const dmChats = await db
-            .select({
-              chatId: chats.id,
-              participants: chatParticipants.userId,
-            })
-            .from(chats)
-            .innerJoin(chatParticipants, eq(chatParticipants.chatId, chats.id))
-            .where(eq(chats.isGroup, false));
-
-          // Group by chat to check for DM between these two users
-          const chatParticipantMap = new Map<string, string[]>();
-          for (const row of dmChats) {
-            if (!chatParticipantMap.has(row.chatId)) {
-              chatParticipantMap.set(row.chatId, []);
-            }
-            if (row.participants) {
-              chatParticipantMap.get(row.chatId)!.push(row.participants);
-            }
-          }
-
-          // Check if any chat has exactly these two participants
-          for (const [, participants] of chatParticipantMap) {
-            if (
-              participants.length === 2 &&
-              participants.includes(userId) &&
-              participants.includes(actor.id)
-            ) {
-              hasExistingDM = true;
-              break;
-            }
-          }
-        }
+        const hasExistingDM = (await findDMChat(actor.id, userId)) !== null;
 
         // Calculate probabilities based on interaction quality and count
         // Use safe denominators to prevent division by zero (fallback to 1 if zero)
@@ -159,10 +117,7 @@ export class ActorSocialActions {
         const countDenominator =
           NPC_SOCIAL_ACTIONS_CONFIG.minInteractionsForAction || 1;
         const qualityFactor = Math.min(avgQuality / qualityDenominator, 1.5);
-        const countFactor = Math.min(
-          interactions.length / countDenominator,
-          2.0
-        );
+        const countFactor = Math.min(interactionCount / countDenominator, 2.0);
 
         const inviteProbability = clamp01(
           NPC_SOCIAL_ACTIONS_CONFIG.baseInviteProbability *
@@ -175,49 +130,44 @@ export class ActorSocialActions {
             countFactor
         );
 
-        if (!userId) throw new Error('User ID is required');
-        if (!actor.id) throw new Error('Actor ID is required');
         // Randomly decide to invite to group chat
         if (!existingMembership && Math.random() < inviteProbability) {
-          // Try to find an existing game chat owned by this actor
-          let chatId = `${actor.id}-owned-chat`;
-          let chatName = `${actor.name}'s Inner Circle`;
-
-          // Look for existing game chats where this actor might be admin
-          // Group chats are stored with kebab-case names, so we search by name pattern
-          const [existingChat] = await db
-            .select()
+          // Only invite into a group chat this actor actually owns; never
+          // invent a chat ID or borrow another owner's chat.
+          const [ownedChat] = await db
+            .select({ id: chats.id, name: chats.name })
             .from(chats)
-            .where(and(eq(chats.isGroup, true), eq(chats.gameId, 'continuous')))
+            .innerJoin(groups, eq(groups.id, chats.groupId))
+            .where(and(eq(chats.isGroup, true), eq(groups.ownerId, actor.id)))
+            .orderBy(asc(chats.createdAt), asc(chats.id))
             .limit(1);
-
-          if (existingChat) {
-            chatId = existingChat.id;
-            chatName = existingChat.name || chatName;
-          }
-          await GroupChatService.recordInvite(
-            userId,
-            actor.id,
-            chatId,
-            chatName
-          );
-          actions.push({
-            type: 'group_chat_invite',
-            userId,
-            actorId: actor.id,
-            chatId,
-            chatName,
-          });
-          logger.info(
-            `Actor ${actor.name} invited user ${userId} to group chat`,
-            {
-              actorId: actor.id,
+          if (ownedChat) {
+            const chatId = ownedChat.id;
+            const chatName = ownedChat.name || `${actor.name}'s Inner Circle`;
+            await GroupChatService.recordInvite(
               userId,
+              actor.id,
+              chatId,
+              chatName
+            );
+            actions.push({
+              type: 'group_chat_invite',
+              userId,
+              actorId: actor.id,
               chatId,
               chatName,
-            },
-            'ActorSocialActions'
-          );
+            });
+            logger.info(
+              `Actor ${actor.name} invited user ${userId} to group chat`,
+              {
+                actorId: actor.id,
+                userId,
+                chatId,
+                chatName,
+              },
+              'ActorSocialActions'
+            );
+          }
         }
 
         // Randomly decide to send DM
@@ -278,84 +228,11 @@ export class ActorSocialActions {
     const messageContent: string =
       messagesList[randomIndex] ?? messagesList[0] ?? ''; // Safe: randomIndex is always within bounds
 
-    // Create or get DM chat
-    const chatId = await generateSnowflakeId();
-
-    // Check if chat exists
-    const [existingChat] = await db
-      .select()
-      .from(chats)
-      .where(eq(chats.id, `dm-${actorId}-${userId}`))
-      .limit(1);
-
-    let finalChatId = chatId;
-
-    if (existingChat) {
-      finalChatId = existingChat.id;
-    } else {
-      await db.insert(chats).values({
-        id: chatId,
-        name: null, // DMs don't have names
-        isGroup: false,
-        updatedAt: new Date(),
-      });
-    }
-
-    // Add participants
-    const participantId1 = await generateSnowflakeId();
-    const participantId2 = await generateSnowflakeId();
-
-    // Check if participant exists
-    const [existingParticipant1] = await db
-      .select()
-      .from(chatParticipants)
-      .where(
-        and(
-          eq(chatParticipants.chatId, finalChatId),
-          eq(chatParticipants.userId, actorId)
-        )
-      )
-      .limit(1);
-
-    if (!existingParticipant1) {
-      await db.insert(chatParticipants).values({
-        id: participantId1,
-        chatId: finalChatId,
-        userId: actorId,
-      });
-    }
-
-    const [existingParticipant2] = await db
-      .select()
-      .from(chatParticipants)
-      .where(
-        and(
-          eq(chatParticipants.chatId, finalChatId),
-          eq(chatParticipants.userId, userId)
-        )
-      )
-      .limit(1);
-
-    if (!existingParticipant2) {
-      await db.insert(chatParticipants).values({
-        id: participantId2,
-        chatId: finalChatId,
-        userId,
-      });
-    }
-
-    if (!messageContent) throw new Error('Message content is required');
-
-    // Create initial message from actor
-    await db.insert(messages).values({
-      id: await generateSnowflakeId(),
-      chatId: finalChatId,
-      senderId: actorId,
-      content: messageContent,
-    });
+    const chatId = await getOrCreateDMChat(actorId, userId);
+    await sendMessageToChat(chatId, actorId, messageContent);
 
     return {
-      id: finalChatId,
+      id: chatId,
       messageContent,
     };
   }

@@ -9,7 +9,7 @@
  * - Their personality and tier
  */
 
-import { shuffleArray } from '../../utils/randomization';
+import { type RngFunction, shuffleArray } from '../../utils/randomization';
 import { definePrompt } from '../define-prompt';
 
 /**
@@ -29,6 +29,7 @@ interface TradingExample {
   positionId: string;
   amount: number;
   confidence: number;
+  narrativeConnection: string;
 }
 
 const TRADING_EXAMPLES: TradingExample[] = [
@@ -44,6 +45,7 @@ const TRADING_EXAMPLES: TradingExample[] = [
     positionId: 'null',
     amount: 0,
     confidence: 0.5,
+    narrativeConnection: 'No current narrative gives this trader an edge',
   },
   {
     title: 'NPC opens a LONG position (Perp)',
@@ -58,6 +60,8 @@ const TRADING_EXAMPLES: TradingExample[] = [
     positionId: 'null',
     amount: 5000,
     confidence: 0.75,
+    narrativeConnection:
+      'Insider chatter about the upcoming COMPANY_A announcement',
   },
   {
     title: 'NPC buys YES (Prediction)',
@@ -71,6 +75,8 @@ const TRADING_EXAMPLES: TradingExample[] = [
     positionId: 'null',
     amount: 1200,
     confidence: 0.65,
+    narrativeConnection:
+      'Product launch coverage in the feed supports the outcome',
   },
   {
     title: 'NPC closes position',
@@ -84,6 +90,8 @@ const TRADING_EXAMPLES: TradingExample[] = [
     positionId: 'uuid-1234-5678',
     amount: 0,
     confidence: 0.8,
+    narrativeConnection:
+      'TICKER_B rally after the earnings story has run its course',
   },
   {
     title: 'NPC opens a SHORT position (Perp)',
@@ -98,6 +106,7 @@ const TRADING_EXAMPLES: TradingExample[] = [
     positionId: 'null',
     amount: 4000,
     confidence: 0.7,
+    narrativeConnection: 'Feed posts questioning COMPANY_B guidance',
   },
   {
     title: 'NPC buys NO (Prediction)',
@@ -111,6 +120,7 @@ const TRADING_EXAMPLES: TradingExample[] = [
     positionId: 'null',
     amount: 900,
     confidence: 0.6,
+    narrativeConnection: 'Group chat says the deal talks have stalled',
   },
   {
     title: 'NPC sells YES position (takes profit on prediction)',
@@ -125,6 +135,7 @@ const TRADING_EXAMPLES: TradingExample[] = [
     positionId: 'null',
     amount: 0,
     confidence: 0.75,
+    narrativeConnection: 'Story already priced in after the latest headline',
   },
   {
     title: 'NPC sells NO position (cuts loss on prediction)',
@@ -139,6 +150,7 @@ const TRADING_EXAMPLES: TradingExample[] = [
     positionId: 'null',
     amount: 0,
     confidence: 0.65,
+    narrativeConnection: 'New leak contradicts the earlier denial',
   },
 ];
 
@@ -159,6 +171,7 @@ function formatExample(example: TradingExample, index: number): string {
     <positionId>${example.positionId}</positionId>
     <amount>${example.amount}</amount>
     <confidence>${example.confidence}</confidence>
+    <narrativeConnection>${example.narrativeConnection}</narrativeConnection>
   </decision>
 </decisions>`;
 }
@@ -176,8 +189,10 @@ function formatExample(example: TradingExample, index: number): string {
  * });
  * ```
  */
-export function getShuffledExamplesText(): string {
-  const shuffled = shuffleArray(TRADING_EXAMPLES);
+export function getShuffledExamplesText(
+  rng: RngFunction = Math.random
+): string {
+  const shuffled = shuffleArray(TRADING_EXAMPLES, rng);
   return shuffled.map((ex, i) => formatExample(ex, i)).join('\n\n');
 }
 
@@ -237,7 +252,7 @@ RULES:
 - Prediction BUY actions (buy_yes/buy_no): marketType=prediction, marketId required
 - Prediction SELL actions (sell_yes/sell_no): marketType=prediction, marketId required, amount=0 (closes entire position). The SAME NPC must hold the EXACT marketId and side in its Positions row; never sell another market or another NPC's position. Copy its positionId.
 - close_position: positionId required (copy the exact opaque ID from this NPC's Positions row), amount=0
-- hold: all fields null, amount=0
+- hold: marketType, ticker, marketId and positionId null, amount=0 (npcId, npcName, action, confidence, reasoning and narrativeConnection are still required)
 - PREDICTION SLIPPAGE LIMIT: The last column of the market table shows "max $Xk" for each prediction market. Your trade amount MUST stay at or below that value — larger trades are rejected. For thin markets, bet $200-$500; for balanced, up to the listed max.
 
 DECISION FACTORS:

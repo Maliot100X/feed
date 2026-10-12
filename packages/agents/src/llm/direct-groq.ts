@@ -35,6 +35,21 @@ function getRuntimeSetting(
   return typeof value === 'string' && value.length > 0 ? value : undefined;
 }
 
+/**
+ * The provider that `createAgentGroq` actually routes to, using the same
+ * precedence (Surplus > ElizaCloud > Groq), so telemetry is labeled with the
+ * real endpoint instead of always "groq".
+ */
+export function resolveAgentInferenceProvider(
+  runtime?: IAgentRuntime
+): 'surplus' | 'elizacloud' | 'groq' {
+  if (getSurplusConfig()) return 'surplus';
+  const elizacloudKey =
+    getRuntimeSetting(runtime, 'ELIZACLOUD_API_KEY') ||
+    process.env.ELIZACLOUD_API_KEY;
+  return elizacloudKey ? 'elizacloud' : 'groq';
+}
+
 function resolveGroqBaseURL(runtime: IAgentRuntime | undefined): string {
   const surplus = getSurplusConfig();
   if (surplus) return surplus.baseURL;
@@ -145,6 +160,7 @@ export async function callGroqDirect(params: {
   }
 
   const groq = createAgentGroq(params.runtime);
+  const provider = resolveAgentInferenceProvider(params.runtime);
 
   const model = resolveGroqModel({
     modelSize: params.modelSize,
@@ -195,7 +211,7 @@ export async function callGroqDirect(params: {
       });
     }
     getAgentLLMBridge()?.({
-      provider: 'groq',
+      provider,
       model,
       promptType: params.actionType || params.purpose || 'agent-groq-direct',
       format: 'text',
@@ -232,7 +248,7 @@ export async function callGroqDirect(params: {
       });
     }
     getAgentLLMBridge()?.({
-      provider: 'groq',
+      provider,
       model,
       promptType: params.actionType || params.purpose || 'agent-groq-direct',
       systemPrompt: params.system || '',
@@ -274,7 +290,7 @@ export async function callGroqDirect(params: {
       input: `System: ${params.system || ''}\n\nUser: ${params.prompt}`,
       output: result.text,
       metadata: {
-        provider: 'groq',
+        provider,
         model,
         temperature: params.temperature ?? 0.7,
         maxTokens: params.maxTokens ?? 8192,
@@ -287,7 +303,7 @@ export async function callGroqDirect(params: {
     const bridge = getAgentLLMBridge();
     if (bridge) {
       bridge({
-        provider: 'groq',
+        provider,
         model,
         promptType: params.actionType || params.purpose || 'agent-groq-direct',
         format: 'text',

@@ -5,7 +5,7 @@
 
 import { db } from '@feed/db';
 import type { Metadata } from 'next';
-import { redirect } from 'next/navigation';
+import { ShareRedirect } from '../../_components/ShareRedirect';
 
 // Use Node.js runtime for database access
 export const runtime = 'nodejs';
@@ -19,12 +19,9 @@ interface PageProps {
 export async function generateMetadata({
   params,
 }: PageProps): Promise<Metadata> {
-  const { userId } = await params;
+  const { userId: rawUserId } = await params;
+  const userId = decodeURIComponent(rawUserId);
 
-  const appUrl = process.env.NEXT_PUBLIC_APP_URL || 'https://feed.fun';
-  const ogImageUrl = `${appUrl}/api/og/pnl/${userId}`;
-
-  // Get user data
   const user = await db.user.findUnique({
     where: { id: userId },
     select: {
@@ -33,7 +30,16 @@ export async function generateMetadata({
     },
   });
 
-  const displayName = user?.displayName || user?.username || 'Feed User';
+  if (!user) {
+    return {
+      title: 'Feed',
+      description: 'Trading narratives, sharing the upside',
+    };
+  }
+
+  const appUrl = process.env.NEXT_PUBLIC_APP_URL || 'https://feed.fun';
+  const ogImageUrl = `${appUrl}/api/og/pnl/${encodeURIComponent(userId)}`;
+  const displayName = user.displayName || user.username || 'Feed User';
 
   return {
     title: `${displayName}'s P&L on Feed`,
@@ -60,18 +66,7 @@ export async function generateMetadata({
   };
 }
 
-export default async function SharePnLPage({ params }: PageProps) {
-  const { userId } = await params;
-
-  // Verify user exists - if not, redirect to markets anyway
-  await db.user.findUnique({
-    where: { id: userId },
-    select: {
-      id: true,
-      username: true,
-    },
-  });
-
-  // Always redirect to markets (OG crawlers get metadata, users get redirected)
-  redirect('/markets');
+export default function SharePnLPage() {
+  // Crawlers read the metadata above; browsers continue to markets.
+  return <ShareRedirect href="/markets" label="Continue to Feed markets" />;
 }

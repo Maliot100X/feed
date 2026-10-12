@@ -267,69 +267,74 @@ export const POST = withErrorHandling(
       throw new BusinessLogicError('Chat not found', 'CHAT_NOT_FOUND');
     }
 
+    // Continuous game chats are NPC-driven and have no user message
+    // pipeline; reject instead of fabricating an unpersisted message.
+    if (chat.isGroup && chat.gameId === 'continuous') {
+      throw new BusinessLogicError(
+        'Sending messages to game chats is not supported',
+        'GAME_CHAT_READ_ONLY'
+      );
+    }
+
     // Determine chat type
-    const isGameChat = chat.isGroup && chat.gameId === 'continuous';
     const isDMChat = !chat.isGroup;
-    const isGroupChat = chat.isGroup && !isGameChat;
+    const isGroupChat = chat.isGroup;
 
     // Check membership
     let isMember = true;
-    if (!isGameChat) {
-      // For DMs, check ChatParticipant
-      if (isDMChat) {
-        isMember = chatParticipantsList.some((p) => p.userId === user.userId);
-        if (!isMember) {
-          throw new AuthorizationError(
-            'You are not a participant in this DM',
-            'chat',
-            'write'
+    // For DMs, check ChatParticipant
+    if (isDMChat) {
+      isMember = chatParticipantsList.some((p) => p.userId === user.userId);
+      if (!isMember) {
+        throw new AuthorizationError(
+          'You are not a participant in this DM',
+          'chat',
+          'write'
+        );
+      }
+
+      // Check if the other participant is an NPC or has blocked the user
+      const otherParticipant = chatParticipantsList.find(
+        (p) => p.userId !== user.userId
+      );
+      if (otherParticipant) {
+        const [otherUser, isBlocked, hasBlockedMe] = await Promise.all([
+          db
+            .select({ isActor: users.isActor })
+            .from(users)
+            .where(eq(users.id, otherParticipant.userId))
+            .limit(1)
+            .then((rows) => rows[0] ?? null),
+          hasBlocked(user.userId, otherParticipant.userId),
+          hasBlocked(otherParticipant.userId, user.userId),
+        ]);
+
+        if (otherUser?.isActor) {
+          throw new BusinessLogicError(
+            'Cannot send direct messages to NPC actors. Use group chats to interact with NPCs.',
+            'CANNOT_DM_ACTOR'
           );
         }
 
-        // Check if the other participant is an NPC or has blocked the user
-        const otherParticipant = chatParticipantsList.find(
-          (p) => p.userId !== user.userId
-        );
-        if (otherParticipant) {
-          const [otherUser, isBlocked, hasBlockedMe] = await Promise.all([
-            db
-              .select({ isActor: users.isActor })
-              .from(users)
-              .where(eq(users.id, otherParticipant.userId))
-              .limit(1)
-              .then((rows) => rows[0] ?? null),
-            hasBlocked(user.userId, otherParticipant.userId),
-            hasBlocked(otherParticipant.userId, user.userId),
-          ]);
-
-          if (otherUser?.isActor) {
-            throw new BusinessLogicError(
-              'Cannot send direct messages to NPC actors. Use group chats to interact with NPCs.',
-              'CANNOT_DM_ACTOR'
-            );
-          }
-
-          if (isBlocked || hasBlockedMe) {
-            throw new BusinessLogicError(
-              'Cannot send messages to this user',
-              'BLOCKED_USER'
-            );
-          }
-        }
-      }
-      // For group chats, check GroupChatMembership
-      else if (isGroupChat) {
-        isMember = await GroupChatService.isInChat(user.userId, chatId);
-        if (!isMember) {
-          throw new AuthorizationError(
-            'You are not a member of this group chat',
-            'chat',
-            'write'
+        if (isBlocked || hasBlockedMe) {
+          throw new BusinessLogicError(
+            'Cannot send messages to this user',
+            'BLOCKED_USER'
           );
         }
       }
     }
-
+    // For group chats, check GroupChatMembership
+    else if (isGroupChat) {
+      isMember = await GroupChatService.isInChat(user.userId, chatId);
+      if (!isMember) {
+        throw new AuthorizationError(
+          'You are not a member of this group chat',
+          'chat',
+          'write'
+        );
+      }
+    }
     // 5. Check kick probability for group chats (not DMs) - skip for now since we don't want to kick during message send
     let sweepDecision: SweepDecision | null = null;
 
@@ -348,7 +353,7 @@ export const POST = withErrorHandling(
       content,
       user.userId,
       contextType,
-      isGameChat ? '' : chatId
+      chatId
     );
 
     if (!qualityResult.passed) {
@@ -359,9 +364,7 @@ export const POST = withErrorHandling(
     }
 
     // 7. Validate reply target and build reply snippet (if replying)
-    const effectiveReplyToMessageId = !isGameChat
-      ? replyToMessageId
-      : undefined;
+    const effectiveReplyToMessageId = replyToMessageId;
     let replyToMessage: {
       id: string;
       content: string;
@@ -403,62 +406,44 @@ export const POST = withErrorHandling(
     }
 
     // 8. Create message
-    let message = null;
-    let membership = null;
-
-    if (isGameChat) {
-      // For game chats, create a mock message object
-      message = {
-        id: `game-${Date.now()}`,
-        content: content.trim(),
-        chatId,
-        senderId: user.userId,
-        createdAt: new Date(),
-      };
-    } else {
-      // For DMs and group chats, persist to database
-      const result = await asUser(user, async (db) => {
-        const msg = await db.message.create({
-          data: {
-            id: await generateSnowflakeId(),
-            content: content.trim(),
-            chatId,
-            senderId: user.userId,
-            createdAt: new Date(),
-            replyToMessageId: effectiveReplyToMessageId ?? null,
-          },
-        });
-
-        // 8. Update user's quality score in group chat (not DMs)
-        if (isGroupChat) {
-          await GroupChatService.updateQualityScore(
-            user.userId,
-            chatId,
-            qualityResult.score
-          );
-
-          // 9. Get updated membership stats
-          const chatForGroup = await db.chat.findUnique({
-            where: { id: chatId },
-            select: { groupId: true },
-          });
-          const mem = chatForGroup?.groupId
-            ? await db.groupMember.findFirst({
-                where: {
-                  groupId: chatForGroup.groupId,
-                  userId: user.userId,
-                },
-              })
-            : null;
-          return { message: msg, membership: mem };
-        }
-
-        return { message: msg, membership: null };
+    const { message, membership } = await asUser(user, async (db) => {
+      const msg = await db.message.create({
+        data: {
+          id: await generateSnowflakeId(),
+          content: content.trim(),
+          chatId,
+          senderId: user.userId,
+          createdAt: new Date(),
+          replyToMessageId: effectiveReplyToMessageId ?? null,
+        },
       });
 
-      message = result.message;
-      membership = result.membership;
-    }
+      // 8. Update user's quality score in group chat (not DMs)
+      if (isGroupChat) {
+        await GroupChatService.updateQualityScore(
+          user.userId,
+          chatId,
+          qualityResult.score
+        );
+
+        // 9. Get updated membership stats
+        const chatForGroup = await db.chat.findUnique({
+          where: { id: chatId },
+          select: { groupId: true },
+        });
+        const mem = chatForGroup?.groupId
+          ? await db.groupMember.findFirst({
+              where: {
+                groupId: chatForGroup.groupId,
+                userId: user.userId,
+              },
+            })
+          : null;
+        return { message: msg, membership: mem };
+      }
+
+      return { message: msg, membership: null };
+    });
 
     // 9. Broadcast message via SSE (await for reliability)
     await broadcastChatMessage(chatId, {
@@ -468,56 +453,52 @@ export const POST = withErrorHandling(
       senderId: message.senderId,
       type: message.type ?? 'user',
       createdAt: toISO(message.createdAt),
-      isGameChat,
       isDMChat,
       replyToMessageId: effectiveReplyToMessageId ?? undefined,
       replyToMessage,
     });
 
     // 12. Send notifications to other participants
-    if (!isGameChat) {
-      if (isDMChat) {
-        // For DMs, notify the other participant
-        const otherParticipant = chatParticipantsList.find(
-          (p) => p.userId !== user.userId
-        );
-        if (otherParticipant) {
-          await notifyDMMessage(
-            otherParticipant.userId,
-            user.userId,
-            chatId,
-            content.trim()
-          );
-        }
-      } else if (isGroupChat) {
-        // For group chats, notify all participants except sender
-        const recipientUserIds = chatParticipantsList
-          .filter((p) => p.userId !== user.userId)
-          .map((p) => p.userId);
-        const chatInfo = await asUser(user, async (db) => {
-          return await db.chat.findUnique({
-            where: { id: chatId },
-            select: { name: true },
-          });
-        });
-
-        await notifyGroupChatMessage(
-          recipientUserIds,
+    if (isDMChat) {
+      // For DMs, notify the other participant
+      const otherParticipant = chatParticipantsList.find(
+        (p) => p.userId !== user.userId
+      );
+      if (otherParticipant) {
+        await notifyDMMessage(
+          otherParticipant.userId,
           user.userId,
           chatId,
-          chatInfo?.name || 'Group Chat',
           content.trim()
         );
       }
-    }
+    } else if (isGroupChat) {
+      // For group chats, notify all participants except sender
+      const recipientUserIds = chatParticipantsList
+        .filter((p) => p.userId !== user.userId)
+        .map((p) => p.userId);
+      const chatInfo = await asUser(user, async (db) => {
+        return await db.chat.findUnique({
+          where: { id: chatId },
+          select: { name: true },
+        });
+      });
 
+      await notifyGroupChatMessage(
+        recipientUserIds,
+        user.userId,
+        chatId,
+        chatInfo?.name || 'Group Chat',
+        content.trim()
+      );
+    }
     // 13. Return success with feedback
     logger.info(
       'Message sent successfully',
       {
         chatId,
         userId: user.userId,
-        chatType: isDMChat ? 'dm' : isGameChat ? 'game' : 'group',
+        chatType: isDMChat ? 'dm' : 'group',
         qualityScore: qualityResult.score,
       },
       'POST /api/chats/[id]/message'
@@ -527,7 +508,7 @@ export const POST = withErrorHandling(
     trackServerEvent(user.userId, 'message_sent', {
       chatId,
       messageLength: content.length,
-      chatType: isDMChat ? 'dm' : isGameChat ? 'game' : 'group',
+      chatType: isDMChat ? 'dm' : 'group',
       qualityScore: qualityResult.score,
     }).catch((error) => {
       logger.warn('Failed to track message_sent event', { error });
@@ -561,7 +542,7 @@ export const POST = withErrorHandling(
             }
           : undefined,
         warnings: qualityResult.warnings,
-        chatType: isDMChat ? 'dm' : isGameChat ? 'game' : 'group',
+        chatType: isDMChat ? 'dm' : 'group',
       },
       201
     );

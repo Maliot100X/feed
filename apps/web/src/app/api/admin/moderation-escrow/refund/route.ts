@@ -2,7 +2,7 @@
  * Admin Moderation Escrow Refund API
  *
  * @route POST /api/admin/moderation-escrow/refund - Refund payment
- * @access Admin
+ * @access Admin with manage_escrow permission (SUPER_ADMIN by default)
  *
  * @description
  * Refunds an escrow payment back to the recipient. Requires refund transaction
@@ -60,7 +60,7 @@
  */
 
 import { escrowErrorHttpStatus, refundEscrowPayment } from '@feed/a2a';
-import { requireAdmin, withErrorHandling } from '@feed/api';
+import { requirePermission, withErrorHandling } from '@feed/api';
 import { logger, toISOOrNull } from '@feed/shared';
 import type { NextRequest } from 'next/server';
 import { NextResponse } from 'next/server';
@@ -73,7 +73,7 @@ const RefundEscrowSchema = z.object({
 });
 
 export const POST = withErrorHandling(async function POST(req: NextRequest) {
-  const _adminUser = await requireAdmin(req);
+  const _adminUser = await requirePermission(req, 'manage_escrow');
   const adminId = _adminUser.userId;
 
   const body = await req.json();

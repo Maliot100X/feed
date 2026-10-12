@@ -369,24 +369,4 @@ export class SignalExtractionService {
     // Default moderate reliability
     return 0.5;
   }
-
-  /**
-   * Get simplified signal summary for quick agent consumption
-   */
-  static async getQuickSignal(questionNumber: number): Promise<{
-    outcome: 'YES' | 'NO' | 'UNCERTAIN';
-    confidence: number;
-    yesEvidence: number;
-    noEvidence: number;
-  }> {
-    const analysis =
-      await SignalExtractionService.extractMarketSignal(questionNumber);
-
-    return {
-      outcome: analysis.suggestedOutcome,
-      confidence: analysis.confidence,
-      yesEvidence: analysis.yesSignal,
-      noEvidence: analysis.noSignal,
-    };
-  }
 }

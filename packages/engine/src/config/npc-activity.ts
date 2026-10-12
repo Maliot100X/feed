@@ -34,120 +34,20 @@
  */
 
 import { logger } from '@feed/shared';
-import { clamp01 } from '../utils/math-utils';
+import { createEnvParsers } from './env-parsing';
 
 // =============================================================================
 // HELPER FUNCTIONS
 // =============================================================================
 
-/**
- * Parse an environment variable as a number with a default fallback.
- * Returns the default if the env var is not set or not a valid number.
- */
-function envNumber(key: string, defaultValue: number): number {
-  const value = process.env[key];
-  if (value === undefined || value === '') {
-    return defaultValue;
-  }
-  const parsed = Number(value);
-  return Number.isNaN(parsed) ? defaultValue : parsed;
-}
-
-/**
- * Parse an environment variable as a positive number (> 0) with bounds checking.
- * Returns the default and logs a warning if the value is <= 0.
- */
-function envPositiveNumber(key: string, defaultValue: number): number {
-  const value = envNumber(key, defaultValue);
-  if (value <= 0) {
-    logger.warn(
-      `${key}=${value} must be positive (> 0), using default ${defaultValue}`,
-      { key, value, defaultValue },
-      'npc-activity'
-    );
-    return defaultValue;
-  }
-  return value;
-}
-
-/**
- * Parse an environment variable as a non-negative number (>= 0) with bounds checking.
- * Returns the default and logs a warning if the value is < 0.
- * Use for values where 0 is valid (e.g., to disable a feature).
- */
-function envNonNegativeNumber(key: string, defaultValue: number): number {
-  const value = envNumber(key, defaultValue);
-  if (value < 0) {
-    logger.warn(
-      `${key}=${value} must be non-negative (>= 0), using default ${defaultValue}`,
-      { key, value, defaultValue },
-      'npc-activity'
-    );
-    return defaultValue;
-  }
-  return value;
-}
-
-/**
- * Parse an environment variable as a probability (0.0-1.0) with bounds checking.
- * Clamps the value to valid probability range to prevent configuration errors.
- */
-function envProbability(key: string, defaultValue: number): number {
-  const value = envNumber(key, defaultValue);
-  if (value < 0 || value > 1) {
-    logger.warn(
-      `${key}=${value} is outside valid probability range (0-1), clamping to bounds`,
-      { key, value },
-      'npc-activity'
-    );
-  }
-  return clamp01(value);
-}
-
-/**
- * Parse an environment variable as a score (0.0-1.0) with bounds checking.
- * Similar to envProbability but semantically distinct for quality scores, thresholds, etc.
- * Clamps the value to valid [0,1] range to prevent configuration errors.
- */
-function envScore(key: string, defaultValue: number): number {
-  const value = envNumber(key, defaultValue);
-  if (value < 0 || value > 1) {
-    logger.warn(
-      `${key}=${value} is outside valid score range (0-1), clamping to bounds`,
-      { key, value },
-      'npc-activity'
-    );
-  }
-  return clamp01(value);
-}
-
-/**
- * Parse an environment variable as a boolean with a default fallback.
- *
- * Accepts: true/false, 1/0, yes/no (case-insensitive).
- * Logs a warning and returns default for unrecognized values.
- */
-function envBoolean(key: string, defaultValue: boolean): boolean {
-  const value = process.env[key];
-  if (value === undefined || value === '') {
-    return defaultValue;
-  }
-
-  const normalized = value.trim().toLowerCase();
-  if (normalized === 'true' || normalized === '1' || normalized === 'yes') {
-    return true;
-  }
-  if (normalized === 'false' || normalized === '0' || normalized === 'no') {
-    return false;
-  }
-
-  logger.warn(
-    `${key}="${value}" is not a valid boolean, using default ${defaultValue}`,
-    { key, value, defaultValue },
-    'npc-activity'
-  );
-  return defaultValue;
-}
+const env = createEnvParsers('npc-activity');
+const envNumber = env.number;
+const envPositiveInt = env.positiveInt;
+const envNonNegativeNumber = env.nonNegativeNumber;
+const envProbability = env.probability;
+/** Quality scores/thresholds share probability semantics ([0, 1], clamped). */
+const envScore = env.probability;
+const envBoolean = env.boolean;
 
 // =============================================================================
 // POSTING CONFIGURATION
@@ -177,7 +77,7 @@ export const NPC_POSTING_CONFIG = {
    * @default 3 (balanced - encourages diversity across NPCs)
    * @env NPC_MAX_POSTS_PER_DAY
    */
-  maxPostsPerDay: envPositiveNumber('NPC_MAX_POSTS_PER_DAY', 3),
+  maxPostsPerDay: envPositiveInt('NPC_MAX_POSTS_PER_DAY', 3),
 
   /**
    * Minimum hours between posts for the same NPC.
@@ -234,7 +134,7 @@ export const NPC_TRADING_CONFIG = {
    * @default 20
    * @env NPC_MAX_TRADES_PER_DAY
    */
-  maxTradesPerDay: envPositiveNumber('NPC_MAX_TRADES_PER_DAY', 20),
+  maxTradesPerDay: envPositiveInt('NPC_MAX_TRADES_PER_DAY', 20),
 
   /**
    * Minimum minutes between trades for the same NPC.
@@ -307,7 +207,7 @@ export const NPC_ENGAGEMENT_CONFIG = {
    * @default 20 (increased for more engagement)
    * @env NPC_MAX_LIKES_PER_TICK
    */
-  maxLikesPerTick: envPositiveNumber('NPC_MAX_LIKES_PER_TICK', 20),
+  maxLikesPerTick: envPositiveInt('NPC_MAX_LIKES_PER_TICK', 20),
 
   /**
    * Maximum shares across all NPCs per tick.
@@ -315,7 +215,7 @@ export const NPC_ENGAGEMENT_CONFIG = {
    * @default 8 (doubled for more reposting)
    * @env NPC_MAX_SHARES_PER_TICK
    */
-  maxSharesPerTick: envPositiveNumber('NPC_MAX_SHARES_PER_TICK', 8),
+  maxSharesPerTick: envPositiveInt('NPC_MAX_SHARES_PER_TICK', 8),
 
   /**
    * Maximum total comments (including replies-to-comments) across all NPCs per tick.
@@ -323,7 +223,7 @@ export const NPC_ENGAGEMENT_CONFIG = {
    * @default 18 (increased for deeper threads + more conversation)
    * @env NPC_MAX_COMMENTS_PER_TICK
    */
-  maxCommentsPerTick: envPositiveNumber('NPC_MAX_COMMENTS_PER_TICK', 18),
+  maxCommentsPerTick: envPositiveInt('NPC_MAX_COMMENTS_PER_TICK', 18),
 
   /**
    * Maximum comment replies (nested comments) per tick.
@@ -345,7 +245,7 @@ export const NPC_ENGAGEMENT_CONFIG = {
    * @default 3 (allows up to 4 total levels including the root)
    * @env NPC_MAX_COMMENT_THREAD_DEPTH
    */
-  maxCommentThreadDepth: envPositiveNumber('NPC_MAX_COMMENT_THREAD_DEPTH', 3),
+  maxCommentThreadDepth: envPositiveInt('NPC_MAX_COMMENT_THREAD_DEPTH', 3),
 
   /**
    * Base probability that the post author replies to a comment on their post.
@@ -400,7 +300,7 @@ export const NPC_ENGAGEMENT_CONFIG = {
    * @default 20 (increased for broader engagement)
    * @env NPC_ENGAGEMENT_ACTORS_TO_SAMPLE
    */
-  actorsToSample: envPositiveNumber('NPC_ENGAGEMENT_ACTORS_TO_SAMPLE', 20),
+  actorsToSample: envPositiveInt('NPC_ENGAGEMENT_ACTORS_TO_SAMPLE', 20),
 
   /**
    * Number of recent posts to consider for engagement.
@@ -408,7 +308,7 @@ export const NPC_ENGAGEMENT_CONFIG = {
    * @default 40 (increased for more engagement opportunities)
    * @env NPC_ENGAGEMENT_POSTS_TO_CONSIDER
    */
-  postsToConsider: envPositiveNumber('NPC_ENGAGEMENT_POSTS_TO_CONSIDER', 40),
+  postsToConsider: envPositiveInt('NPC_ENGAGEMENT_POSTS_TO_CONSIDER', 40),
 } as const;
 
 // =============================================================================
@@ -430,7 +330,7 @@ export const NPC_DIVERSITY_CONFIG = {
    * @default 1 (TikTok rule: never consecutive same type)
    * @env NPC_MAX_CONSECUTIVE_SAME_ACTION
    */
-  maxConsecutiveSameAction: envPositiveNumber(
+  maxConsecutiveSameAction: envPositiveInt(
     'NPC_MAX_CONSECUTIVE_SAME_ACTION',
     1
   ),
@@ -456,7 +356,7 @@ export const NPC_DIVERSITY_CONFIG = {
    * @default 5
    * @env NPC_MAX_RECENT_ACTIONS
    */
-  maxRecentActions: envPositiveNumber('NPC_MAX_RECENT_ACTIONS', 5),
+  maxRecentActions: envPositiveInt('NPC_MAX_RECENT_ACTIONS', 5),
 } as const;
 
 // =============================================================================
@@ -492,7 +392,7 @@ export const NPC_SOCIAL_ACTIONS_CONFIG = {
    * @default 1 (lowered - engage players more readily)
    * @env NPC_MIN_INTERACTIONS_FOR_ACTION
    */
-  minInteractionsForAction: envPositiveNumber(
+  minInteractionsForAction: envPositiveInt(
     'NPC_MIN_INTERACTIONS_FOR_ACTION',
     1
   ),
@@ -563,7 +463,7 @@ export const NPC_GROUP_DYNAMICS_CONFIG = {
    * @default 3
    * @env NPC_MIN_GROUP_SIZE
    */
-  minGroupSize: envPositiveNumber('NPC_MIN_GROUP_SIZE', 3),
+  minGroupSize: envPositiveInt('NPC_MIN_GROUP_SIZE', 3),
 
   /**
    * Maximum group size before NPCs stop joining.
@@ -571,7 +471,7 @@ export const NPC_GROUP_DYNAMICS_CONFIG = {
    * @default 12
    * @env NPC_MAX_GROUP_SIZE
    */
-  maxGroupSize: envPositiveNumber('NPC_MAX_GROUP_SIZE', 12),
+  maxGroupSize: envPositiveInt('NPC_MAX_GROUP_SIZE', 12),
 
   /**
    * Ideal group size (influences join/leave decisions).
@@ -579,7 +479,7 @@ export const NPC_GROUP_DYNAMICS_CONFIG = {
    * @default 7
    * @env NPC_IDEAL_GROUP_SIZE
    */
-  idealGroupSize: envPositiveNumber('NPC_IDEAL_GROUP_SIZE', 7),
+  idealGroupSize: envPositiveInt('NPC_IDEAL_GROUP_SIZE', 7),
 
   /**
    * When enabled, users with **zero** active group memberships will be auto-joined
@@ -603,7 +503,7 @@ export const NPC_GROUP_DYNAMICS_CONFIG = {
    * @default 25
    * @env NPC_AUTO_JOIN_EMPTY_USERS_BATCH_SIZE
    */
-  autoJoinEmptyUsersBatchSize: envPositiveNumber(
+  autoJoinEmptyUsersBatchSize: envPositiveInt(
     'NPC_AUTO_JOIN_EMPTY_USERS_BATCH_SIZE',
     25
   ),
@@ -883,7 +783,7 @@ export const NPC_TICK_CONFIG = {
    * @default 12 (increased for better diversity across NPCs)
    * @env NPC_TICK_BATCH_SIZE
    */
-  batchSize: envPositiveNumber('NPC_TICK_BATCH_SIZE', 12),
+  batchSize: envPositiveInt('NPC_TICK_BATCH_SIZE', 12),
 
   /**
    * Maximum consecutive errors before aborting tick (circuit breaker).
@@ -891,7 +791,7 @@ export const NPC_TICK_CONFIG = {
    * @default 5
    * @env NPC_TICK_MAX_ERRORS
    */
-  maxConsecutiveErrors: envPositiveNumber('NPC_TICK_MAX_ERRORS', 5),
+  maxConsecutiveErrors: envPositiveInt('NPC_TICK_MAX_ERRORS', 5),
 
   /**
    * Maximum number of NPC discourse replies to generate per tick.
@@ -900,7 +800,7 @@ export const NPC_TICK_CONFIG = {
    * @default 6
    * @env NPC_MAX_DISCOURSE_REPLIES
    */
-  maxDiscourseReplies: envPositiveNumber('NPC_MAX_DISCOURSE_REPLIES', 6),
+  maxDiscourseReplies: envPositiveInt('NPC_MAX_DISCOURSE_REPLIES', 6),
 } as const;
 
 // =============================================================================
@@ -934,14 +834,12 @@ export type NPCActivityConfig = typeof NPC_ACTIVITY_CONFIG;
 // =============================================================================
 
 /**
- * Preset configurations for common use cases.
- * These can be applied by setting NPC_ACTIVITY_PRESET environment variable.
+ * Reference environment-variable value sets for common use cases.
  *
- * @example
- * ```bash
- * # Use the "active" preset for more NPC activity
- * NPC_ACTIVITY_PRESET=active
- * ```
+ * NOTE: presets are NOT applied automatically — there is no
+ * NPC_ACTIVITY_PRESET switch, and preset values are not the runtime defaults
+ * (those are the literals in NPC_ACTIVITY_CONFIG above). To use one, copy its
+ * values into the environment (see getPreset) before this module loads.
  */
 export const NPC_ACTIVITY_PRESETS = {
   /**

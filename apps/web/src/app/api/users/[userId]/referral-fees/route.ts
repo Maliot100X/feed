@@ -56,13 +56,14 @@
  */
 
 import {
+  AuthorizationError,
   authenticate,
   requireUserByIdentifier,
   successResponse,
   withErrorHandling,
 } from '@feed/api';
 import { FeeService } from '@feed/engine';
-import { logger } from '@feed/shared';
+import { logger, UserIdParamSchema } from '@feed/shared';
 import type { NextRequest } from 'next/server';
 
 export const GET = withErrorHandling(
@@ -71,16 +72,16 @@ export const GET = withErrorHandling(
     context: { params: Promise<{ userId: string }> }
   ) => {
     const authUser = await authenticate(request);
-    const { userId } = await context.params;
+    const { userId } = UserIdParamSchema.parse(await context.params);
 
-    // Verify authorization
-    const user = await requireUserByIdentifier(userId, {
-      id: true,
-      totalFeesEarned: true,
-    });
+    const user = await requireUserByIdentifier(userId, { id: true });
 
     if (authUser.userId !== user.id) {
-      throw new Error('Unauthorized');
+      throw new AuthorizationError(
+        'You can only access your own referral fees',
+        'referral-fees',
+        'read'
+      );
     }
 
     // Get referral earnings

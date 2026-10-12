@@ -8,6 +8,7 @@
 import { db, desc, trendingTags } from '@feed/db';
 import { logger } from '@feed/shared';
 import {
+  getCurrentTrendingTags,
   getRelatedTags,
   getTagStatistics,
   storeTrendingTags,
@@ -52,10 +53,11 @@ function calculateTrendingScore(
   // Base score from total post count
   let score = postCount;
 
-  // Time decay factor (exponential decay over 7 days)
-  const avgPostAge = (windowEnd.getTime() - oldestPostDate.getTime()) / 2;
-  const daysSinceAvgPost = avgPostAge / (1000 * 60 * 60 * 24);
-  const decayFactor = Math.exp(-daysSinceAvgPost / 3); // Decay half-life of 3 days
+  // Time decay factor. Age proxy: half the age of the oldest post in the
+  // window (not a true average). exp(-t/3) has a 3-day e-folding time.
+  const ageProxyMs = (windowEnd.getTime() - oldestPostDate.getTime()) / 2;
+  const ageProxyDays = ageProxyMs / (1000 * 60 * 60 * 24);
+  const decayFactor = Math.exp(-ageProxyDays / 3);
   score *= decayFactor;
 
   // Velocity boost (recent activity)
@@ -130,8 +132,10 @@ export async function calculateTrendingTags(): Promise<void> {
     ),
   }));
 
-  // Sort by score and assign ranks
-  scoredTags.sort((a, b) => b.score - a.score);
+  // Sort by score (deterministic tiebreak on tag name) and assign ranks
+  scoredTags.sort(
+    (a, b) => b.score - a.score || a.tagName.localeCompare(b.tagName)
+  );
 
   // Take top 20 trending tags
   const topTrending = scoredTags.slice(0, 20);
@@ -139,9 +143,9 @@ export async function calculateTrendingTags(): Promise<void> {
   // Get related tags for context (async)
   const trendingWithContext = await Promise.all(
     topTrending.map(async (tag, index) => {
-      // Only add "Trending with" context for some tags
+      // "Trending with" context for the top 10 tags
       let relatedContext: string | undefined;
-      if (index < 10 && Math.random() > 0.5) {
+      if (index < 10) {
         const relatedTags = await getRelatedTags(tag.tagId, 1);
         if (relatedTags.length > 0) {
           relatedContext = `Trending with ${relatedTags[0]}`;
@@ -199,29 +203,18 @@ export async function calculateTrendingIfNeeded(): Promise<boolean> {
  * injected into agent prompts to make posts more relevant and timely.
  */
 export async function getTrendingPromptContext(): Promise<string> {
-  const topTrending = await db
-    .select({
-      tagId: trendingTags.tagId,
-      score: trendingTags.score,
-      postCount: trendingTags.postCount,
-      rank: trendingTags.rank,
-      relatedContext: trendingTags.relatedContext,
-    })
-    .from(trendingTags)
-    .orderBy(trendingTags.rank)
-    .limit(10);
+  // Only the latest calculation; rows whose tag no longer exists are omitted
+  // rather than shown with a fabricated label.
+  const topTrending = (await getCurrentTrendingTags(10)).filter(
+    (trend) => trend.tag
+  );
 
   if (topTrending.length === 0) {
     return '';
   }
 
-  // Get tag names from tag service
-  const tagIds = topTrending.map((t) => t.tagId);
-  const tagDetails = await getTagDetails(tagIds);
-
   const trendingLines = topTrending.map((trend) => {
-    const tag = tagDetails.get(trend.tagId);
-    const name = tag?.displayName || tag?.name || `#tag-${trend.tagId}`;
+    const name = trend.tag.displayName || trend.tag.name;
     const context = trend.relatedContext ? ` (${trend.relatedContext})` : '';
     const postInfo =
       trend.postCount > 1 ? ` - ${trend.postCount} posts` : ' - 1 post';
@@ -235,36 +228,4 @@ ${trendingLines.join('\n')}
 Consider referencing these trends in your post if relevant to your perspective.
 =======================================================
 `;
-}
-
-/**
- * Get tag details by IDs (helper for trending context)
- */
-async function getTagDetails(
-  tagIds: string[]
-): Promise<Map<string, { name: string; displayName: string | null }>> {
-  if (tagIds.length === 0) {
-    return new Map();
-  }
-
-  // Import tags table dynamically to avoid circular imports
-  const { tags, inArray } = await import('@feed/db');
-
-  const tagRows = await db
-    .select({
-      id: tags.id,
-      name: tags.name,
-      displayName: tags.displayName,
-    })
-    .from(tags)
-    .where(inArray(tags.id, tagIds));
-
-  const result = new Map<
-    string,
-    { name: string; displayName: string | null }
-  >();
-  for (const row of tagRows) {
-    result.set(row.id, { name: row.name, displayName: row.displayName });
-  }
-  return result;
 }

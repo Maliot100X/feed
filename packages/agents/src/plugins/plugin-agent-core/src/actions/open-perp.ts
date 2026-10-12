@@ -15,6 +15,7 @@ import type {
 import { PerpDbAdapter, PerpMarketService } from '@feed/core/markets/perps';
 import {
   createPerpPriceImpactPort,
+  createUserWalletAdapter,
   FEE_CONFIG,
   WalletService,
 } from '@feed/engine';
@@ -105,9 +106,9 @@ export const openPerpAction: Action = {
       | 'SHORT'
       | undefined;
     const amount = actionParams?.amount;
-    const leverage = Math.min(Math.max(actionParams?.leverage ?? 1, 1), 10);
+    const requestedLeverage = actionParams?.leverage ?? 1;
 
-    if (!ticker || !side || !amount) {
+    if (!ticker || !side || amount === undefined) {
       return {
         success: false,
         text: 'Missing parameters. Call CHECK_PERPS first to get ticker.',
@@ -123,13 +124,27 @@ export const openPerpAction: Action = {
       };
     }
 
-    if (amount <= 0) {
+    if (typeof amount !== 'number' || !Number.isFinite(amount) || amount <= 0) {
       return {
         success: false,
-        text: 'Amount must be greater than 0.',
+        text: 'Amount must be a finite number greater than 0.',
         error: 'Invalid amount',
       };
     }
+
+    if (
+      typeof requestedLeverage !== 'number' ||
+      !Number.isFinite(requestedLeverage)
+    ) {
+      return {
+        success: false,
+        text: 'Leverage must be a number between 1 and 10.',
+        error: 'Invalid leverage',
+      };
+    }
+    const leverage = Math.min(Math.max(requestedLeverage, 1), 10);
+    // `amount` is collateral (margin); the market service takes notional size.
+    const notionalSize = amount * leverage;
 
     try {
       // Check balance
@@ -143,69 +158,9 @@ export const openPerpAction: Action = {
         };
       }
 
-      // Create perp service with wallet adapter
-      const walletAdapter = {
-        debit: async ({
-          userId,
-          amount,
-          reason,
-          description,
-          relatedId,
-        }: {
-          userId: string;
-          amount: number;
-          reason: string;
-          description?: string;
-          relatedId?: string;
-        }) => {
-          await WalletService.debit(
-            userId,
-            amount,
-            reason,
-            description ?? '',
-            relatedId
-          );
-        },
-        credit: async ({
-          userId,
-          amount,
-          reason,
-          description,
-          relatedId,
-        }: {
-          userId: string;
-          amount: number;
-          reason: string;
-          description?: string;
-          relatedId?: string;
-        }) => {
-          await WalletService.credit(
-            userId,
-            amount,
-            reason,
-            description ?? '',
-            relatedId
-          );
-        },
-        recordPnL: async ({
-          userId,
-          pnl,
-          reason,
-          relatedId,
-        }: {
-          userId: string;
-          pnl: number;
-          reason: string;
-          relatedId?: string;
-        }) => {
-          await WalletService.recordPnL(userId, pnl, reason, relatedId);
-        },
-        getBalance: WalletService.getBalance,
-      };
-
       const service = new PerpMarketService({
         db: new PerpDbAdapter(),
-        wallet: walletAdapter,
+        wallet: createUserWalletAdapter(),
         fees: {
           tradingFeeRate: FEE_CONFIG.TRADING_FEE_RATE,
           platformShare: FEE_CONFIG.PLATFORM_SHARE,
@@ -234,23 +189,33 @@ export const openPerpAction: Action = {
         userId: agentUserId,
         ticker: market.ticker,
         side: side.toLowerCase() as 'long' | 'short',
-        size: amount,
+        size: notionalSize,
         leverage,
       });
 
-      // Record trade for UI/performance tracking
-      await agentPnLService.recordTrade({
-        agentId: agentUserId,
-        userId: agentUserId,
-        marketType: 'perp',
-        ticker: market.ticker,
-        action: 'open',
-        side: side.toLowerCase() as 'long' | 'short',
-        amount,
-        price: tradeResult.entryPrice,
-        reasoning:
-          (state?.data?.thought as string) || 'Chat-initiated perp trade',
-      });
+      // Record trade for UI/performance tracking. The position is already
+      // committed, so an analytics failure must not report the trade as failed
+      // (which would invite a duplicate retry).
+      await agentPnLService
+        .recordTrade({
+          agentId: agentUserId,
+          userId: agentUserId,
+          marketType: 'perp',
+          ticker: market.ticker,
+          action: 'open',
+          side: side.toLowerCase() as 'long' | 'short',
+          amount,
+          price: tradeResult.entryPrice,
+          reasoning:
+            (state?.data?.thought as string) || 'Chat-initiated perp trade',
+        })
+        .catch((error: Error) => {
+          logger.error('[OPEN_PERP] Failed to record trade analytics', {
+            agentUserId,
+            positionId: tradeResult.positionId,
+            error: error.message,
+          });
+        });
 
       logger.info('[OPEN_PERP] Position opened', {
         agentUserId,
@@ -264,12 +229,13 @@ export const openPerpAction: Action = {
 
       return {
         success: true,
-        text: `Opened ${leverage}x ${side} on ${market.ticker} at $${tradeResult.entryPrice.toFixed(2)}. Size: $${amount}.`,
+        text: `Opened ${leverage}x ${side} on ${market.ticker} at $${tradeResult.entryPrice.toFixed(2)}. Collateral: $${amount}, size: $${notionalSize}.`,
         data: {
           positionId: tradeResult.positionId,
           ticker: market.ticker,
           side,
           amount,
+          size: notionalSize,
           leverage,
           entryPrice: tradeResult.entryPrice,
         },

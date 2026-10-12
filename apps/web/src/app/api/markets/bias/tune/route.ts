@@ -83,7 +83,7 @@ import { NextResponse } from 'next/server';
 import { z } from 'zod';
 
 const TuneBiasSchema = z.object({
-  entityId: z.string().min(1, 'entityId is required'),
+  entityId: z.string().trim().min(1, 'entityId is required').max(200),
   strength: z.number().min(0).max(1),
   decayRate: z.number().min(0).max(1).optional(),
 });
@@ -91,10 +91,7 @@ const TuneBiasSchema = z.object({
 export const POST = withErrorHandling(async (request: NextRequest) => {
   await requireAdmin(request);
 
-  const json = await request.json();
-  const parsed = TuneBiasSchema.parse(json);
-
-  const body = parsed;
+  const body = TuneBiasSchema.parse(await request.json());
 
   if (body.strength === 0) {
     biasEngine.removeBias(body.entityId);
@@ -114,7 +111,20 @@ export const POST = withErrorHandling(async (request: NextRequest) => {
     });
   }
 
-  biasEngine.tuneBiasStrength(body.entityId, body.strength, body.decayRate);
+  const tuned = biasEngine.tuneBiasStrength(
+    body.entityId,
+    body.strength,
+    body.decayRate
+  );
+  if (!tuned) {
+    return NextResponse.json(
+      {
+        success: false,
+        error: `No active bias for entity: ${body.entityId}`,
+      },
+      { status: 404 }
+    );
+  }
 
   const updatedBias = biasEngine.getBiasAdjustment(body.entityId);
 

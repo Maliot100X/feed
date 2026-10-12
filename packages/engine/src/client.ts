@@ -27,27 +27,11 @@ export {
   calculatePerpPositionMarketValue,
   toNumber,
 } from './portfolio-valuation';
-// Concentrated Liquidity (pure math)
-export {
-  type AddPositionParams,
-  ConcentratedLiquidityPool,
-  type ConcentratedPosition,
-  type ConcentratedTradeResult,
-  calculateOptimalRange,
-  createPoolFromMarket,
-  estimateFeeAPR,
-  type PoolConfig,
-  type PoolState,
-  type RemovePositionResult,
-} from './prediction-concentrated-liquidity';
 // Reputation calculations that are pure functions (no DB)
 // Import directly from the pnl-normalizer file to avoid pulling in server-side deps from the barrel export
 export {
-  calculateAverageROI,
   calculateConfidenceScore,
-  calculateSharpeRatio,
   calculateWinRate,
-  denormalizePnL,
   getTrustLevel,
   normalizePnL,
 } from './reputation/pnl-normalizer';
@@ -78,6 +62,8 @@ export type {
   TradingDecision,
   TradingExecutionResult,
 } from './types/market-decisions';
+// Portfolio PnL type (client-safe type module, no runtime deps)
+export type { PortfolioPnLSnapshot } from './types/portfolio';
 // Shared Game Types (re-exported from types, no server deps)
 export type {
   Actor,
@@ -128,21 +114,6 @@ export {
   sampleRandom,
   shuffleArray,
 } from './utils/randomization';
-
-// Portfolio PnL type (interface only, no runtime deps - defined here to avoid importing from server-only file)
-export interface PortfolioPnLSnapshot {
-  lifetimePnL: number;
-  netContributions: number;
-  netPeerTransfers: number;
-  totalDeposited: number;
-  totalWithdrawn: number;
-  availableBalance: number;
-  unrealizedPerpPnL: number;
-  unrealizedPredictionPnL: number;
-  totalUnrealizedPnL: number;
-  totalPnL: number;
-  accountEquity: number;
-}
 
 export interface PortfolioBreakdownSnapshot {
   wallet: number;

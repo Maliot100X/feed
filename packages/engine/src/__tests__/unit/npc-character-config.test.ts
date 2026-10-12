@@ -8,6 +8,7 @@
 import { describe, expect, it } from 'vitest';
 import {
   checkVoiceConsistency,
+  deriveVoicePatterns,
   getActorRivals,
   getCharacterConfig,
   getCharacterConfigOrDefault,
@@ -102,8 +103,8 @@ describe('NPC Character Config', () => {
         'Any content here.'
       );
 
-      expect(result.matchesVoice).toBe(true); // No patterns = always matches
-      expect(result.voiceScore).toBe(1);
+      expect(result.matchesVoice).toBe(true); // No patterns = not blocking
+      expect(result.voiceScore).toBeNull(); // ...but voice is unmeasured
     });
   });
 
@@ -173,17 +174,24 @@ describe('NPC Character Config', () => {
       expect(templates).toEqual([]);
     });
 
-    it('should shuffle templates (non-deterministic order)', () => {
-      // Run multiple times and check we sometimes get different orders
-      const results = new Set<string>();
-      for (let i = 0; i < 10; i++) {
-        const templates = getTemplatePosts('trump-terminal', 3);
-        results.add(templates.join('|'));
-      }
+    it('orders templates by the injected RNG', () => {
+      const all = getTemplatePosts('trump-terminal', 100, () => 0.999);
+      expect(all.length).toBeGreaterThan(1);
 
-      // With shuffling, we should get at least 2 different orderings
-      // (This could theoretically fail but is very unlikely)
-      expect(results.size).toBeGreaterThanOrEqual(1);
+      // Same RNG sequence -> same order
+      const seq = () => {
+        let i = 0;
+        const values = [0.1, 0.7, 0.3, 0.9, 0.5];
+        return () => values[i++ % values.length]!;
+      };
+      expect(getTemplatePosts('trump-terminal', 3, seq())).toEqual(
+        getTemplatePosts('trump-terminal', 3, seq())
+      );
+
+      // Different RNG -> different order of the full set
+      const reversed = getTemplatePosts('trump-terminal', 100, () => 0);
+      expect(reversed).not.toEqual(all);
+      expect([...reversed].sort()).toEqual([...all].sort());
     });
   });
 
@@ -218,6 +226,45 @@ describe('NPC Character Config', () => {
       expect(chars).toContain('trump-terminal');
       expect(chars).toContain('dairiio-amodei');
       expect(chars.length).toBeGreaterThan(10);
+    });
+  });
+
+  describe('hardening', () => {
+    it('does not treat "no caps" style as an all-caps requirement', () => {
+      expect(deriveVoicePatterns('no caps, lowercase only')).toEqual([]);
+      expect(deriveVoicePatterns('Avoid all caps')).toEqual([]);
+      expect(deriveVoicePatterns('ALL CAPS frequently')).toHaveLength(1);
+    });
+
+    it('empty content is unmeasured voice', () => {
+      expect(checkVoiceConsistency('kanyai-west', '   ').voiceScore).toBeNull();
+    });
+
+    it('rejects negative or fractional template counts', () => {
+      expect(() => getTemplatePosts('kanyai-west', -1)).toThrow(RangeError);
+      expect(() => getTemplatePosts('kanyai-west', 1.5)).toThrow(RangeError);
+      expect(getTemplatePosts('kanyai-west', 0)).toEqual([]);
+    });
+
+    it('returned configs and rivals cannot mutate shared state', () => {
+      const config = getCharacterConfig('trump-terminal');
+      config.templatePosts.length = 0;
+      config.rivals.push('someone-else');
+      expect(
+        getCharacterConfig('trump-terminal').templatePosts.length
+      ).toBeGreaterThan(0);
+      expect(getActorRivals('trump-terminal')).not.toContain('someone-else');
+
+      const unknown = getCharacterConfigOrDefault('unknown-actor-xyz');
+      unknown.domains.push('ai');
+      expect(getCharacterConfigOrDefault('unknown-actor-xyz').domains).toEqual(
+        []
+      );
+    });
+
+    it('rival lists contain no duplicates', () => {
+      const rivals = getActorRivals('trump-terminal');
+      expect(new Set(rivals).size).toBe(rivals.length);
     });
   });
 });

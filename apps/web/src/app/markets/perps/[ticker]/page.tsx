@@ -4,24 +4,18 @@ export default async function PerpsMarketRedirectPage({
   params,
   searchParams,
 }: {
-  params: Promise<{ ticker?: string | string[] }>;
-  searchParams: Promise<Record<string, string | string[] | undefined>>;
+  params: Promise<{ ticker: string }>;
+  searchParams: Promise<{ side?: string | string[] }>;
 }) {
-  const resolvedParams = await params;
-  const resolvedSearchParams = await searchParams;
+  const [{ ticker }, { side }] = await Promise.all([params, searchParams]);
 
-  const tickerParam = resolvedParams.ticker;
-  const ticker = Array.isArray(tickerParam) ? tickerParam[0] : tickerParam;
-
-  const query = new URLSearchParams();
-  query.set('filter', 'perp');
-  query.set('marketKind', 'perp');
-  if (ticker) query.set('marketId', ticker);
-
-  const side = resolvedSearchParams.side;
-  const sideValue = Array.isArray(side) ? side[0] : side;
-  if (sideValue === 'long' || sideValue === 'short') {
-    query.set('side', sideValue);
+  const query = new URLSearchParams({
+    filter: 'perp',
+    marketKind: 'perp',
+    marketId: ticker,
+  });
+  if (side === 'long' || side === 'short') {
+    query.set('side', side);
   }
 
   redirect(`/markets?${query.toString()}`);

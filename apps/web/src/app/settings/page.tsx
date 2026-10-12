@@ -21,7 +21,7 @@ import {
 } from 'lucide-react';
 import { useRouter, useSearchParams } from 'next/navigation';
 import { useTheme } from 'next-themes';
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { LoginButton } from '@/components/auth/LoginButton';
 import { LinkSocialAccountsModal } from '@/components/profile/LinkSocialAccountsModal';
 import { ApiKeysTab } from '@/components/settings/ApiKeysTab';
@@ -72,25 +72,15 @@ export default function SettingsPage() {
   const searchParams = useSearchParams();
   const { ready, authenticated, refresh, getAccessToken } = useAuth();
   const { user, setUser } = useAuthStore();
-  const [activeTab, setActiveTab] = useState(() => {
-    // Check for tab parameter in URL
-    const tab = searchParams?.get('tab');
-    return tab || 'profile';
-  });
-
-  // Sync tab changes with URL
+  // Tab selection is derived from the URL (validated below once `tabs` is
+  // known) so back/forward, param removal and unknown values all resolve
+  // consistently without a local copy that can drift from the URL.
+  const requestedTab = searchParams?.get('tab') ?? null;
   const handleTabChange = (tabId: string) => {
-    setActiveTab(tabId);
-    router.replace(`/settings?tab=${tabId}`, { scroll: false });
+    router.replace(`/settings?tab=${encodeURIComponent(tabId)}`, {
+      scroll: false,
+    });
   };
-
-  // Sync tab when URL changes (e.g., browser back/forward)
-  useEffect(() => {
-    const tab = searchParams?.get('tab');
-    if (tab && tab !== activeTab) {
-      setActiveTab(tab);
-    }
-  }, [searchParams, activeTab]);
 
   const [saving, setSaving] = useState(false);
   const [saved, setSaved] = useState(false);
@@ -162,6 +152,22 @@ export default function SettingsPage() {
     return baseTabs;
   }, [billingEnabled]);
 
+  const activeTab =
+    requestedTab && tabs.some((tab) => tab.id === requestedTab)
+      ? requestedTab
+      : 'profile';
+
+  // Clear the "Saved" indicator timer on unmount.
+  const savedTimerRef = useRef<number | null>(null);
+  useEffect(
+    () => () => {
+      if (savedTimerRef.current !== null) {
+        window.clearTimeout(savedTimerRef.current);
+      }
+    },
+    []
+  );
+
   // Wait for hydration to avoid SSR mismatch
   useEffect(() => {
     setMounted(true);
@@ -193,6 +199,19 @@ export default function SettingsPage() {
   };
 
   const usernameChangeLimit = getUsernameChangeTimeRemaining();
+
+  // Re-render each minute while the username cooldown is active so the
+  // remaining time (and the eventual unlock) stays current.
+  const [, setCooldownTick] = useState(0);
+  const cooldownActive = usernameChangeLimit?.canChange === false;
+  useEffect(() => {
+    if (!cooldownActive) return;
+    const interval = window.setInterval(
+      () => setCooldownTick((tick) => tick + 1),
+      60_000
+    );
+    return () => window.clearInterval(interval);
+  }, [cooldownActive]);
 
   // Sync profile fields when user data changes
   useEffect(() => {
@@ -286,10 +305,14 @@ export default function SettingsPage() {
       wallet: payload.visibility.wallet ?? socialVisibility.wallet,
     });
 
+    // Patch the *current* store user (not the captured one) and only if the
+    // account hasn't changed while the request was in flight.
+    const latest = useAuthStore.getState().user;
+    if (!latest || latest.id !== user.id) return;
     setUser({
-      ...user,
-      showTwitterPublic: payload.visibility.twitter ?? user.showTwitterPublic,
-      showWalletPublic: payload.visibility.wallet ?? user.showWalletPublic,
+      ...latest,
+      showTwitterPublic: payload.visibility.twitter ?? latest.showTwitterPublic,
+      showWalletPublic: payload.visibility.wallet ?? latest.showWalletPublic,
     });
   };
 
@@ -362,22 +385,27 @@ export default function SettingsPage() {
     });
     setErrorMessage(null);
 
+    // Patch the *current* store user (not the captured one) and only if the
+    // account hasn't changed while the request was in flight.
+    const latest = useAuthStore.getState().user;
+    if (!latest || latest.id !== user.id) return;
     setUser({
-      ...user,
-      email: payload.email ?? user.email,
-      emailVerified: payload.emailVerified ?? user.emailVerified,
+      ...latest,
+      email: payload.email ?? latest.email,
+      emailVerified: payload.emailVerified ?? latest.emailVerified,
       emailNotificationsEnabled:
-        payload.preferences.enabled ?? user.emailNotificationsEnabled,
+        payload.preferences.enabled ?? latest.emailNotificationsEnabled,
       emailNotificationsRealtime:
-        payload.preferences.realtime ?? user.emailNotificationsRealtime,
+        payload.preferences.realtime ?? latest.emailNotificationsRealtime,
       emailNotificationsDailySummary:
-        payload.preferences.dailySummary ?? user.emailNotificationsDailySummary,
+        payload.preferences.dailySummary ??
+        latest.emailNotificationsDailySummary,
       emailNotificationsWeeklySummary:
         payload.preferences.weeklySummary ??
-        user.emailNotificationsWeeklySummary,
+        latest.emailNotificationsWeeklySummary,
       emailNotificationsMonthlySummary:
         payload.preferences.monthlySummary ??
-        user.emailNotificationsMonthlySummary,
+        latest.emailNotificationsMonthlySummary,
     });
   };
 
@@ -387,16 +415,19 @@ export default function SettingsPage() {
     setSaving(true);
     setSaved(false);
     setErrorMessage(null);
+    try {
+      await saveProfile(user.id);
+    } finally {
+      setSaving(false);
+    }
+  };
 
+  const saveProfile = async (userId: string) => {
     const trimmedDisplayName = (displayName ?? '').trim();
     const trimmedUsername = (username ?? '').trim();
     const trimmedBio = (bio ?? '').trim();
 
-    // Backend now handles ALL signing automatically - no user popups!
-    // This includes username changes, bio updates, display name changes.
-    // The server signs the transaction on-chain for a seamless UX.
-
-    const token = await getAccessToken();
+    const token = await getAccessToken().catch(() => null);
     const headers: HeadersInit = {
       'Content-Type': 'application/json',
     };
@@ -418,7 +449,6 @@ export default function SettingsPage() {
           'SettingsPage'
         );
         setErrorMessage('Failed to upload profile image.');
-        setSaving(false);
         return;
       }
     }
@@ -433,7 +463,6 @@ export default function SettingsPage() {
           'SettingsPage'
         );
         setErrorMessage('Failed to upload cover image.');
-        setSaving(false);
         return;
       }
     }
@@ -441,7 +470,7 @@ export default function SettingsPage() {
     let response: Response;
     try {
       response = await fetch(
-        apiUrl(`/api/users/${encodeURIComponent(user.id)}/update-profile`),
+        apiUrl(`/api/users/${encodeURIComponent(userId)}/update-profile`),
         {
           method: 'POST',
           headers,
@@ -463,31 +492,45 @@ export default function SettingsPage() {
         'SettingsPage'
       );
       setErrorMessage('Unable to save your changes.');
-      setSaving(false);
       return;
     }
 
-    const payload = await response.json().catch(() => ({}));
-    if (!response.ok) {
-      const message = payload?.error || 'Unable to save your changes.';
+    const payload = (await response.json().catch(() => ({}))) as {
+      user?: {
+        username: string;
+        displayName: string;
+        bio: string;
+        profileImageUrl?: string | null;
+        coverImageUrl?: string | null;
+        usernameChangedAt?: string | null;
+        referralCode?: string;
+      };
+      error?: { message?: string } | string;
+    };
+    if (!response.ok || !payload.user) {
+      // API errors are `{ error: { message } }`; never render the object.
+      const message =
+        (typeof payload.error === 'string'
+          ? payload.error
+          : payload.error?.message) || 'Unable to save your changes.';
       setErrorMessage(message);
       logger.error(
         'Failed to save profile settings',
-        { error: message },
+        { error: message, status: response.status },
         'SettingsPage'
       );
-      setSaving(false);
       return;
     }
 
-    if (payload.user) {
+    const latest = useAuthStore.getState().user;
+    if (latest && latest.id === userId) {
       setUser({
-        ...user,
+        ...latest,
         username: payload.user.username,
         displayName: payload.user.displayName,
         bio: payload.user.bio,
-        profileImageUrl: payload.user.profileImageUrl ?? user.profileImageUrl,
-        coverImageUrl: payload.user.coverImageUrl ?? user.coverImageUrl,
+        profileImageUrl: payload.user.profileImageUrl ?? latest.profileImageUrl,
+        coverImageUrl: payload.user.coverImageUrl ?? latest.coverImageUrl,
         usernameChangedAt: payload.user.usernameChangedAt,
         referralCode: payload.user.referralCode,
       });
@@ -497,9 +540,11 @@ export default function SettingsPage() {
     setCoverImage({ file: null, preview: null });
 
     setSaved(true);
-    setTimeout(() => setSaved(false), 3000);
+    if (savedTimerRef.current !== null) {
+      window.clearTimeout(savedTimerRef.current);
+    }
+    savedTimerRef.current = window.setTimeout(() => setSaved(false), 3000);
     await refresh().catch(() => undefined);
-    setSaving(false);
   };
 
   if (!ready) {

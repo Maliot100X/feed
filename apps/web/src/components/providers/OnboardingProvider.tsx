@@ -321,60 +321,6 @@ export function OnboardingProvider({
     loadingProfile,
   ]);
 
-  useEffect(() => {
-    if (typeof window === 'undefined' || !authenticated) return;
-
-    const params = new URLSearchParams(window.location.search);
-    const socialImport = params.get('social_import');
-    const dataParam = params.get('data');
-
-    if (socialImport && dataParam) {
-      try {
-        // URLSearchParams already decoded the value; decoding again corrupts
-        // text containing '%'.
-        const parsed = JSON.parse(dataParam) as unknown;
-
-        if (
-          typeof parsed !== 'object' ||
-          parsed === null ||
-          !('platform' in parsed) ||
-          !('username' in parsed) ||
-          !('displayName' in parsed) ||
-          parsed.platform !== 'twitter' ||
-          typeof parsed.username !== 'string' ||
-          typeof parsed.displayName !== 'string'
-        ) {
-          logger.warn(
-            'Invalid social profile data structure from URL',
-            { socialImport },
-            'OnboardingProvider'
-          );
-          return;
-        }
-
-        const profileData = parsed as ImportedProfileData;
-        logger.info(
-          'Social profile data received from URL',
-          { platform: socialImport },
-          'OnboardingProvider'
-        );
-
-        setImportedProfileData(profileData);
-      } catch (parseError) {
-        logger.warn(
-          'Failed to parse social profile data from URL',
-          { error: parseError },
-          'OnboardingProvider'
-        );
-      }
-
-      const newUrl = new URL(window.location.href);
-      newUrl.searchParams.delete('social_import');
-      newUrl.searchParams.delete('data');
-      window.history.replaceState({}, '', newUrl.toString());
-    }
-  }, [authenticated]);
-
   const handleGuideComplete = useCallback(
     async (options?: { nextHref?: string }) => {
       if (guideCompleteInFlight.current) return;

@@ -66,6 +66,7 @@
 
 import {
   authenticate,
+  BadRequestError,
   BusinessLogicError,
   requireUserByIdentifier,
   withErrorHandling,
@@ -82,13 +83,17 @@ const FeedbackSubmitSchema = z
     toUserId: z.string().min(1, 'toUserId is required'),
     score: z.number().min(0).max(100).optional(),
     stars: z.number().int().min(1).max(5).optional(),
-    comment: z.string().max(5000).optional(),
+    // FeedbackForm sends `null` for an empty comment.
+    comment: z.string().max(5000).nullish(),
     category: z.string().min(1).optional(),
   })
-  .refine(({ score, stars }) => score !== undefined || stars !== undefined, {
-    message: 'Either score or stars must be provided',
-    path: ['score'],
-  });
+  .refine(
+    ({ score, stars }) => (score === undefined) !== (stars === undefined),
+    {
+      message: 'Provide exactly one of score or stars',
+      path: ['score'],
+    }
+  );
 
 export const POST = withErrorHandling(async (request: NextRequest) => {
   const authUser = await authenticate(request);
@@ -98,7 +103,10 @@ export const POST = withErrorHandling(async (request: NextRequest) => {
 
   const body = parsed;
 
-  const score = body.stars !== undefined ? body.stars * 20 : body.score!;
+  const score = body.stars !== undefined ? body.stars * 20 : body.score;
+  if (score === undefined) {
+    throw new BadRequestError('Provide exactly one of score or stars');
+  }
 
   const fromUser = await requireUserByIdentifier(authUser.userId);
   const toUser = await requireUserByIdentifier(body.toUserId);

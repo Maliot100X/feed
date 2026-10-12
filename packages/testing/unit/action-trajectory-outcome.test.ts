@@ -1,6 +1,7 @@
 import { expect, test } from 'bun:test';
 import type { Action, IAgentRuntime, Memory } from '@elizaos/core';
 import {
+  logLLMCallFromAction,
   type RuntimeTrajectoryLogger,
   setTrajectoryContext,
   wrapActionWithLogging,
@@ -49,4 +50,28 @@ test('action instrumentation preserves results and records explicit failures wit
     'no explicit outcome'
   );
   expect(records.at(-1)?.success).toBe(false);
+});
+
+test('LLM call logging keeps explicit zero temperature and token counts', () => {
+  const calls: Array<Parameters<RuntimeTrajectoryLogger['logLLMCall']>[1]> = [];
+  const logger: RuntimeTrajectoryLogger = {
+    startStep: () => 'step',
+    getCurrentStepId: () => 'step',
+    logLLMCall: (_step, call) => {
+      calls.push(call);
+    },
+    logProviderAccess: () => {},
+    completeStep: () => {},
+  };
+  logLLMCallFromAction(
+    { model: 'm', temperature: 0, promptTokens: 0, completionTokens: 0 },
+    logger,
+    'trajectory'
+  );
+  expect(calls[0]).toMatchObject({
+    model: 'm',
+    temperature: 0,
+    promptTokens: 0,
+    completionTokens: 0,
+  });
 });

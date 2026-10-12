@@ -272,44 +272,6 @@ describe('Full Agent Tick Integration Test', () => {
     });
   });
 
-  describe('2. NPC Portfolio Strategy', () => {
-    test('validates NPC portfolio strategies', async () => {
-      const { NPCPortfolioStrategy, StaticDataRegistry } = await import(
-        '@feed/engine'
-      );
-
-      const actors = StaticDataRegistry.getAllActors().slice(0, 5);
-
-      const strategies: Array<{
-        actorId: string;
-        actorName: string;
-        strategyName: string;
-        perpAllocation: number;
-        predictionAllocation: number;
-        maxLeverage: number;
-      }> = [];
-
-      for (const actor of actors) {
-        const strategy = NPCPortfolioStrategy.getStrategy(
-          actor.personality ?? null
-        );
-
-        strategies.push({
-          actorId: actor.id,
-          actorName: actor.name,
-          strategyName: strategy.name,
-          perpAllocation: strategy.assetAllocation.perps,
-          predictionAllocation: strategy.assetAllocation.predictions,
-          maxLeverage: strategy.riskParameters.maxLeverage,
-        });
-      }
-
-      writeOutput('agent-tick-strategies', strategies);
-
-      expect(strategies.length).toBeGreaterThan(0);
-    });
-  });
-
   describe('3. NPC Investment Manager', () => {
     test('validates NPC portfolio metrics', async () => {
       const { NPCInvestmentManager } = await import('@feed/engine');

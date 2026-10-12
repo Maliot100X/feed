@@ -16,7 +16,6 @@ import type {
   ChatMessage,
   Trajectory,
   TrajectoryGroup,
-  TrajectoryStep,
 } from './types';
 
 /**
@@ -34,26 +33,15 @@ export function toARTMessages(trajectory: Trajectory): ChatMessage[] {
     messages.push(systemMessage);
   }
 
-  // Extract messages from steps
+  // Extract messages from steps in recorded order. Every LLM call with both a
+  // prompt and a response becomes a user/assistant pair (no call is dropped);
+  // steps without recorded calls are excluded rather than synthesizing
+  // dialogue the model never saw or produced.
   for (const step of trajectory.steps) {
-    // Each step represents a user prompt (observation) + assistant response (action)
-
-    // 1. USER message: Environment observation + context
-    const userContent = buildUserMessage(step);
-    if (userContent) {
-      messages.push({
-        role: 'user',
-        content: userContent,
-      });
-    }
-
-    // 2. ASSISTANT message: Agent's decision/action
-    const assistantContent = buildAssistantMessage(step);
-    if (assistantContent) {
-      messages.push({
-        role: 'assistant',
-        content: assistantContent,
-      });
+    for (const call of step.llmCalls) {
+      if (!call.userPrompt || !call.response) continue;
+      messages.push({ role: 'user', content: call.userPrompt });
+      messages.push({ role: 'assistant', content: call.response });
     }
   }
 
@@ -75,71 +63,8 @@ function buildSystemMessage(trajectory: Trajectory): ChatMessage | null {
     };
   }
 
-  // Fallback: construct from metadata
-  const agentName = trajectory.metadata.agentName || 'Agent';
-  const goal = trajectory.metadata.goalDescription || 'make good decisions';
-
-  return {
-    role: 'system',
-    content: `You are ${agentName}, an autonomous agent. Your goal is to ${goal}.`,
-  };
-}
-
-/**
- * Build user message from step (environment observation)
- */
-function buildUserMessage(step: TrajectoryStep): string | null {
-  // Use the actual user prompt from LLM calls
-  const llmCall = step.llmCalls.find((call) => call.purpose === 'action');
-
-  if (llmCall?.userPrompt) {
-    return llmCall.userPrompt;
-  }
-
-  // Fallback: construct from environment state + provider data
-  const parts: string[] = [];
-
-  // Add environment state
-  parts.push(`Current state:`);
-  parts.push(`- Balance: $${step.environmentState.agentBalance}`);
-  parts.push(`- P&L: $${step.environmentState.agentPnL}`);
-  parts.push(`- Open Positions: ${step.environmentState.openPositions}`);
-
-  // Add provider data
-  for (const provider of step.providerAccesses) {
-    parts.push(`\n${provider.providerName} data:`);
-    parts.push(JSON.stringify(provider.data, null, 2));
-  }
-
-  parts.push(`\nWhat action should you take?`);
-
-  return parts.join('\n');
-}
-
-/**
- * Build assistant message from step (agent's action/decision)
- */
-function buildAssistantMessage(step: TrajectoryStep): string | null {
-  // Use the actual LLM response
-  const llmCall = step.llmCalls.find((call) => call.purpose === 'action');
-
-  if (llmCall?.response) {
-    return llmCall.response;
-  }
-
-  // Fallback: construct from action
-  const action = step.action;
-  const parts: string[] = [];
-
-  parts.push(`I will ${action.actionType}.`);
-
-  if (action.reasoning) {
-    parts.push(`Reasoning: ${action.reasoning}`);
-  }
-
-  parts.push(`Parameters: ${JSON.stringify(action.parameters)}`);
-
-  return parts.join('\n');
+  // No recorded system prompt: do not invent an identity/goal prompt.
+  return null;
 }
 
 /**
@@ -192,7 +117,7 @@ function filterNumericMetrics(
   const numericMetrics: Record<string, number> = {};
 
   for (const [key, value] of Object.entries(metrics)) {
-    if (typeof value === 'number' && !isNaN(value)) {
+    if (typeof value === 'number' && Number.isFinite(value)) {
       numericMetrics[key] = value;
     }
   }

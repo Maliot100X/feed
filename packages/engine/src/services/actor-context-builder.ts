@@ -24,6 +24,7 @@ import {
   or,
   parodyHeadlines,
   questions,
+  sql,
   worldEvents,
 } from '@feed/db';
 import { logger } from '@feed/shared';
@@ -37,6 +38,7 @@ import {
   findRelatedActorsByAffiliation,
   resolveActorName,
 } from '../utils/actor-utils';
+import { shuffleArray } from '../utils/randomization';
 import {
   formatActorFinanceGuardrails,
   formatActorToneGuardrails,
@@ -90,7 +92,6 @@ export interface ActorContext {
       title: string;
       source: string;
     }>;
-    trendingTopics: string[];
   };
 
   // Relationships
@@ -219,7 +220,6 @@ export class ActorContextBuilder {
         resolvedQuestions: resolvedQs,
         directMessages,
         headlines: recentHeadlines,
-        trendingTopics: [],
       },
       relationships: actorRelations,
       state: {
@@ -245,29 +245,30 @@ export class ActorContextBuilder {
     actorName: string,
     now: Date
   ): Promise<EventContext[]> {
+    // Filter by actor in SQL so frequent actors' events cannot starve the
+    // per-actor result (previously: latest 50 global rows, then filtered).
     const events = await db
       .select()
       .from(worldEvents)
-      .where(lte(worldEvents.timestamp, now))
+      .where(
+        and(
+          lte(worldEvents.timestamp, now),
+          sql`${worldEvents.actors} && ARRAY[${actorId}, ${actorName}]::text[]`
+        )
+      )
       .orderBy(desc(worldEvents.timestamp))
-      .limit(50);
+      .limit(10);
 
-    return events
-      .filter((e) => {
-        const actors = e.actors as string[] | null;
-        return actors?.includes(actorId) || actors?.includes(actorName);
-      })
-      .slice(0, 10)
-      .map((e) => ({
-        type: e.eventType,
-        description:
-          e.description.length > 300
-            ? e.description.slice(0, 300) + '...'
-            : e.description,
-        timestamp: e.timestamp.toISOString(),
-        relatedQuestion: e.relatedQuestion || undefined,
-        pointsToward: e.pointsToward || undefined,
-      }));
+    return events.map((e) => ({
+      type: e.eventType,
+      description:
+        e.description.length > 300
+          ? e.description.slice(0, 300) + '...'
+          : e.description,
+      timestamp: e.timestamp.toISOString(),
+      relatedQuestion: e.relatedQuestion || undefined,
+      pointsToward: e.pointsToward || undefined,
+    }));
   }
 
   private async getRecentWorldEvents(
@@ -417,9 +418,8 @@ export class ActorContextBuilder {
     sections.push(`AFFILIATIONS: ${ctx.identity.affiliations.join(', ')}`);
 
     // Post examples (critical for voice matching)
-    const examples = ctx.identity.postExamples
-      .sort(() => Math.random() - 0.5)
-      .slice(0, 6);
+    // Copy before shuffling: postExamples aliases registry data.
+    const examples = shuffleArray(ctx.identity.postExamples).slice(0, 6);
     if (examples.length > 0) {
       sections.push(
         `\nEXAMPLE POSTS (MATCH THIS STYLE):\n${examples.map((e, i) => `  ${i + 1}. "${e}"`).join('\n')}`

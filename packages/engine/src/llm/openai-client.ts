@@ -14,7 +14,6 @@ import { isPromptLoggingEnabled, logPrompt } from '../utils/prompt-logger';
 import {
   cleanMarkdownCodeBlocks,
   extractJsonFromText,
-  parseContinuationContent,
 } from './json-continuation-parser';
 import type { LLMJsonSchema as JSONSchema } from './types';
 import { parseXML } from './xml-parser';
@@ -463,8 +462,6 @@ WORLD RULES:
       try {
         callStartTime = Date.now();
         const response = await requestCompletion(messages);
-        const callDurationMs = Date.now() - callStartTime;
-
         const firstChoice = first(response.choices);
         if (!firstChoice || !firstChoice.message.content) {
           throw new Error('LLM response missing content');
@@ -601,7 +598,7 @@ WORLD RULES:
               outputTokens,
               totalTokens,
               promptType,
-              durationMs: callDurationMs,
+              durationMs: Date.now() - callStartTime,
               success: true,
             });
           }
@@ -609,47 +606,7 @@ WORLD RULES:
           parsedResponse = xmlResult.data;
           return xmlResult.data as T;
         }
-        // Use JSON parser
-        // If we had a continuation, use the advanced parser
-        if (content.includes('Continue from where you left off')) {
-          const parsed = parseContinuationContent(content);
-          if (parsed !== null) {
-            logger.info(
-              'Successfully parsed continuation content',
-              {
-                isArray: Array.isArray(parsed),
-                items: Array.isArray(parsed) ? parsed.length : 'N/A',
-              },
-              'FeedLLMClient'
-            );
-
-            // Report token usage via callback
-            if (globalTokenUsageCallback) {
-              globalTokenUsageCallback({
-                provider: this.provider,
-                model,
-                inputTokens,
-                outputTokens,
-                totalTokens,
-                promptType,
-                durationMs: callDurationMs,
-                success: true,
-              });
-            }
-
-            parsedResponse = parsed;
-            return parsed as T;
-          }
-          logger.error(
-            'Failed to parse continuation content, attempting fallback',
-            {
-              contentPreview: content.substring(0, 200),
-            },
-            'FeedLLMClient'
-          );
-        }
-
-        // Standard JSON parsing for non-continuation responses
+        // JSON format
         let jsonContent = cleanMarkdownCodeBlocks(content);
         jsonContent = extractJsonFromText(jsonContent);
 
@@ -673,7 +630,7 @@ WORLD RULES:
             outputTokens,
             totalTokens,
             promptType,
-            durationMs: callDurationMs,
+            durationMs: Date.now() - callStartTime,
             success: true,
           });
         }
@@ -939,12 +896,11 @@ WORLD RULES:
     return this.provider;
   }
 
-  getStats() {
+  /** Provider and default model. Usage totals are reported via the token usage callback. */
+  getStats(): { provider: LLMProvider; model: string } {
     return {
       provider: this.provider,
       model: this.getDefaultModel(),
-      totalTokens: 0,
-      totalCost: 0,
     };
   }
 }

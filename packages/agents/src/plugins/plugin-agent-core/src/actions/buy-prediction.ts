@@ -19,6 +19,7 @@ import {
 } from '@feed/core/markets/prediction';
 import { asUser } from '@feed/db';
 import {
+  createUserWalletAdapter,
   FEE_CONFIG,
   FeeService,
   invalidateAfterPredictionTrade,
@@ -98,7 +99,7 @@ export const buyPredictionAction: Action = {
     const side = actionParams?.side?.toUpperCase() as 'YES' | 'NO' | undefined;
     const amount = actionParams?.amount;
 
-    if (!marketId || !side || !amount) {
+    if (!marketId || !side || amount === undefined) {
       return {
         success: false,
         text: 'Missing parameters. Call CHECK_PREDICTIONS first to get marketId.',
@@ -114,10 +115,10 @@ export const buyPredictionAction: Action = {
       };
     }
 
-    if (amount <= 0) {
+    if (typeof amount !== 'number' || !Number.isFinite(amount) || amount <= 0) {
       return {
         success: false,
-        text: 'Amount must be greater than 0.',
+        text: 'Amount must be a finite number greater than 0.',
         error: 'Invalid amount',
       };
     }
@@ -140,30 +141,8 @@ export const buyPredictionAction: Action = {
       const result = await asUser({ userId: agentUserId }, async (txDb) => {
         const service = new PredictionMarketService({
           db: new PredictionDbAdapter(txDb),
-          wallet: {
-            debit: ({ userId, amount, reason, description, relatedId }) =>
-              WalletService.debit(
-                userId,
-                amount,
-                reason,
-                description ?? '',
-                relatedId,
-                txDb
-              ),
-            credit: ({ userId, amount, reason, description, relatedId }) =>
-              WalletService.credit(
-                userId,
-                amount,
-                reason,
-                description ?? '',
-                relatedId,
-                txDb
-              ),
-            recordPnL: async ({ userId, pnl, reason, relatedId }) => {
-              await WalletService.recordPnL(userId, pnl, reason, relatedId);
-            },
-            getBalance: (uid: string) => WalletService.getBalance(uid),
-          },
+          // Every wallet mutation (incl. PnL) enlists in the asUser transaction
+          wallet: createUserWalletAdapter(txDb),
           broadcast: {
             emit: (channel, payload) =>
               broadcastToChannel(channel, payload as Record<string, JsonValue>),
@@ -205,18 +184,27 @@ export const buyPredictionAction: Action = {
         return { market, buy };
       });
 
-      // Record trade for UI/performance tracking
-      await agentPnLService.recordTrade({
-        agentId: agentUserId,
-        userId: agentUserId,
-        marketType: 'prediction',
-        marketId,
-        action: 'open',
-        side: side.toLowerCase() as 'yes' | 'no',
-        amount,
-        price: result.buy.avgPrice,
-        reasoning: (state?.data?.thought as string) || 'Chat-initiated trade',
-      });
+      // Record trade for UI/performance tracking. The buy is committed, so
+      // an analytics failure must not report it as failed.
+      await agentPnLService
+        .recordTrade({
+          agentId: agentUserId,
+          userId: agentUserId,
+          marketType: 'prediction',
+          marketId,
+          action: 'open',
+          side: side.toLowerCase() as 'yes' | 'no',
+          amount,
+          price: result.buy.avgPrice,
+          reasoning: (state?.data?.thought as string) || 'Chat-initiated trade',
+        })
+        .catch((error: Error) => {
+          logger.error('[BUY_PREDICTION] Failed to record trade analytics', {
+            agentUserId,
+            marketId,
+            error: error.message,
+          });
+        });
 
       logger.info('[BUY_PREDICTION] Trade successful', {
         agentUserId,

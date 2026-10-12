@@ -70,7 +70,12 @@ import { NextResponse } from 'next/server';
 
 export const GET = withErrorHandling(async function GET() {
   // Get all active biases from the singleton engine
-  const activeBiases = biasEngine.getActiveBiases();
+  // Use one clock for the whole projection so entries that have already
+  // expired are not reported as active.
+  const now = new Date();
+  const activeBiases = biasEngine
+    .getActiveBiases()
+    .filter((bias) => bias.expiresAt === null || bias.expiresAt > now);
 
   // Format biases for API response
   const biases = activeBiases.map((bias) => ({

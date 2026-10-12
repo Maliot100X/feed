@@ -260,13 +260,15 @@ export function computePerpRealismMetrics(params: {
       market.askDepth !== undefined
   );
 
-  const spreads = coveredMarkets
+  // Summaries use only validated quotes; invalid quotes (NaN/Infinity/negative
+  // or crossed) are reported separately via invalidQuoteCount.
+  const spreads = validQuotedMarkets
     .map((market) => market.spreadBps)
     .filter((value): value is number => typeof value === 'number');
-  const bidDepths = coveredMarkets
+  const bidDepths = validQuotedMarkets
     .map((market) => market.bidDepth)
     .filter((value): value is number => typeof value === 'number');
-  const askDepths = coveredMarkets
+  const askDepths = validQuotedMarkets
     .map((market) => market.askDepth)
     .filter((value): value is number => typeof value === 'number');
 
@@ -299,8 +301,10 @@ export function computePerpRealismMetrics(params: {
     sampleOrderSizes.map((size) => [
       String(size),
       summarizeSeries(
-        validQuotedMarkets.map(
-          (market) => size / Math.max(market.askDepth ?? 1, 1)
+        // askDepth is validated finite and > 0 for every quoted market; use the
+        // exact depth so sub-dollar depths are not clamped to 1.
+        validQuotedMarkets.flatMap((market) =>
+          market.askDepth === undefined ? [] : [size / market.askDepth]
         )
       ),
     ])

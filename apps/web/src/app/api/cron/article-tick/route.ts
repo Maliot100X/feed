@@ -401,59 +401,67 @@ export const POST = withErrorHandling(async function POST(_req: NextRequest) {
     let errorCount = 0;
     const articlesToGenerate = Math.min(MAX_ARTICLES_PER_TICK, remaining);
 
-    // Generate articles based on active events
-    if (activeEventsData.activeEvents.length > 0 && articlesToGenerate > 0) {
-      // Pick a random event to cover
-      const eventIndex = Math.floor(
-        secureRandom() * activeEventsData.activeEvents.length
-      );
-      const event = activeEventsData.activeEvents[eventIndex];
+    // Generate articles based on active events. Events are tried in random
+    // order until an uncovered one is found, so an already-covered random
+    // pick does not fall through to a baseline article while other events
+    // still need coverage.
+    let eventArticleAttempted = false;
+    if (articlesToGenerate > 0) {
+      const candidates = [...activeEventsData.activeEvents];
+      while (candidates.length > 0 && !eventArticleAttempted) {
+        const [event] = candidates.splice(
+          Math.floor(secureRandom() * candidates.length),
+          1
+        );
+        if (!event) break;
 
-      if (event) {
         // Check if we've already covered this event using DB-backed tracking
         const eventId = event.questionId;
-        const alreadyCovered = await hasEventBeenCovered(eventId);
-
-        if (!alreadyCovered) {
-          // Pick a random news org to write the article
-          const orgIndex = Math.floor(secureRandom() * newsOrgs.length);
-          const org = newsOrgs[orgIndex]!;
-
-          const result = await generateEventArticle(
-            event,
-            org,
-            actorsList,
-            worldFactsContext,
-            gameState,
-            llmClient
-          );
-
-          if (result.status === 'success') {
-            articlesCreated++;
-            // Mark this event as covered for future duplicate detection (DB-backed)
-            await markEventAsCovered(eventId, org.id, result.id);
-            logger.info(
-              `Article created by ${org.name}`,
-              { eventId: event.questionId, articleId: result.id },
-              'ArticleTick'
-            );
-          } else if (result.status === 'error') {
-            // Count actual errors for accurate metrics
-            errorCount++;
-          }
-          // 'skipped' status is not an error, just means rate limit hit
-        } else {
+        if (await hasEventBeenCovered(eventId)) {
           logger.debug(
             'Event already covered - skipping',
-            { eventId: event.questionId },
+            { eventId },
             'ArticleTick'
           );
+          continue;
         }
+
+        eventArticleAttempted = true;
+
+        // Pick a random news org to write the article
+        const orgIndex = Math.floor(secureRandom() * newsOrgs.length);
+        const org = newsOrgs[orgIndex]!;
+
+        const result = await generateEventArticle(
+          event,
+          org,
+          actorsList,
+          worldFactsContext,
+          gameState,
+          llmClient
+        );
+
+        if (result.status === 'success') {
+          articlesCreated++;
+          // Mark this event as covered for future duplicate detection (DB-backed)
+          await markEventAsCovered(eventId, org.id, result.id);
+          logger.info(
+            `Article created by ${org.name}`,
+            { eventId, articleId: result.id },
+            'ArticleTick'
+          );
+        } else if (result.status === 'error') {
+          // Count actual errors for accurate metrics
+          errorCount++;
+        }
+        // 'skipped' status is not an error, just means rate limit hit
       }
     }
 
-    // If no event articles, generate a baseline article
-    if (articlesCreated === 0 && articlesToGenerate > 0) {
+    // Baseline (editorial) articles are only for ticks with no uncovered
+    // event. A failed or rate-limited event attempt must not trigger a second
+    // (paid) generation.
+    if (!eventArticleAttempted && articlesToGenerate > 0) {
       const orgIndex = Math.floor(secureRandom() * newsOrgs.length);
       const org = newsOrgs[orgIndex]!;
 

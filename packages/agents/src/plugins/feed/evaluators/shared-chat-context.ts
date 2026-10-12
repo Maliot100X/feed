@@ -6,47 +6,8 @@ import type {
   Memory,
   State,
 } from '@elizaos/core';
+import { sharedChatContextService } from '@feed/engine';
 import { logger } from '../../../shared/logger';
-
-type StoredSnapshot = {
-  chatId: string;
-  chatName: string | null;
-  summary: string;
-  facts: string[];
-  participantNames: string[];
-  messageCount: number;
-  lastMessageAt: string;
-  refreshedAt: string;
-};
-
-type SharedChatContextServiceShape = {
-  getStoredSnapshot: (chatId: string) => Promise<StoredSnapshot | null>;
-  maybeRefreshChatContext: (
-    chatId: string,
-    options: {
-      messageWindowSize?: number;
-      factLimit?: number;
-      staleAfterMinutes?: number;
-      refreshThreshold?: number;
-    }
-  ) => Promise<StoredSnapshot | null>;
-};
-
-let sharedChatContextServicePromise: Promise<SharedChatContextServiceShape> | null =
-  null;
-
-async function getSharedChatContextService(): Promise<SharedChatContextServiceShape> {
-  if (!sharedChatContextServicePromise) {
-    sharedChatContextServicePromise = import(
-      '../../../../../engine/src/services/shared-chat-context-service'
-    ).then(
-      (module) =>
-        module.sharedChatContextService as SharedChatContextServiceShape
-    );
-  }
-
-  return sharedChatContextServicePromise;
-}
 
 const CACHE_PREFIX = 'shared-chat-context:last-message-count';
 const MIN_MESSAGES_BEFORE_REFRESH = 3;
@@ -119,7 +80,6 @@ export const sharedChatContextEvaluator: Evaluator = {
       return false;
     }
 
-    const sharedChatContextService = await getSharedChatContextService();
     const storedSnapshot =
       await sharedChatContextService.getStoredSnapshot(chatId);
     if (!storedSnapshot) {
@@ -168,7 +128,6 @@ export const sharedChatContextEvaluator: Evaluator = {
       return;
     }
 
-    const sharedChatContextService = await getSharedChatContextService();
     await sharedChatContextService.maybeRefreshChatContext(chatId, {
       messageWindowSize: 10,
       factLimit: 5,

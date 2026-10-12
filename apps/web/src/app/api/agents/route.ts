@@ -164,12 +164,43 @@ import { authenticateUser, checkProgress, withErrorHandling } from '@feed/api';
 import { logger, toISO } from '@feed/shared';
 import type { NextRequest } from 'next/server';
 import { NextResponse } from 'next/server';
+import { z } from 'zod';
 import { listOwnedAgentSummaries } from '@/lib/agents/owned-agent-summaries';
+
+const optionalText = (max: number) => z.string().max(max).optional();
+
+const CreateAgentBodySchema = z.object({
+  name: z.string().trim().min(1).max(100),
+  username: optionalText(50),
+  description: optionalText(5000),
+  profileImageUrl: optionalText(2048),
+  coverImageUrl: optionalText(2048),
+  system: z.string().trim().min(1).max(20000),
+  bio: z.array(z.string().max(2000)).max(50).optional(),
+  personality: optionalText(10000),
+  tradingStrategy: optionalText(10000),
+  initialDeposit: z.number().finite().min(0).max(1_000_000_000).default(0),
+  modelTier: z.enum(['free', 'pro']).default('free'),
+  autonomousEnabled: z.boolean().default(false),
+  autonomousPosting: z.boolean().default(false),
+  autonomousCommenting: z.boolean().default(false),
+  autonomousDMs: z.boolean().default(false),
+  autonomousGroupChats: z.boolean().default(false),
+  a2aEnabled: z.boolean().default(false),
+});
+
+const ListAgentsQuerySchema = z.object({
+  autonomousTrading: z
+    .enum(['true', 'false'])
+    .optional()
+    .transform((value) => (value === undefined ? undefined : value === 'true')),
+});
 
 export const POST = withErrorHandling(async function POST(req: NextRequest) {
   const user = await authenticateUser(req);
 
-  const body = await req.json();
+  // Validate the whole request before any creation or balance debit, so an
+  // invalid setting can no longer fail after the agent already exists.
   const {
     name,
     username,
@@ -181,7 +212,7 @@ export const POST = withErrorHandling(async function POST(req: NextRequest) {
     personality,
     tradingStrategy,
     initialDeposit,
-    // New settings from step 3
+    // Settings from step 3
     modelTier,
     autonomousEnabled,
     autonomousPosting,
@@ -189,7 +220,7 @@ export const POST = withErrorHandling(async function POST(req: NextRequest) {
     autonomousDMs,
     autonomousGroupChats,
     a2aEnabled,
-  } = body;
+  } = CreateAgentBodySchema.parse(await req.json());
 
   const agentUser = await agentService.createAgent({
     userId: user.id,
@@ -202,7 +233,7 @@ export const POST = withErrorHandling(async function POST(req: NextRequest) {
     bio,
     personality,
     tradingStrategy,
-    initialDeposit: initialDeposit || 0,
+    initialDeposit,
   });
 
   logger.info(
@@ -214,13 +245,13 @@ export const POST = withErrorHandling(async function POST(req: NextRequest) {
   // Update agent config with settings from step 3
   // (createAgent sets all autonomous features to true by default, so we apply user's choices here)
   await agentService.updateAgent(agentUser.id, user.id, {
-    modelTier: modelTier || 'free',
-    autonomousTrading: autonomousEnabled ?? false,
-    autonomousPosting: autonomousPosting ?? false,
-    autonomousCommenting: autonomousCommenting ?? false,
-    autonomousDMs: autonomousDMs ?? false,
-    autonomousGroupChats: autonomousGroupChats ?? false,
-    a2aEnabled: a2aEnabled ?? false,
+    modelTier,
+    autonomousTrading: autonomousEnabled,
+    autonomousPosting,
+    autonomousCommenting,
+    autonomousDMs,
+    autonomousGroupChats,
+    a2aEnabled,
   });
 
   // Get agent config for the response
@@ -254,12 +285,12 @@ export const GET = withErrorHandling(async function GET(req: NextRequest) {
   const user = await authenticateUser(req);
 
   const { searchParams } = new URL(req.url);
-  const autonomousTrading = searchParams.get('autonomousTrading');
+  const { autonomousTrading } = ListAgentsQuerySchema.parse({
+    autonomousTrading: searchParams.get('autonomousTrading') ?? undefined,
+  });
 
-  const filters: { autonomousTrading?: boolean } = {};
-  if (autonomousTrading !== null) {
-    filters.autonomousTrading = autonomousTrading === 'true';
-  }
+  const filters: { autonomousTrading?: boolean } =
+    autonomousTrading === undefined ? {} : { autonomousTrading };
 
   const agentsWithStats = await listOwnedAgentSummaries(user.id, filters);
 

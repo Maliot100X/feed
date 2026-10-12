@@ -1,8 +1,8 @@
 /**
  * Onboarding Generate Profile API
  *
- * @route GET /api/onboarding/generate-profile - Generate AI profile
- * @access Public
+ * @route POST /api/onboarding/generate-profile - Generate AI profile
+ * @access Authenticated (rate-limited; invokes a paid LLM)
  *
  * @description
  * Generates AI profile data for new users including name, bio, and other
@@ -10,7 +10,7 @@
  *
  * @openapi
  * /api/onboarding/generate-profile:
- *   get:
+ *   post:
  *     tags:
  *       - Onboarding
  *     summary: Generate AI profile
@@ -29,19 +29,34 @@
  *                   type: string
  *                 username:
  *                   type: string
+ *       401:
+ *         description: Authentication required
+ *       429:
+ *         description: Rate limit exceeded
  *       500:
  *         description: AI generation failed
  *
  * @example
  * ```typescript
- * const profile = await fetch('/api/onboarding/generate-profile')
- *   .then(r => r.json());
+ * const profile = await fetch('/api/onboarding/generate-profile', {
+ *   method: 'POST',
+ * }).then(r => r.json());
  * ```
  */
 
-import { successResponse, withErrorHandling } from '@feed/api';
+import {
+  authenticate,
+  checkRateLimitAsync,
+  RATE_LIMIT_CONFIGS,
+  rateLimitError,
+  successResponse,
+  withErrorHandling,
+} from '@feed/api';
 import { FeedLLMClient } from '@feed/engine';
-import { logger, sanitizeOnboardingUsername } from '@feed/shared';
+import {
+  isValidOnboardingUsername,
+  sanitizeOnboardingUsername,
+} from '@feed/shared';
 import type { NextRequest } from 'next/server';
 import {
   adjectives,
@@ -52,18 +67,32 @@ import {
   starWars,
   uniqueNamesGenerator,
 } from 'unique-names-generator';
+import { z } from 'zod';
 
-interface ProfileData {
-  name: string;
-  username: string;
-  bio: string;
-}
+const GeneratedProfileSchema = z.object({
+  name: z.string().trim().min(1).max(50),
+  username: z.string().trim().min(1).max(64),
+  bio: z.string().trim().max(160),
+});
+
+type ProfileData = z.infer<typeof GeneratedProfileSchema>;
 
 /**
  * GET /api/onboarding/generate-profile
  * Generate AI profile data for onboarding
  */
-export const GET = withErrorHandling(async function GET(_request: NextRequest) {
+export const POST = withErrorHandling(async function POST(
+  request: NextRequest
+) {
+  const authUser = await authenticate(request);
+  const rateLimit = await checkRateLimitAsync(
+    authUser.userId,
+    RATE_LIMIT_CONFIGS.GENERATE_ONBOARDING_PROFILE
+  );
+  if (!rateLimit.allowed) {
+    return rateLimitError(rateLimit.retryAfter);
+  }
+
   // Use game tick LLM client
   const llmClient = FeedLLMClient.forGameTick();
 
@@ -120,16 +149,9 @@ Here are some random words for inspiration (feel free to use or ignore):
 - Name: ${randomName}
 - Pop Culture: ${randomStarWars}
 
-Return your response as XML in this exact format:
-<response>
-  <name>display name here</name>
-  <username>handle_here</username>
-  <bio>bio here</bio>
-</response>`;
+Return only a JSON object with exactly these keys: "name", "username", "bio".`;
 
-  const rawProfileData = await llmClient.generateJSON<
-    ProfileData | { response: ProfileData }
-  >(
+  const rawProfileData = await llmClient.generateJSON<ProfileData>(
     prompt,
     {
       required: ['name', 'username', 'bio'],
@@ -146,19 +168,21 @@ Return your response as XML in this exact format:
     }
   );
 
-  // Handle XML structure
-  const profileData =
-    'response' in rawProfileData && rawProfileData.response
-      ? rawProfileData.response
-      : (rawProfileData as ProfileData);
-
-  profileData.username = sanitizeOnboardingUsername(profileData.username);
-
-  logger.info(
-    'Generated AI profile',
-    profileData,
-    'GET /api/onboarding/generate-profile'
-  );
+  const parsed = GeneratedProfileSchema.safeParse(rawProfileData);
+  if (!parsed.success) {
+    // Model output problem, not a client validation error.
+    throw new Error(
+      `Generated onboarding profile failed validation: ${parsed.error.message}`
+    );
+  }
+  const generated = parsed.data;
+  const username = sanitizeOnboardingUsername(generated.username);
+  // The username is only a suggestion; availability is checked separately.
+  const profileData: ProfileData = {
+    name: generated.name,
+    bio: generated.bio,
+    username: isValidOnboardingUsername(username) ? username : '',
+  };
 
   return successResponse(profileData);
 });

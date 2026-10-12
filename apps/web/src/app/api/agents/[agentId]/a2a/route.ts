@@ -91,6 +91,7 @@ import { db, eq, users } from '@feed/db';
 import { logger } from '@feed/shared';
 import type { NextRequest } from 'next/server';
 import { NextResponse } from 'next/server';
+import { parseJsonRpcEnvelope } from '@/lib/a2a/jsonrpc-guard';
 import { checkApiKey } from '@/lib/api/check-api-key';
 
 // Type assertions are used instead of type guards due to intersection type issues
@@ -268,7 +269,24 @@ export const POST = withErrorHandling(async function POST(
   const { error: authError, authResult } = await checkApiKey(req);
   if (authError) return authError;
 
-  const body = (await req.json()) as JsonRpcRequest;
+  let rawBody: unknown;
+  try {
+    rawBody = await req.json();
+  } catch {
+    return NextResponse.json(
+      {
+        jsonrpc: '2.0',
+        error: { code: -32700, message: 'Parse error: Invalid JSON' },
+        id: null,
+      },
+      { status: 400 }
+    );
+  }
+  // Validate the envelope before reading from it: null, primitive or array
+  // bodies (and non-object params) get a JSON-RPC error instead of a 500.
+  const envelopeCheck = parseJsonRpcEnvelope(rawBody);
+  if (envelopeCheck.errorResponse) return envelopeCheck.errorResponse;
+  const body = rawBody as JsonRpcRequest;
 
   if (authResult) {
     const scope = scopeRequestToCaller(body, authResult);

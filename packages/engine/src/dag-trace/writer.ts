@@ -13,26 +13,50 @@
  *         call-001-npc-market-decisions.json
  *         ...
  *       npc-trajectories/
- *         {npc-name}.json
+ *         {npc-id}.json
  */
 
-import * as fs from 'node:fs';
+import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
 import { logger } from '@feed/shared';
 import type { TickTrace } from './types';
 
 const TRACE_DIR = path.resolve(process.cwd(), 'runs', 'dag-traces');
-const MAX_TRACES = Number(process.env.FEED_DAG_TRACE_KEEP || 100);
+const DEFAULT_MAX_TRACES = 100;
+
+/**
+ * Parse FEED_DAG_TRACE_KEEP. Unset/blank uses the default; anything else must
+ * be a positive integer (the trace just written is always kept).
+ */
+export function parseTraceKeep(raw: string | undefined): number {
+  if (raw === undefined || raw.trim() === '') return DEFAULT_MAX_TRACES;
+  const value = Number(raw);
+  if (!Number.isSafeInteger(value) || value < 1) {
+    throw new Error(
+      `FEED_DAG_TRACE_KEEP must be a positive integer, got "${raw}"`
+    );
+  }
+  return value;
+}
+
+/** File name for an NPC trajectory; keyed by npcId so same-named NPCs never collide. */
+export function npcTrajectoryFileName(npcId: string): string {
+  const safeId = npcId.replace(/[^a-zA-Z0-9_-]+/g, '-');
+  return `${safeId}.json`;
+}
 
 export async function writeTickTrace(trace: TickTrace): Promise<string> {
+  const maxTraces = parseTraceKeep(process.env.FEED_DAG_TRACE_KEEP);
   const dirName = `tick-${trace.timestamp.replace(/[:.]/g, '-')}-${trace.tickNumber}`;
   const traceDir = path.join(TRACE_DIR, dirName);
 
   try {
     // Create directories
-    fs.mkdirSync(path.join(traceDir, 'nodes'), { recursive: true });
-    fs.mkdirSync(path.join(traceDir, 'llm-calls'), { recursive: true });
-    fs.mkdirSync(path.join(traceDir, 'npc-trajectories'), { recursive: true });
+    await fs.mkdir(path.join(traceDir, 'nodes'), { recursive: true });
+    await fs.mkdir(path.join(traceDir, 'llm-calls'), { recursive: true });
+    await fs.mkdir(path.join(traceDir, 'npc-trajectories'), {
+      recursive: true,
+    });
 
     // Write tick summary (no inline LLM prompt text - just references)
     const summary = {
@@ -65,7 +89,7 @@ export async function writeTickTrace(trace: TickTrace): Promise<string> {
       tokenStats: trace.tokenStats,
       gameTickResult: trace.gameTickResult,
     };
-    fs.writeFileSync(
+    await fs.writeFile(
       path.join(traceDir, 'tick-summary.json'),
       JSON.stringify(summary, null, 2)
     );
@@ -74,7 +98,7 @@ export async function writeTickTrace(trace: TickTrace): Promise<string> {
     for (let i = 0; i < trace.nodes.length; i++) {
       const node = trace.nodes[i]!;
       const filename = `${String(i + 1).padStart(2, '0')}-${node.nodeId}.json`;
-      fs.writeFileSync(
+      await fs.writeFile(
         path.join(traceDir, 'nodes', filename),
         JSON.stringify(node, null, 2)
       );
@@ -82,7 +106,7 @@ export async function writeTickTrace(trace: TickTrace): Promise<string> {
 
     // Write individual LLM call files with full prompt/response text
     for (const call of trace.llmCalls) {
-      fs.writeFileSync(
+      await fs.writeFile(
         path.join(traceDir, 'llm-calls', `${call.callId}.json`),
         JSON.stringify(call, null, 2)
       );
@@ -90,9 +114,12 @@ export async function writeTickTrace(trace: TickTrace): Promise<string> {
 
     // Write NPC trajectory files
     for (const npc of trace.npcTrajectories) {
-      const safeName = npc.npcName.toLowerCase().replace(/[^a-z0-9]+/g, '-');
-      fs.writeFileSync(
-        path.join(traceDir, 'npc-trajectories', `${safeName}.json`),
+      await fs.writeFile(
+        path.join(
+          traceDir,
+          'npc-trajectories',
+          npcTrajectoryFileName(npc.npcId)
+        ),
         JSON.stringify(npc, null, 2)
       );
     }
@@ -100,14 +127,14 @@ export async function writeTickTrace(trace: TickTrace): Promise<string> {
     // Update latest symlink
     const latestLink = path.join(TRACE_DIR, 'latest');
     try {
-      if (fs.existsSync(latestLink)) fs.unlinkSync(latestLink);
-      fs.symlinkSync(dirName, latestLink);
+      await fs.rm(latestLink, { force: true });
+      await fs.symlink(dirName, latestLink);
     } catch {
       // Symlinks may not work on all platforms
     }
 
-    // Cleanup old traces
-    await cleanupOldTraces();
+    // Cleanup old traces (never the one just written)
+    await cleanupOldTraces(maxTraces, dirName);
 
     logger.info(
       `DAG trace written`,
@@ -184,23 +211,25 @@ function summarizeData(data: Record<string, unknown>): Record<string, unknown> {
   return result;
 }
 
-async function cleanupOldTraces(): Promise<void> {
+async function cleanupOldTraces(
+  maxTraces: number,
+  currentDir: string
+): Promise<void> {
   try {
-    if (!fs.existsSync(TRACE_DIR)) return;
-
-    const entries = fs
-      .readdirSync(TRACE_DIR)
-      .filter(
-        (e) =>
-          e.startsWith('tick-') &&
-          fs.statSync(path.join(TRACE_DIR, e)).isDirectory()
-      )
+    const dirents = await fs.readdir(TRACE_DIR, { withFileTypes: true });
+    const entries = dirents
+      .filter((e) => e.isDirectory() && e.name.startsWith('tick-'))
+      .map((e) => e.name)
       .sort()
       .reverse();
 
-    if (entries.length > MAX_TRACES) {
-      for (const old of entries.slice(MAX_TRACES)) {
-        fs.rmSync(path.join(TRACE_DIR, old), { recursive: true, force: true });
+    if (entries.length > maxTraces) {
+      for (const old of entries.slice(maxTraces)) {
+        if (old === currentDir) continue;
+        await fs.rm(path.join(TRACE_DIR, old), {
+          recursive: true,
+          force: true,
+        });
       }
     }
   } catch {

@@ -2,7 +2,6 @@ import type { IAgentRuntime, Plugin } from '@elizaos/core';
 import { logger } from '@elizaos/core';
 import type { JsonValue } from '@feed/shared';
 import { experienceEvaluator } from './evaluators/experienceEvaluator';
-import { marketOutcomeEvaluator } from './evaluators/marketOutcomeEvaluator';
 import { experienceProvider } from './providers/experienceProvider';
 import { ExperienceService } from './service';
 import './types'; // Ensure module augmentation is loaded
@@ -10,7 +9,7 @@ import './types'; // Ensure module augmentation is loaded
 export const experiencePlugin: Plugin = {
   name: 'experience',
   description:
-    'Self-learning experience system that records experiences, learns from agent interactions, and tracks NPC trust & performance',
+    'Self-learning experience system that records experiences and learns from agent interactions',
 
   services: [ExperienceService],
 
@@ -18,7 +17,6 @@ export const experiencePlugin: Plugin = {
 
   evaluators: [
     experienceEvaluator, // Learns from conversations
-    marketOutcomeEvaluator, // Learns from market outcomes (trust + performance)
   ],
 
   init: async (config: Record<string, JsonValue>, runtime: IAgentRuntime) => {

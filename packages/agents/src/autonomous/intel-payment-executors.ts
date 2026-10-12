@@ -1,29 +1,49 @@
 /**
- * WIP: Direct executors for SHARE_INFORMATION and REQUEST_PAYMENT actions.
+ * Direct executors for SHARE_INFORMATION and REQUEST_PAYMENT actions.
  *
- * These are separated from DirectExecutors.ts to avoid linter/formatter conflicts
- * with concurrent agent edits. Will be merged back once stable.
+ * SHARE_INFORMATION: Searches messages the agent can currently access (active
+ * DM and group chat memberships) for keyword matches and sends the quoted
+ * matches to the recipient. Quotes show provenance only; they are not a claim
+ * that the content is true.
  *
- * SHARE_INFORMATION: Searches agent's conversations for real content matching
- * keywords, sends verified intel summary to recipient.
+ * REQUEST_PAYMENT: Sends a labeled payment request as a DM. The recipient can
+ * accept (SEND_MONEY) or decline. The deadline is advisory text only; no
+ * expiry is tracked and no payment is executed automatically.
  *
- * REQUEST_PAYMENT: Creates labeled payment request as DM. Recipient can
- * accept (SEND_MONEY) or decline. Tracked for RL training.
+ * Both deliver through the canonical `executeDirectMessage` path (existing DM
+ * reuse, owner-DM rule, transactional chat creation).
  */
 
 import {
+  and,
   chatParticipants,
   chats,
   db,
+  desc,
   eq,
   groupMembers,
   groups,
+  inArray,
   messages,
-  sql,
   users,
 } from '@feed/db';
 import { logger } from '../shared/logger';
 import { generateSnowflakeId } from '../shared/snowflake';
+import { executeDirectMessage } from './DirectExecutors';
+
+const MAX_SHARE_KEYWORDS = 10;
+const MAX_KEYWORD_LENGTH = 64;
+
+/** Normalize keywords: trimmed, lowercased, unique, bounded; blanks dropped. */
+export function normalizeShareKeywords(keywords: readonly string[]): string[] {
+  return [
+    ...new Set(
+      keywords
+        .map((k) => k.toLowerCase().trim().slice(0, MAX_KEYWORD_LENGTH))
+        .filter(Boolean)
+    ),
+  ].slice(0, MAX_SHARE_KEYWORDS);
+}
 
 // ── Types ───────────────────────────────────────────────────────────────────
 
@@ -83,38 +103,49 @@ export async function executeDirectShareInformation(
   };
 
   if (!cleanRecipientId) return { ...empty, error: 'Recipient ID is required' };
-  if (!keywords?.length)
+  const terms = normalizeShareKeywords(keywords ?? []);
+  if (terms.length === 0)
     return { ...empty, error: 'At least one keyword is required' };
 
-  const [recipient] = await db
-    .select({ id: users.id })
-    .from(users)
-    .where(eq(users.id, cleanRecipientId))
-    .limit(1);
-  if (!recipient) return { ...empty, error: `Recipient not found` };
-
   try {
-    const terms = keywords.map((k) => k.toLowerCase().trim()).filter(Boolean);
-    const matches: ShareInformationMatch[] = [];
+    const [recipient] = await db
+      .select({ id: users.id })
+      .from(users)
+      .where(eq(users.id, cleanRecipientId))
+      .limit(1);
+    if (!recipient) return { ...empty, error: `Recipient not found` };
 
-    // Search DMs
+    const matches: ShareInformationMatch[] = [];
+    const seenMessageIds = new Set<string>();
+
+    // Search DMs the agent is still an active participant of
     const dmRows = await db
       .select({
+        messageId: messages.id,
         chatId: chatParticipants.chatId,
         content: messages.content,
         sender: messages.senderId,
         time: messages.createdAt,
       })
       .from(chatParticipants)
+      .innerJoin(chats, eq(chats.id, chatParticipants.chatId))
       .innerJoin(messages, eq(messages.chatId, chatParticipants.chatId))
-      .where(eq(chatParticipants.userId, agentUserId))
-      .orderBy(sql`${messages.createdAt} DESC`)
+      .where(
+        and(
+          eq(chatParticipants.userId, agentUserId),
+          eq(chatParticipants.isActive, true),
+          eq(chats.isGroup, false)
+        )
+      )
+      .orderBy(desc(messages.createdAt))
       .limit(200);
 
     for (const row of dmRows) {
+      if (seenMessageIds.has(row.messageId)) continue;
       const lc = (row.content ?? '').toLowerCase();
       const hit = terms.filter((t) => lc.includes(t));
       if (hit.length > 0) {
+        seenMessageIds.add(row.messageId);
         matches.push({
           source: 'dm',
           sourceId: row.chatId ?? '',
@@ -126,7 +157,7 @@ export async function executeDirectShareInformation(
       }
     }
 
-    // Search group chats
+    // Search group chats where the agent is an active member (one query)
     const agentGroups = await db
       .select({
         groupId: groupMembers.groupId,
@@ -135,34 +166,51 @@ export async function executeDirectShareInformation(
       })
       .from(groupMembers)
       .innerJoin(groups, eq(groups.id, groupMembers.groupId))
-      .where(eq(groupMembers.userId, agentUserId));
+      .where(
+        and(
+          eq(groupMembers.userId, agentUserId),
+          eq(groupMembers.isActive, true)
+        )
+      );
 
-    for (const g of agentGroups) {
-      if (!g.chatId) continue;
-      const gMsgs = await db
-        .select({
-          content: messages.content,
-          sender: messages.senderId,
-          time: messages.createdAt,
-        })
-        .from(messages)
-        .where(eq(messages.chatId, g.chatId))
-        .orderBy(sql`${messages.createdAt} DESC`)
-        .limit(50);
-      for (const m of gMsgs) {
-        const lc = (m.content ?? '').toLowerCase();
-        const hit = terms.filter((t) => lc.includes(t));
-        if (hit.length > 0) {
-          matches.push({
-            source: 'group_chat',
-            sourceId: g.groupId ?? '',
-            sourceName: g.groupName ?? undefined,
-            speaker: m.sender ?? 'unknown',
-            content: m.content ?? '',
-            timestamp: m.time ?? new Date(),
-            relevanceScore: hit.length / terms.length,
-          });
-        }
+    const groupByChatId = new Map(
+      agentGroups
+        .filter((g): g is typeof g & { chatId: string } => !!g.chatId)
+        .map((g) => [g.chatId, g])
+    );
+    const groupRows =
+      groupByChatId.size === 0
+        ? []
+        : await db
+            .select({
+              messageId: messages.id,
+              chatId: messages.chatId,
+              content: messages.content,
+              sender: messages.senderId,
+              time: messages.createdAt,
+            })
+            .from(messages)
+            .where(inArray(messages.chatId, [...groupByChatId.keys()]))
+            .orderBy(desc(messages.createdAt))
+            .limit(200);
+
+    for (const m of groupRows) {
+      if (seenMessageIds.has(m.messageId)) continue;
+      const g = groupByChatId.get(m.chatId);
+      if (!g) continue;
+      const lc = (m.content ?? '').toLowerCase();
+      const hit = terms.filter((t) => lc.includes(t));
+      if (hit.length > 0) {
+        seenMessageIds.add(m.messageId);
+        matches.push({
+          source: 'group_chat',
+          sourceId: g.groupId ?? '',
+          sourceName: g.groupName ?? undefined,
+          speaker: m.sender ?? 'unknown',
+          content: m.content ?? '',
+          timestamp: m.time ?? new Date(),
+          relevanceScore: hit.length / terms.length,
+        });
       }
     }
 
@@ -180,37 +228,25 @@ export async function executeDirectShareInformation(
     const price =
       askingPrice && askingPrice > 0 ? `\nAsking price: $${askingPrice}` : '';
     const body =
-      `[VERIFIED INTEL SHARE]\nFrom: ${agentUserId}\n` +
-      `Keywords: ${keywords.join(', ')}\n` +
+      `[INTEL SHARE - quoted messages, not verified as true]\nFrom: ${agentUserId}\n` +
+      `Keywords: ${terms.join(', ')}\n` +
       `Context: ${context || 'Information share'}\n` +
       `Matches: ${top.length}\n---\n${lines.join('\n')}${price}`;
 
-    const chatId = await generateSnowflakeId();
-    const messageId = await generateSnowflakeId();
-    await db
-      .insert(chats)
-      .values({ id: chatId, createdAt: new Date(), updatedAt: new Date() });
-    await db.insert(chatParticipants).values([
-      {
-        id: crypto.randomUUID(),
-        chatId,
-        userId: agentUserId,
-        joinedAt: new Date(),
-      },
-      {
-        id: crypto.randomUUID(),
-        chatId,
-        userId: cleanRecipientId,
-        joinedAt: new Date(),
-      },
-    ]);
-    await db.insert(messages).values({
-      id: messageId,
-      chatId,
-      senderId: agentUserId,
+    const sent = await executeDirectMessage({
+      agentUserId,
+      recipientId: cleanRecipientId,
       content: body,
-      createdAt: new Date(),
     });
+    if (!sent.success) {
+      return {
+        ...empty,
+        matchCount: top.length,
+        matches: top,
+        error: sent.error,
+      };
+    }
+    const messageId = sent.messageId;
 
     logger.info(
       `[IntelExecutor] SHARE_INFORMATION: ${agentUserId} → ${cleanRecipientId} (${top.length} matches)`,
@@ -244,51 +280,39 @@ export async function executeDirectRequestPayment(
   if (!Number.isFinite(amount) || amount <= 0)
     return { success: false, error: 'Amount must be positive' };
   if (!reason?.trim()) return { success: false, error: 'Reason is required' };
-
-  const [recipient] = await db
-    .select({ id: users.id })
-    .from(users)
-    .where(eq(users.id, cleanRecipientId))
-    .limit(1);
-  if (!recipient) return { success: false, error: 'Recipient not found' };
+  if (
+    deadline !== undefined &&
+    (!Number.isSafeInteger(deadline) || deadline <= 0)
+  ) {
+    return { success: false, error: 'Deadline must be a positive integer' };
+  }
 
   try {
+    const [recipient] = await db
+      .select({ id: users.id })
+      .from(users)
+      .where(eq(users.id, cleanRecipientId))
+      .limit(1);
+    if (!recipient) return { success: false, error: 'Recipient not found' };
+
     const requestId = await generateSnowflakeId();
-    const dl = deadline && deadline > 0 ? deadline : 10;
+    const dl = deadline ?? 10;
 
     const body =
       `[PAYMENT REQUEST]\nRequest ID: ${requestId}\n` +
       `From: ${agentUserId}\nAmount: $${amount}\n` +
-      `Reason: ${reason}\nDeadline: ${dl} ticks\n---\n` +
+      `Reason: ${reason}\nRequested within: ${dl} ticks (advisory)\n---\n` +
       `To accept: SEND_MONEY $${amount} to ${agentUserId}\n` +
       `To decline: ignore or counter-offer`;
 
-    const chatId = await generateSnowflakeId();
-    const messageId = await generateSnowflakeId();
-    await db
-      .insert(chats)
-      .values({ id: chatId, createdAt: new Date(), updatedAt: new Date() });
-    await db.insert(chatParticipants).values([
-      {
-        id: crypto.randomUUID(),
-        chatId,
-        userId: agentUserId,
-        joinedAt: new Date(),
-      },
-      {
-        id: crypto.randomUUID(),
-        chatId,
-        userId: cleanRecipientId,
-        joinedAt: new Date(),
-      },
-    ]);
-    await db.insert(messages).values({
-      id: messageId,
-      chatId,
-      senderId: agentUserId,
+    const sent = await executeDirectMessage({
+      agentUserId,
+      recipientId: cleanRecipientId,
       content: body,
-      createdAt: new Date(),
     });
+    if (!sent.success) {
+      return { success: false, error: sent.error };
+    }
 
     logger.info(
       `[IntelExecutor] REQUEST_PAYMENT: ${agentUserId} → ${cleanRecipientId} $${amount}`,

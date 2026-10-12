@@ -15,7 +15,7 @@ export interface ScamAnalysis {
 
 /**
  * Enhanced Trajectory Types for RULER/OpenPipe ART Training
- * Captures EVERYTHING needed for reinforcement learning
+ * Captures the recorded data used for reinforcement learning
  */
 
 export interface LLMCall {
@@ -303,7 +303,7 @@ export interface Trajectory {
 }
 
 /**
- * OpenAGI Chat Message Format (for ART training)
+ * OpenAI-style Chat Message Format (for ART training)
  * This is what ART/GRPO actually trains on
  */
 export interface ChatMessage {

@@ -42,8 +42,7 @@ import { logger } from '@feed/shared';
 import { existsSync, readFileSync } from 'fs';
 import { resolveLiveLlmTestConfig } from '../../../../testing/integration/helpers/live-runtime';
 // import { GameGenerator } from '@/engine/GameGenerator'; // Removed static import
-import type { FeedPost, GeneratedGame, WorldEvent } from '../../types/shared';
-import { formatError } from '../../utils/error-utils';
+import type { GeneratedGame, WorldEvent } from '../../types/shared';
 
 // Set timeout to 10 minutes for LLM-based generation
 setDefaultTimeout(600000);
@@ -117,47 +116,31 @@ const hasLLMKey = !!(
 );
 const liveLlmConfig = resolveLiveLlmTestConfig();
 
+/** Normalize a YES/NO signal; anything else is not a signal (null). */
+function toSignal(value: unknown): boolean | null {
+  if (value === true || value === 'YES') return true;
+  if (value === false || value === 'NO') return false;
+  return null;
+}
+
 // Helper functions need to be defined before usage but outside tests
 function calculateCertainty(
   events: WorldEvent[],
   questionId: number | string,
   actualOutcome: boolean
 ): number {
-  const relevantEvents = events.filter(
-    (e) =>
-      e.relatedQuestion === questionId &&
-      e.pointsToward !== null &&
-      e.pointsToward !== undefined
-  );
+  const signals = events
+    .filter((e) => e.relatedQuestion === questionId)
+    .map((e) => toSignal(e.pointsToward))
+    .filter((signal): signal is boolean => signal !== null);
 
-  if (relevantEvents.length === 0) return 0.5; // No info = 50/50
+  if (signals.length === 0) return 0.5; // No info = 50/50
 
-  const correctSignals = relevantEvents.filter(
-    (e) =>
-      (e.pointsToward === 'YES') === actualOutcome ||
-      (e.pointsToward === 'NO') === !actualOutcome
+  const correctSignals = signals.filter(
+    (signal) => signal === actualOutcome
   ).length;
 
-  return correctSignals / relevantEvents.length;
-}
-
-function calculateCertaintyFromPosts(
-  posts: FeedPost[],
-  actualOutcome: boolean
-): number {
-  const relevantPosts = posts.filter(
-    (p) => p.pointsToward !== null && p.pointsToward !== undefined
-  );
-
-  if (relevantPosts.length === 0) return 0.5;
-
-  const correctPosts = posts.filter(
-    (p) =>
-      (p.pointsToward === 'YES' || p.pointsToward === true) === actualOutcome ||
-      (p.pointsToward === 'NO' || p.pointsToward === false) === !actualOutcome
-  );
-
-  return correctPosts.length / relevantPosts.length;
+  return correctSignals / signals.length;
 }
 
 // Always run LLM tests - fail if no API key rather than skip
@@ -166,47 +149,29 @@ describe.skipIf(!liveLlmConfig.enabled)(
   () => {
     // Shared game instance - generated once before all tests
     let game: GeneratedGame | null = null;
-    let skipped = false;
-    let skipReason = '';
 
     beforeAll(async () => {
+      // The suite is opt-in (describe.skipIf above). Once enabled, missing
+      // credentials or a generation failure must fail it, not turn green.
       if (!hasLLMKey) {
-        console.log('⏭️  Skipping all tests - No LLM API key available');
-        skipped = true;
-        skipReason = 'No LLM API key';
-        return;
+        throw new Error(
+          'Live LLM learnability suite is enabled but no LLM API key is set'
+        );
       }
 
-      try {
-        logger.info(
-          'Generating shared game for learnability tests...',
-          undefined,
-          'LearnabilityTest'
-        );
-        const { GameGenerator } = await import('../../GameGenerator');
-        const generator = new GameGenerator();
-        game = await generator.generateCompleteGame();
-        logger.info(
-          'Game generated successfully',
-          undefined,
-          'LearnabilityTest'
-        );
-      } catch (error) {
-        const errorMessage = formatError(error);
-        console.log(
-          '⏭️  Game generation failed - tests will skip:',
-          errorMessage.substring(0, 100)
-        );
-        skipped = true;
-        skipReason = `Generation failed: ${errorMessage.substring(0, 100)}`;
-      }
+      logger.info(
+        'Generating shared game for learnability tests...',
+        undefined,
+        'LearnabilityTest'
+      );
+      const { GameGenerator } = await import('../../GameGenerator');
+      const generator = new GameGenerator();
+      game = await generator.generateCompleteGame();
+      logger.info('Game generated successfully', undefined, 'LearnabilityTest');
     });
 
     test('CRITICAL: information gradient exists (early unclear, late clear)', async () => {
-      if (skipped || !game) {
-        console.log(`⏭️  Skipping - ${skipReason || 'No game generated'}`);
-        return;
-      }
+      if (!game) throw new Error('No game generated');
 
       logger.info(
         'Testing information gradient...',
@@ -273,10 +238,7 @@ describe.skipIf(!liveLlmConfig.enabled)(
     });
 
     test('NPCs with high reliability are consistently accurate', async () => {
-      if (skipped || !game) {
-        console.log(`⏭️  Skipping - ${skipReason || 'No game generated'}`);
-        return;
-      }
+      if (!game) throw new Error('No game generated');
 
       logger.info('Testing NPC consistency...', undefined, 'LearnabilityTest');
 
@@ -332,10 +294,7 @@ describe.skipIf(!liveLlmConfig.enabled)(
     });
 
     test('simple betting strategy beats random guessing', async () => {
-      if (skipped || !game) {
-        console.log(`⏭️  Skipping - ${skipReason || 'No game generated'}`);
-        return;
-      }
+      if (!game) throw new Error('No game generated');
 
       logger.info(
         'Testing learnability with simple strategy...',
@@ -407,7 +366,7 @@ describe.skipIf(!liveLlmConfig.enabled)(
         'LearnabilityTest'
       );
       logger.info(
-        accuracy >= 0.5
+        accuracy > 0.5
           ? '✅ PASS: Game is learnable'
           : '❌ FAIL: Game not learnable',
         undefined,
@@ -415,67 +374,12 @@ describe.skipIf(!liveLlmConfig.enabled)(
       );
       logger.info('─'.repeat(50), undefined, 'LearnabilityTest');
 
-      // Relaxed threshold - just needs to beat random (50%)
-      expect(accuracy).toBeGreaterThanOrEqual(0.5);
-    });
-
-    test('group chat information provides measurable advantage', async () => {
-      if (skipped || !game) {
-        console.log(`⏭️  Skipping - ${skipReason || 'No game generated'}`);
-        return;
-      }
-
-      logger.info(
-        'Testing group chat advantage...',
-        undefined,
-        'LearnabilityTest'
-      );
-
-      for (const question of game.setup.questions) {
-        const publicPosts = game.timeline
-          .flatMap((day) => day.feedPosts)
-          .filter(
-            (post) =>
-              post.relatedQuestion === question.id && post.pointsToward !== null
-          );
-
-        const publicCertainty = calculateCertaintyFromPosts(
-          publicPosts,
-          question.outcome
-        );
-
-        const groupChatHints = game.timeline
-          .flatMap((day) => Object.values(day.groupChats).flat())
-          .filter((msg) => {
-            const questionKeywords = question.text
-              .toLowerCase()
-              .split(' ')
-              .filter((w) => w.length > 4);
-            const messageLower = msg.message.toLowerCase();
-            return questionKeywords.some((keyword) =>
-              messageLower.includes(keyword)
-            );
-          });
-
-        const groupChatValue = groupChatHints.length * 0.04;
-
-        logger.info(
-          `Q${question.id}: Public ${(publicCertainty * 100).toFixed(0)}%, Group chats +${(groupChatValue * 100).toFixed(0)}% (${groupChatHints.length} hints)`,
-          undefined,
-          'LearnabilityTest'
-        );
-
-        if (groupChatHints.length > 0) {
-          expect(groupChatValue).toBeGreaterThan(0);
-        }
-      }
+      // Must beat random guessing (strictly more than 50%)
+      expect(accuracy).toBeGreaterThan(0.5);
     });
 
     test('questions have resolution verification events', async () => {
-      if (skipped || !game) {
-        console.log(`⏭️  Skipping - ${skipReason || 'No game generated'}`);
-        return;
-      }
+      if (!game) throw new Error('No game generated');
 
       logger.info(
         'Testing resolution verification...',

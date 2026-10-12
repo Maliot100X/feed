@@ -95,7 +95,7 @@ export default defineSystem({
   },
 
   async destroy() {
-    // called once at shutdown, in reverse registration order
+    // called once at shutdown, in reverse boot (sorted) order
   },
 });
 ```
@@ -285,7 +285,7 @@ Tests cover the engine, composables, hooks, context, metrics, service container,
 
 ## Architecture notes
 
-**Phase ordering, then dependency ordering.** Systems are grouped by phase, phases are sorted numerically, and within each phase systems are topologically sorted by their `dependencies` array. A system can depend on a system in an earlier phase (it will have already run) or in the same phase (it will be sorted before you).
+**Phase ordering, then dependency ordering.** Systems are grouped by phase, phases are sorted numerically, and within each phase systems are topologically sorted by their `dependencies` array. A system can depend on a system in an earlier phase (it will have already run) or in the same phase (it will be sorted before you). Depending on a later-phase system, or registering a duplicate id, fails at boot/registration.
 
 **Deadline gating.** Each tick gets a deadline computed from `config.budgetMs`. When the deadline passes, remaining systems are skipped with a warning, except for `Finalize`-phase systems and any system with `skipDeadlineCheck: true`.
 
@@ -293,4 +293,4 @@ Tests cover the engine, composables, hooks, context, metrics, service container,
 
 **Fresh state per tick.** Metrics and shared data are created fresh for each tick. Nothing leaks between ticks.
 
-**Auto-discovery.** The scanner uses unimport's `scanDirExports` to find all `.ts`/`.js` files in the systems directory. It tries the default export first, then named exports. It handles both plain objects and class constructors. Duplicates within a file are deduplicated by system id.
+**Auto-discovery.** The scanner uses unimport's `scanDirExports` to find all `.ts`/`.js` files in the systems directory. It tries the default export first, then named exports. It handles plain objects and class constructors (plain functions are never invoked). The same value exported under several names is registered once. Load or constructor failures reject with the file path. `feed build` generates an entry that uses the same `core/runtime.ts` resolution and config-override logic as the CLI.

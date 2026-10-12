@@ -130,7 +130,7 @@ export async function getEmbeddings(
 
   // OpenAI supports batching up to ~2048 inputs per call,
   // but we cap at MAX_BATCH_SIZE for memory safety.
-  const results: (number[] | null)[] = [];
+  const results: (number[] | null)[] = texts.map(() => null);
 
   for (let i = 0; i < texts.length; i += MAX_BATCH_SIZE) {
     const batch = texts.slice(i, i + MAX_BATCH_SIZE);
@@ -147,10 +147,26 @@ export async function getEmbeddings(
         'EmbeddingClient'
       );
 
-      // Response data is ordered by index
-      const sorted = response.data.sort((a, b) => a.index - b.index);
-      for (const item of sorted) {
-        results.push(item.embedding);
+      // Place each vector at its declared index so a missing or reordered
+      // entry can never shift later embeddings onto the wrong text.
+      let placed = 0;
+      for (const item of response.data) {
+        if (
+          Number.isInteger(item.index) &&
+          item.index >= 0 &&
+          item.index < batch.length &&
+          Array.isArray(item.embedding)
+        ) {
+          results[i + item.index] = item.embedding;
+          placed++;
+        }
+      }
+      if (placed !== batch.length) {
+        logger.warn(
+          'Batch embedding response missing entries',
+          { expected: batch.length, received: placed, batchOffset: i },
+          'EmbeddingClient'
+        );
       }
     } catch (error) {
       const latencyMs = Date.now() - batchStartTime;
@@ -165,10 +181,7 @@ export async function getEmbeddings(
         },
         'EmbeddingClient'
       );
-      // Fill failed batch with nulls, preserve earlier successful results
-      for (let j = 0; j < batch.length; j++) {
-        results.push(null);
-      }
+      // Failed batch entries remain null; earlier successful results are kept
     }
   }
 

@@ -111,7 +111,7 @@ export const relayToAgentAction: Action = {
         success: false,
         text: 'Missing required parameters for relay dispatch.',
       };
-      _callback?.({ content: failResult as unknown as Content });
+      await _callback?.({ content: failResult as unknown as Content });
       return failResult as unknown as ActionResult;
     }
 
@@ -136,7 +136,7 @@ export const relayToAgentAction: Action = {
         text: `Failed to relay to agent: ${result.error ?? 'Unknown error'}`,
         values: { agentId, command, relayContext, error: result.error },
       };
-      _callback?.({ content: failResult as unknown as Content });
+      await _callback?.({ content: failResult as unknown as Content });
       return failResult as unknown as ActionResult;
     }
 
@@ -152,7 +152,7 @@ export const relayToAgentAction: Action = {
         actionsExecuted: result.actionsExecuted,
       },
     } as unknown as ActionResult;
-    _callback?.({ content: successResult as unknown as Content });
+    await _callback?.({ content: successResult as unknown as Content });
     return successResult;
   },
 };

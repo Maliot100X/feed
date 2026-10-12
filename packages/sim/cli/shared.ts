@@ -4,9 +4,10 @@
 
 import consola from 'consola';
 import type { FeedRuntimeConfig } from '../core/config';
-import { FeedEngine } from '../core/engine';
-import { scanSystems } from '../core/scanner';
-import { type FeedSystem, TickPhase } from '../core/types';
+import type { FeedEngine } from '../core/engine';
+import { createEngineFromConfig, registerSystems } from '../core/runtime';
+import { type ScanOptions, scanSystems } from '../core/scanner';
+import { TickPhase } from '../core/types';
 
 export const phaseNames: Record<number, string> = {
   [TickPhase.Bootstrap]: 'Bootstrap',
@@ -26,19 +27,10 @@ export function phaseName(phase: number): string {
 export async function buildEngine(
   config: FeedRuntimeConfig,
   rootDir: string,
-  includeLegacy: boolean
+  includeLegacy: boolean,
+  options: ScanOptions = {}
 ): Promise<FeedEngine> {
-  const {
-    systemsDir: _systemsDir,
-    disabledSystems: _disabledSystems,
-    systemPhases: _systemPhases,
-    migratedSubsystems: _migratedSubsystems,
-    dev: _dev,
-    ...customKeys
-  } = config;
-  const engine = new FeedEngine({
-    config: { budgetMs: config.budgetMs ?? 60_000, ...customKeys },
-  });
+  const engine = createEngineFromConfig(config);
 
   if (includeLegacy) {
     const { createLegacyGameTickSystem } = await import(
@@ -53,49 +45,10 @@ export async function buildEngine(
 
   const { systems } = await scanSystems(
     config.systemsDir ?? './systems',
-    rootDir
+    rootDir,
+    options
   );
-
-  const phaseOverrides = config.systemPhases ?? {};
-  const validPhases = new Set(Object.values(TickPhase));
-
-  function applyPhaseOverride(sys: FeedSystem): FeedSystem {
-    const override = phaseOverrides[sys.id];
-    if (override === undefined) return sys;
-    if (typeof override !== 'number' || !validPhases.has(override)) {
-      consola.warn(
-        `Ignoring invalid phase override for "${sys.id}": ${String(override)}`
-      );
-      return sys;
-    }
-    if (sys.phase === override) return sys;
-    try {
-      (sys as { phase: TickPhase }).phase = override;
-      return sys;
-    } catch {
-      return {
-        id: sys.id,
-        name: sys.name,
-        phase: override,
-        dependencies: sys.dependencies,
-        skipDeadlineCheck: sys.skipDeadlineCheck,
-        intervals: sys.intervals,
-        register: sys.register ? (ctx) => sys.register!(ctx) : undefined,
-        onTick: (ctx) => sys.onTick(ctx),
-        destroy: sys.destroy ? () => sys.destroy!() : undefined,
-      };
-    }
-  }
-
-  let scanned = 0;
-  for (const sys of systems) {
-    if (config.disabledSystems?.includes(sys.id)) {
-      consola.warn(`System "${sys.id}" disabled by config`);
-      continue;
-    }
-    engine.use(applyPhaseOverride(sys));
-    scanned++;
-  }
+  const scanned = registerSystems(engine, systems, config);
 
   consola.info(
     includeLegacy

@@ -40,7 +40,7 @@ interface FollowUser {
   isActor: boolean;
   followedAt: string;
   tier?: string | null;
-  isMutualFollow?: boolean;
+  viewerFollows?: boolean;
 }
 
 interface FollowListModalProps {
@@ -127,8 +127,8 @@ export function FollowListModal({
             statusMap[u.id] = true;
           } else {
             // Viewing followers or someone else's following list
-            // isMutualFollow indicates if the current user follows this person
-            statusMap[u.id] = u.isMutualFollow || false;
+            // viewerFollows indicates if the current user follows this person
+            statusMap[u.id] = u.viewerFollows || false;
           }
         }
         setFollowingStatus(statusMap);

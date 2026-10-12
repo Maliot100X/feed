@@ -21,6 +21,7 @@ import {
 } from 'bun:test';
 import { db } from '@feed/db';
 import { GROUP_CONFIG, generateSnowflakeId } from '@feed/shared';
+import { createStewardTestToken } from './helpers/steward-auth';
 
 // Base URL for API calls
 const BASE_URL =
@@ -63,7 +64,11 @@ async function checkServerHealth(): Promise<boolean> {
   }
 }
 
-// HTTP helper for POST requests with authentication
+function stewardIdFor(userId: string): string {
+  return `group-invite-${userId}`;
+}
+
+// HTTP helper for POST requests with a signed Steward token
 async function postWithAuth(
   path: string,
   userId: string,
@@ -73,7 +78,7 @@ async function postWithAuth(
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
-      'x-dev-user-id': userId,
+      Authorization: `Bearer ${await createStewardTestToken(stewardIdFor(userId))}`,
     },
     body: body ? JSON.stringify(body) : undefined,
     signal: AbortSignal.timeout(10000),
@@ -104,6 +109,7 @@ async function createTestUser(options?: {
       isAgent: false,
       isTest: true,
       privyId,
+      stewardId: stewardIdFor(id),
       updatedAt: new Date(),
     },
   });

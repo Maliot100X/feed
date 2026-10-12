@@ -93,31 +93,38 @@ import { apiUrl } from '@/utils/api-url';
 /**
  * Available admin dashboard tabs
  */
-type Tab =
-  | 'stats'
-  | 'analytics'
-  | 'growth'
-  | 'system-health'
-  | 'game-control'
-  | 'fees'
-  | 'trades'
-  | 'markets'
-  | 'users'
-  | 'content-moderation'
-  | 'registry'
-  | 'groups'
-  | 'notifications'
-  | 'admins'
-  | 'reports'
-  | 'feedback'
-  | 'human-review'
-  | 'ai-models'
-  | 'training-data'
-  | 'agents'
-  | 'escrow'
-  | 'audit-logs'
-  | 'alpha-groups'
-  | 'whitelist';
+const TAB_IDS = [
+  'stats',
+  'analytics',
+  'growth',
+  'system-health',
+  'game-control',
+  'fees',
+  'trades',
+  'markets',
+  'users',
+  'content-moderation',
+  'registry',
+  'groups',
+  'notifications',
+  'admins',
+  'reports',
+  'feedback',
+  'human-review',
+  'ai-models',
+  'training-data',
+  'agents',
+  'escrow',
+  'audit-logs',
+  'alpha-groups',
+  'whitelist',
+] as const;
+type Tab = (typeof TAB_IDS)[number];
+
+/** Validate a `?tab=` value against the known tab ids. */
+function parseAdminTab(value: string | null): Tab | null {
+  return TAB_IDS.find((id) => id === value) ?? null;
+}
 
 /**
  * Admin Dashboard Component
@@ -129,7 +136,23 @@ type Tab =
 export default function AdminDashboard() {
   const router = useRouter();
   const { authenticated, ready } = useAuth();
-  const [activeTab, setActiveTab] = useState<Tab>('stats');
+  const [activeTab, setActiveTabState] = useState<Tab>('stats');
+
+  // Honor `?tab=` deep links (e.g. /registry redirects to /admin?tab=registry)
+  // and keep the URL in sync so tabs are linkable and survive reloads.
+  useEffect(() => {
+    const fromUrl = parseAdminTab(
+      new URLSearchParams(window.location.search).get('tab')
+    );
+    if (fromUrl) setActiveTabState(fromUrl);
+  }, []);
+
+  const setActiveTab = useCallback((tab: Tab) => {
+    setActiveTabState(tab);
+    const url = new URL(window.location.href);
+    url.searchParams.set('tab', tab);
+    window.history.replaceState(window.history.state, '', url);
+  }, []);
   const [isAuthorized, setIsAuthorized] = useState<boolean | null>(null);
   const [loading, setLoading] = useState(true);
 
@@ -171,13 +194,11 @@ export default function AdminDashboard() {
           error instanceof Error ? error : { error },
           'AdminPage'
         );
-        setIsAuthorized(false);
-        setLoading(false);
-        throw error;
+        return null;
       }
     );
 
-    if (!response.ok) {
+    if (!response?.ok) {
       setIsAuthorized(false);
       setLoading(false);
       return;

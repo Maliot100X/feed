@@ -11,7 +11,8 @@ export interface LeaderboardUser {
   capitalBase?: number;
   effectiveCapitalBase?: number;
   tradingReturn?: number;
-  createdAt: Date;
+  /** ISO timestamp (JSON). */
+  createdAt: string;
   rank: number;
   isAgent?: boolean;
   managedBy?: string | null;
@@ -68,8 +69,6 @@ export type FetchLeaderboardOptions = {
   userId?: string;
   authToken?: string | null;
   signal?: AbortSignal;
-  retryDelayMs?: number;
-  retries?: number;
 };
 
 function buildLeaderboardUrl({
@@ -78,7 +77,7 @@ function buildLeaderboardUrl({
   selectedMetric,
   selectedScope,
   userId,
-}: Omit<FetchLeaderboardOptions, 'signal' | 'retryDelayMs' | 'retries'>) {
+}: Omit<FetchLeaderboardOptions, 'signal' | 'authToken'>) {
   const searchParams = new URLSearchParams({
     metric: selectedMetric,
     type: selectedScope,
@@ -93,61 +92,30 @@ function buildLeaderboardUrl({
   return `/api/leaderboard?${searchParams.toString()}`;
 }
 
-function isRetryableLeaderboardError(error: unknown): boolean {
-  if (isAbortError(error)) {
-    return false;
-  }
-
-  if (error instanceof TypeError) {
-    return error.message.toLowerCase().includes('fetch');
-  }
-
-  if (error instanceof LeaderboardFetchError && error.status !== undefined) {
-    return error.status === 408 || error.status === 429 || error.status >= 500;
-  }
-
-  if (error instanceof Error) {
-    const message = error.message.toLowerCase();
-    return (
-      message.includes('failed to fetch') ||
-      message.includes('load failed') ||
-      message.includes('network')
-    );
-  }
-
-  return false;
-}
-
-function sleep(ms: number, signal?: AbortSignal): Promise<void> {
-  return new Promise((resolve, reject) => {
-    if (signal?.aborted) {
-      reject(new DOMException('Aborted', 'AbortError'));
-      return;
-    }
-
-    const timeoutId = globalThis.setTimeout(() => {
-      cleanup();
-      resolve();
-    }, ms);
-
-    const onAbort = () => {
-      cleanup();
-      reject(new DOMException('Aborted', 'AbortError'));
-    };
-
-    const cleanup = () => {
-      globalThis.clearTimeout(timeoutId);
-      signal?.removeEventListener('abort', onAbort);
-    };
-
-    signal?.addEventListener('abort', onAbort, { once: true });
-  });
-}
-
 export function isAbortError(error: unknown): boolean {
   return error instanceof Error && error.name === 'AbortError';
 }
 
+/**
+ * Retry policy for leaderboard queries (applied once, in the query layer):
+ * network failures and 408/429/5xx are retryable; other HTTP errors and
+ * aborts are not.
+ */
+export function isRetryableLeaderboardError(error: unknown): boolean {
+  if (isAbortError(error)) return false;
+  if (error instanceof LeaderboardFetchError) {
+    return (
+      error.status === undefined ||
+      error.status === 408 ||
+      error.status === 429 ||
+      error.status >= 500
+    );
+  }
+  // fetch() rejects with TypeError on network failure.
+  return error instanceof TypeError;
+}
+
+/** Single attempt; retries are owned by React Query (see useLeaderboardQuery). */
 export async function fetchLeaderboardData({
   currentPage,
   pageSize,
@@ -156,8 +124,6 @@ export async function fetchLeaderboardData({
   userId,
   authToken,
   signal,
-  retryDelayMs = 1000,
-  retries = 2,
 }: FetchLeaderboardOptions): Promise<LeaderboardData> {
   const url = buildLeaderboardUrl({
     currentPage,
@@ -171,26 +137,12 @@ export async function fetchLeaderboardData({
     ? { Authorization: `Bearer ${authToken}` }
     : undefined;
 
-  for (let attempt = 0; attempt <= retries; attempt++) {
-    try {
-      const response = await fetch(url, { signal, headers });
-
-      if (!response.ok) {
-        throw new LeaderboardFetchError(
-          `Failed to fetch leaderboard: ${response.status}`,
-          response.status
-        );
-      }
-
-      return (await response.json()) as LeaderboardData;
-    } catch (error) {
-      if (!isRetryableLeaderboardError(error) || attempt === retries) {
-        throw error;
-      }
-
-      await sleep(retryDelayMs, signal);
-    }
+  const response = await fetch(url, { signal, headers });
+  if (!response.ok) {
+    throw new LeaderboardFetchError(
+      `Failed to fetch leaderboard: ${response.status}`,
+      response.status
+    );
   }
-
-  throw new LeaderboardFetchError('Failed to fetch leaderboard');
+  return (await response.json()) as LeaderboardData;
 }

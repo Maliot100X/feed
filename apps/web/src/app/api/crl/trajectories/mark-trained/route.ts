@@ -2,6 +2,7 @@
  * Mark Trajectories as Trained
  *
  * @route POST /api/crl/trajectories/mark-trained
+ * @access Service (CRON_SECRET bearer token)
  *
  * Called by the Nebius CRL trainer after processing a batch of trajectories.
  * Marks them as usedInTraining=true so they won't be re-fetched.
@@ -9,58 +10,59 @@
  * Body: { trajectoryIds: string[], batchId?: string }
  */
 
-import { withErrorHandling } from '@feed/api';
-import { db, inArray, trajectories } from '@feed/db';
+import { withCronAuth, withErrorHandling } from '@feed/api';
+import { and, db, eq, inArray, trajectories } from '@feed/db';
 import { type NextRequest, NextResponse } from 'next/server';
+import { z } from 'zod';
 
 export const dynamic = 'force-dynamic';
 
-export const POST = withErrorHandling(async function POST(
-  request: NextRequest
-) {
-  try {
-    const body = await request.json();
-    const { trajectoryIds, batchId } = body as {
-      trajectoryIds: string[];
-      batchId?: string;
-    };
-
-    if (!Array.isArray(trajectoryIds) || trajectoryIds.length === 0) {
-      return NextResponse.json(
-        { error: 'trajectoryIds must be a non-empty array' },
-        { status: 400 }
-      );
-    }
-
-    if (trajectoryIds.length > 500) {
-      return NextResponse.json(
-        { error: 'Maximum 500 trajectory IDs per request' },
-        { status: 400 }
-      );
-    }
-
-    const updateData: Record<string, unknown> = {
-      usedInTraining: true,
-      updatedAt: new Date(),
-    };
-    if (batchId) {
-      updateData.trainedInBatch = batchId;
-    }
-
-    await db
-      .update(trajectories)
-      .set(updateData)
-      .where(inArray(trajectories.trajectoryId, trajectoryIds));
-
-    return NextResponse.json({
-      success: true,
-      marked: trajectoryIds.length,
-      batchId: batchId || null,
-    });
-  } catch (_error) {
-    return NextResponse.json(
-      { error: 'Failed to mark trajectories' },
-      { status: 500 }
-    );
-  }
+const MarkTrainedSchema = z.object({
+  trajectoryIds: z.array(z.string().min(1).max(256)).min(1).max(500),
+  batchId: z.string().max(256).optional(),
 });
+
+export const POST = withErrorHandling(
+  withCronAuth('CrlMarkTrained', async (request: NextRequest) => {
+    const parsed = MarkTrainedSchema.safeParse(await request.json());
+    if (!parsed.success) {
+      return NextResponse.json(
+        {
+          error:
+            'trajectoryIds must be a non-empty array of at most 500 trajectory IDs',
+        },
+        { status: 400, headers: { 'Cache-Control': 'no-store' } }
+      );
+    }
+
+    const trajectoryIds = [...new Set(parsed.data.trajectoryIds)];
+    const batchId = parsed.data.batchId || null;
+
+    // Only flip rows that have not been consumed yet so a different run
+    // cannot overwrite an existing trainedInBatch attribution.
+    const updated = await db
+      .update(trajectories)
+      .set({
+        usedInTraining: true,
+        updatedAt: new Date(),
+        ...(batchId ? { trainedInBatch: batchId } : {}),
+      })
+      .where(
+        and(
+          inArray(trajectories.trajectoryId, trajectoryIds),
+          eq(trajectories.usedInTraining, false)
+        )
+      )
+      .returning({ trajectoryId: trajectories.trajectoryId });
+
+    return NextResponse.json(
+      {
+        success: true,
+        requested: trajectoryIds.length,
+        marked: updated.length,
+        batchId,
+      },
+      { headers: { 'Cache-Control': 'no-store' } }
+    );
+  })
+);

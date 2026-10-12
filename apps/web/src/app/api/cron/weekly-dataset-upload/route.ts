@@ -83,16 +83,20 @@ export const POST = withErrorHandling(async function POST(
     'WeeklyDatasetUpload'
   );
 
-  return NextResponse.json({
-    success: result.success,
-    duration: result.duration,
-    results: {
-      benchmarkDataset: result.datasets.benchmarks,
-      trajectoryDataset: result.datasets.trajectories,
-      modelsProcessed: result.models.processed,
-      modelsBenchmarked: result.models.benchmarked,
-      modelsUploaded: result.models.uploaded,
-      errors: result.errors,
+  return NextResponse.json(
+    {
+      success: result.success,
+      duration: result.duration,
+      results: {
+        benchmarkDataset: result.datasets.benchmarks,
+        trajectoryDataset: result.datasets.trajectories,
+        modelsProcessed: result.models.processed,
+        modelsBenchmarked: result.models.benchmarked,
+        modelsUploaded: result.models.uploaded,
+        errors: result.errors,
+      },
     },
-  });
+    // Surface failed runs to the scheduler instead of a 200 with success:false.
+    { status: result.success ? 200 : 500 }
+  );
 });

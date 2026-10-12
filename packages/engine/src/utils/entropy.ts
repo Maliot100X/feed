@@ -202,15 +202,22 @@ export const generateSentimentSignal = (
 // Seeded PRNG (testing)
 // =============================================================================
 
-/** Reproducible xorshift128+ PRNG */
+/** FNV-1a 32-bit hash so distinct strings (including anagrams) seed distinct streams. */
+function hashSeed(seed: string): number {
+  let h = 0x811c9dc5;
+  for (let i = 0; i < seed.length; i++) {
+    h ^= seed.charCodeAt(i);
+    h = Math.imul(h, 0x01000193);
+  }
+  return h >>> 0;
+}
+
+/** Reproducible 32-bit xorshift-style PRNG (not cryptographic). Output is in [0, 1). */
 export class SeededRandom {
   private s: [number, number];
 
   constructor(seed: number | string) {
-    const n =
-      typeof seed === 'string'
-        ? seed.split('').reduce((a, c) => a + c.charCodeAt(0), 0)
-        : seed;
+    const n = typeof seed === 'string' ? hashSeed(seed) : seed;
     this.s = [n ^ 0xdeadbeef, n ^ 0x12345678];
   }
 
@@ -223,7 +230,7 @@ export class SeededRandom {
     s1 ^= s0;
     s1 ^= s0 >>> 26;
     this.s[1] = s1;
-    return ((this.s[0]! + this.s[1]!) >>> 0) / 0xffffffff;
+    return ((this.s[0]! + this.s[1]!) >>> 0) / 0x100000000;
   }
 
   nextInt(min: number, max: number): number {
@@ -235,6 +242,7 @@ export class SeededRandom {
   }
 
   pick<T>(arr: readonly T[]): T {
+    if (arr.length === 0) throw new Error('Cannot pick from an empty array');
     return arr[this.nextInt(0, arr.length - 1)]!;
   }
 

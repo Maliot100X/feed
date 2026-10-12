@@ -260,6 +260,22 @@ export class QuestionArcPlanner {
       rng
     );
 
+    // Red herrings are scheduled on top of the per-phase targets; count them
+    // in their phase so the declared targets describe the actual schedule.
+    for (const redHerring of redHerrings) {
+      const phase = Object.values(phases).find(
+        ({ daysRange: [start, end] }) =>
+          redHerring.day >= start && redHerring.day <= end
+      );
+      if (!phase) {
+        throw new Error(
+          `Red herring day ${redHerring.day} is outside every arc phase`
+        );
+      }
+      phase.targetEventsTotal++;
+      phase.targetWrongSignals++;
+    }
+
     // Calculate event distribution targets
     const plan: QuestionArcPlan = {
       questionId: question.id,
@@ -547,32 +563,5 @@ export class QuestionArcPlanner {
       }
     }
     return null;
-  }
-
-  /**
-   * Calculate expected certainty at a given day based on arc plan
-   *
-   * @description
-   * Returns the expected certainty (0-1) for this question on this day
-   * based on the planned signal distribution.
-   *
-   * **Certainty Calculation:**
-   * - 0.5 = No information (50/50 guess)
-   * - 0.7 = 70% correct signals (moderate confidence)
-   * - 0.9 = 90% correct signals (high confidence)
-   *
-   * @returns Expected certainty from 0-1
-   */
-  calculateExpectedCertainty(day: number, arcPlan: QuestionArcPlan): number {
-    const phase = this.getPhaseForDay(day, arcPlan);
-    if (!phase) return 0.5; // No info = 50/50
-
-    const phaseData = arcPlan.phases[phase];
-    const totalSignals =
-      phaseData.targetCorrectSignals + phaseData.targetWrongSignals;
-
-    if (totalSignals === 0) return 0.5;
-
-    return phaseData.targetCorrectSignals / totalSignals;
   }
 }

@@ -55,7 +55,7 @@ export type AgentLLMProvider =
  */
 function getConfiguredProvider(): AgentLLMProvider {
   if (getSurplusConfig()) return 'surplus';
-  const provider = process.env.AGENT_LLM_PROVIDER?.toLowerCase();
+  const provider = process.env.AGENT_LLM_PROVIDER?.trim().toLowerCase();
   if (provider === 'huggingface' || provider === 'hf') return 'huggingface';
   if (provider === 'phala') return 'phala';
   if (provider === 'ollama' || provider === 'local') return 'ollama';
@@ -89,6 +89,41 @@ export interface AgentLLMParams {
   runtime?: IAgentRuntime;
 }
 
+/** OpenAI-compatible usage block as reported by the provider */
+interface OpenAIUsage {
+  prompt_tokens?: number;
+  completion_tokens?: number;
+}
+
+/** Preserve provider-reported usage; non-finite/negative values are dropped. */
+function toTokenCounts(
+  usage: OpenAIUsage | undefined
+): { promptTokens?: number; completionTokens?: number } | undefined {
+  if (!usage) return undefined;
+  const valid = (n: number | undefined) =>
+    typeof n === 'number' && Number.isFinite(n) && n >= 0 ? n : undefined;
+  return {
+    promptTokens: valid(usage.prompt_tokens),
+    completionTokens: valid(usage.completion_tokens),
+  };
+}
+
+/**
+ * Log (truncated) provider error bodies for operators instead of embedding
+ * raw provider responses in errors that may surface to users.
+ */
+async function logProviderErrorBody(
+  provider: string,
+  response: Response
+): Promise<void> {
+  const body = await response.text();
+  logger.warn(
+    `${provider} API error response`,
+    { status: response.status, body: body.slice(0, 500) },
+    'AgentLLM'
+  );
+}
+
 /**
  * Calls HuggingFace inference endpoint
  *
@@ -103,7 +138,8 @@ export interface AgentLLMParams {
 async function callHuggingFace(params: AgentLLMParams): Promise<string> {
   const apiKey = process.env.HUGGINGFACE_API_KEY;
   const endpoint = process.env.HUGGINGFACE_MODEL_ENDPOINT;
-  const apiFormat = process.env.HUGGINGFACE_API_FORMAT || 'inference';
+  const apiFormat =
+    process.env.HUGGINGFACE_API_FORMAT?.trim().toLowerCase() || 'inference';
   if (apiFormat !== 'inference' && apiFormat !== 'openai')
     throw new Error(`Unsupported HUGGINGFACE_API_FORMAT: ${apiFormat}`);
 
@@ -163,15 +199,18 @@ async function callHuggingFace(params: AgentLLMParams): Promise<string> {
     body: requestBody,
     signal: AbortSignal.timeout(120000),
   });
-  if (!response.ok)
-    throw new Error(
-      `HuggingFace API error: ${response.status} - ${await response.text()}`
-    );
+  if (!response.ok) {
+    await logProviderErrorBody('HuggingFace', response);
+    throw new Error(`HuggingFace API error: ${response.status}`);
+  }
 
   const data = (await response.json()) as
     | Array<{ generated_text: string }>
     | { generated_text: string }
-    | { choices?: Array<{ message?: { content: string } }> };
+    | {
+        choices?: Array<{ message?: { content: string } }>;
+        usage?: OpenAIUsage;
+      };
   const latencyMs = Date.now() - startTime;
 
   let responseText: string;
@@ -192,7 +231,8 @@ async function callHuggingFace(params: AgentLLMParams): Promise<string> {
     process.env.HUGGINGFACE_MODEL_NAME ||
       (params.archetype ? `feed-${params.archetype}` : 'default'),
     responseText,
-    latencyMs
+    latencyMs,
+    'usage' in data ? toTokenCounts(data.usage) : undefined
   );
 
   return responseText;
@@ -233,13 +273,14 @@ async function callPhala(params: AgentLLMParams): Promise<string> {
   });
 
   if (!response.ok) {
-    const errorText = await response.text();
-    throw new Error(`Phala API error: ${response.status} - ${errorText}`);
+    await logProviderErrorBody('Phala', response);
+    throw new Error(`Phala API error: ${response.status}`);
   }
 
   const data = (await response.json()) as {
     choices?: Array<{ message?: { content: string } }>;
     response?: string;
+    usage?: OpenAIUsage;
   };
   const latencyMs = Date.now() - startTime;
 
@@ -251,7 +292,8 @@ async function callPhala(params: AgentLLMParams): Promise<string> {
     params,
     params.archetype ? `feed-${params.archetype}` : 'feed-default',
     responseText,
-    latencyMs
+    latencyMs,
+    toTokenCounts(data.usage)
   );
 
   return responseText;

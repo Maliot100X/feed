@@ -186,7 +186,8 @@ export const GET = withErrorHandling(
         ),
       ];
 
-      // Fetch posts for these comments
+      // Fetch posts for these comments. Deleted or not-yet-published (future)
+      // parents are never exposed; the reply renders with post: null instead.
       const postsData = await db
         .select({
           id: posts.id,
@@ -195,7 +196,13 @@ export const GET = withErrorHandling(
           timestamp: posts.timestamp,
         })
         .from(posts)
-        .where(inArray(posts.id, postIds));
+        .where(
+          and(
+            inArray(posts.id, postIds),
+            isNull(posts.deletedAt),
+            lte(posts.timestamp, new Date())
+          )
+        );
 
       const postsMap = new Map(postsData.map((p) => [p.id, p]));
 
@@ -695,10 +702,14 @@ export const GET = withErrorHandling(
 
     let originalPostsMap = new Map<string, typeof posts.$inferSelect>();
     if (originalPostIds.length > 0) {
+      // Future-dated originals are not public yet; deleted ones are handled
+      // below as tombstones.
       const originalPosts = await db
         .select()
         .from(posts)
-        .where(inArray(posts.id, originalPostIds));
+        .where(
+          and(inArray(posts.id, originalPostIds), lte(posts.timestamp, now))
+        );
       originalPostsMap = new Map(originalPosts.map((p) => [p.id, p]));
     }
 

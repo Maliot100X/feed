@@ -32,49 +32,8 @@ export interface UserEntity {
 }
 
 /**
- * Actor/Character entity
+ * Entity mention result, discriminated by `type`.
  */
-export interface ActorEntity {
-  id: string;
-  name: string;
-  description?: string | null;
-  bio?: string | null;
-  category?: string | null;
-  role?: string | null;
-  profileImageUrl?: string | null;
-}
-
-/**
- * Entity mention result
- */
-export interface EntityMention {
-  type: 'company' | 'user' | 'actor';
-  data: CompanyEntity | UserEntity | ActorEntity;
-}
-
-/**
- * Type guard for company entity
- */
-export function isCompanyEntity(
-  entity: CompanyEntity | UserEntity | ActorEntity
-): entity is CompanyEntity {
-  return 'ticker' in entity || 'currentPrice' in entity;
-}
-
-/**
- * Type guard for user entity
- */
-export function isUserEntity(
-  entity: CompanyEntity | UserEntity | ActorEntity
-): entity is UserEntity {
-  return 'username' in entity && !('ticker' in entity);
-}
-
-/**
- * Type guard for actor entity
- */
-export function isActorEntity(
-  entity: CompanyEntity | UserEntity | ActorEntity
-): entity is ActorEntity {
-  return 'name' in entity && !('username' in entity) && !('ticker' in entity);
-}
+export type EntityMention =
+  | { type: 'company'; data: CompanyEntity }
+  | { type: 'user'; data: UserEntity };

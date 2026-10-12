@@ -164,9 +164,9 @@ describe('TimeframeArcPlanner', () => {
         mockOrganizations
       );
 
-      // Intraday markets: max=1 deceiver, limited by available contrarian actors
-      expect(intradayPlan.deceivers.length).toBeGreaterThanOrEqual(0);
-      expect(intradayPlan.deceivers.length).toBeLessThanOrEqual(1);
+      // Intraday markets: max=1 deceiver; the only eligible (contrarian)
+      // actor must be selected
+      expect(intradayPlan.deceivers).toEqual(['actor-1']);
     });
 
     test('should select up to 2 deceivers for daily timeframes', () => {
@@ -180,9 +180,8 @@ describe('TimeframeArcPlanner', () => {
         mockOrganizations
       );
 
-      // Daily markets: max=2 deceivers, limited by available contrarian actors
-      expect(dailyPlan.deceivers.length).toBeGreaterThanOrEqual(0);
-      expect(dailyPlan.deceivers.length).toBeLessThanOrEqual(2);
+      // Daily markets: max=2 deceivers, limited by the one contrarian actor
+      expect(dailyPlan.deceivers).toEqual(['actor-1']);
     });
 
     test('should select up to 2 deceivers for weekly timeframes', () => {
@@ -196,9 +195,8 @@ describe('TimeframeArcPlanner', () => {
         mockOrganizations
       );
 
-      // Weekly markets: max=2 deceivers, limited by available contrarian actors
-      expect(weeklyPlan.deceivers.length).toBeGreaterThanOrEqual(0);
-      expect(weeklyPlan.deceivers.length).toBeLessThanOrEqual(2);
+      // Weekly markets: max=2 deceivers, limited by the one contrarian actor
+      expect(weeklyPlan.deceivers).toEqual(['actor-1']);
     });
 
     test('should preserve affiliated actor and org IDs', () => {
@@ -216,6 +214,52 @@ describe('TimeframeArcPlanner', () => {
 
       expect(plan.affiliatedActorIds).toEqual(['actor-1', 'actor-2']);
       expect(plan.affiliatedOrgIds).toEqual(['org-1']);
+    });
+
+    test('plans own their phase config and affiliation arrays', () => {
+      const affiliated = ['actor-1'];
+      const first = timeframeArcPlanner.planTimeframeArc(
+        'q-own-1',
+        'Test question',
+        '1d',
+        24 * 60 * 60 * 1000,
+        true,
+        mockActors,
+        mockOrganizations,
+        affiliated
+      );
+      const firstPhase = first.phaseOrder[0]!;
+      const originalRatio = first.phases[firstPhase]!.timeRatio;
+      first.phases[firstPhase]!.timeRatio = 0.99;
+      affiliated.push('actor-2');
+
+      const second = timeframeArcPlanner.planTimeframeArc(
+        'q-own-2',
+        'Test question',
+        '1d',
+        24 * 60 * 60 * 1000,
+        true,
+        mockActors,
+        mockOrganizations
+      );
+      expect(second.phases[firstPhase]!.timeRatio).toBe(originalRatio);
+      expect(first.affiliatedActorIds).toEqual(['actor-1']);
+    });
+
+    test('rejects non-positive or non-finite durations', () => {
+      for (const duration of [0, -1, Number.NaN, Number.POSITIVE_INFINITY]) {
+        expect(() =>
+          timeframeArcPlanner.planTimeframeArc(
+            'q-bad',
+            'Test question',
+            '1d',
+            duration,
+            true,
+            mockActors,
+            mockOrganizations
+          )
+        ).toThrow(RangeError);
+      }
     });
 
     test('should include outcome in plan', () => {

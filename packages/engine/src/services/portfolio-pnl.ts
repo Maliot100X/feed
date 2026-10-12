@@ -17,20 +17,9 @@ import {
   toNumber,
 } from '@feed/shared';
 import { and, eq, inArray, isNull, sql } from 'drizzle-orm';
+import type { PortfolioPnLSnapshot } from '../types/portfolio';
 
-export interface PortfolioPnLSnapshot {
-  lifetimePnL: number;
-  netContributions: number;
-  netPeerTransfers: number;
-  totalDeposited: number;
-  totalWithdrawn: number;
-  availableBalance: number;
-  unrealizedPerpPnL: number;
-  unrealizedPredictionPnL: number;
-  totalUnrealizedPnL: number;
-  totalPnL: number;
-  accountEquity: number;
-}
+export type { PortfolioPnLSnapshot };
 
 export async function calculatePortfolioPnL(
   userId: string

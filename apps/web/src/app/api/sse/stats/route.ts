@@ -5,9 +5,10 @@
  * @access Public
  *
  * @description
- * Returns statistics about connected Server-Sent Events (SSE) clients including
- * total connections, channels, and connection details. Useful for debugging and
- * monitoring real-time features.
+ * Returns the number of Server-Sent Events (SSE) connections held by the worker
+ * that serves the request (worker-local, not a global count). Per-channel counts
+ * are not exposed publicly because channel names include private chat and user
+ * identifiers.
  *
  * @openapi
  * /api/sse/stats:
@@ -29,10 +30,11 @@
  *                 stats:
  *                   type: object
  *                   properties:
- *                     totalClients:
+ *                     totalConnections:
  *                       type: integer
- *                     channels:
- *                       type: object
+ *                     scope:
+ *                       type: string
+ *                       enum: [worker]
  *                 timestamp:
  *                   type: integer
  *
@@ -40,7 +42,7 @@
  * ```typescript
  * const { stats } = await fetch('/api/sse/stats')
  *   .then(r => r.json());
- * console.log(`Total SSE clients: ${stats.totalClients}`);
+ * console.log(`SSE connections on this worker: ${stats.totalConnections}`);
  * ```
  *
  * @see {@link /lib/sse/event-broadcaster} Event broadcaster
@@ -53,7 +55,6 @@ import {
   successResponse,
   withErrorHandling,
 } from '@feed/api';
-import { logger } from '@feed/shared';
 import type { NextRequest } from 'next/server';
 
 export const dynamic = 'force-dynamic';
@@ -62,17 +63,11 @@ export const GET = withErrorHandling(async (request: NextRequest) => {
   const { error, rateLimitInfo } = await publicRateLimit(request);
   if (error) return error;
 
-  const stats = connections.snapshot();
-
-  logger.info(
-    'SSE stats fetched successfully',
-    { totalClients: stats.totalConnections },
-    'GET /api/sse/stats'
-  );
+  const { totalConnections } = connections.snapshot();
 
   const res = successResponse({
     success: true,
-    stats,
+    stats: { totalConnections, scope: 'worker' as const },
     timestamp: Date.now(),
   });
   if (rateLimitInfo) addPublicReadHeaders(res, rateLimitInfo);

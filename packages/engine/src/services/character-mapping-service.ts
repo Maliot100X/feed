@@ -149,7 +149,6 @@ export class CharacterMappingService {
       const parodyUsername = this.generateUsername(mapping.parodyName);
 
       if (realUsername === parodyUsername) continue;
-      if (transformedText.toLowerCase().includes(parodyUsername)) continue;
 
       const usernameRegex = new RegExp(
         `@${escapeRegex(realUsername)}\\b`,
@@ -170,112 +169,33 @@ export class CharacterMappingService {
       }
     }
 
-    // Phase 2: Replace character names
-    for (const mapping of this.characterMappingsCache) {
-      const searchNames = [mapping.realName, ...mapping.aliases];
-
-      for (const searchName of searchNames) {
-        const replacement = this.getReplacementForTerm(
-          searchName,
-          mapping.realName,
-          mapping.parodyName
-        );
-
-        if (transformedText.toLowerCase().includes(replacement.toLowerCase())) {
-          continue;
+    // Phase 2: Replace character and organization names in ONE pass.
+    // A single longest-first alternation with non-consuming boundaries means:
+    // - every occurrence is handled (adjacent names sharing a separator too),
+    // - inserted parody text is never rescanned/re-replaced,
+    // - existing parody names are matched as protected tokens and kept, so a
+    //   parody name elsewhere in the text no longer blocks real-name
+    //   replacement globally.
+    const terms = this.buildNameTerms();
+    if (terms.length > 0) {
+      const termByLower = new Map(terms.map((t) => [t.term.toLowerCase(), t]));
+      const regex = buildBoundedAlternation(
+        terms.map((t) => t.term),
+        'giu'
+      );
+      transformedText = transformedText.replace(regex, (match) => {
+        const term = termByLower.get(match.toLowerCase());
+        if (!term || term.replacement === null) return match;
+        const casedReplacement = this.preserveCase(match, term.replacement);
+        if (casedReplacement === match) return match;
+        if (term.kind === 'character') {
+          characterMappingsResult[term.term] = casedReplacement;
+        } else {
+          organizationMappingsResult[term.term] = casedReplacement;
         }
-
-        const regex = new RegExp(
-          `(?:^|\\s|[^a-zA-Z@])${escapeRegex(searchName)}(?:$|\\s|[^a-zA-Z])`,
-          'gi'
-        );
-
-        const matches = transformedText.match(regex);
-        if (matches) {
-          transformedText = transformedText.replace(regex, (match) => {
-            const matchLower = match.toLowerCase();
-            const searchLower = searchName.toLowerCase();
-
-            const leadingChar = !matchLower.startsWith(searchLower[0] ?? '')
-              ? match[0]
-              : '';
-            const trailingChar = !matchLower.endsWith(
-              searchLower[searchLower.length - 1] ?? ''
-            )
-              ? match[match.length - 1]
-              : '';
-
-            const actualMatch = match.slice(
-              leadingChar ? 1 : 0,
-              trailingChar ? -1 : undefined
-            );
-
-            const casedReplacement = this.preserveCase(
-              actualMatch,
-              replacement
-            );
-
-            characterMappingsResult[searchName] = casedReplacement;
-            replacementCount++;
-
-            return `${leadingChar}${casedReplacement}${trailingChar}`;
-          });
-        }
-      }
-    }
-
-    // Phase 3: Replace organization names
-    for (const mapping of this.organizationMappingsCache) {
-      const searchNames = [mapping.realName, ...mapping.aliases];
-
-      for (const searchName of searchNames) {
-        const replacement = this.getReplacementForTerm(
-          searchName,
-          mapping.realName,
-          mapping.parodyName
-        );
-
-        if (transformedText.toLowerCase().includes(replacement.toLowerCase())) {
-          continue;
-        }
-
-        const regex = new RegExp(
-          `(?:^|\\s|[^a-zA-Z@])${escapeRegex(searchName)}(?:$|\\s|[^a-zA-Z])`,
-          'gi'
-        );
-
-        const matches = transformedText.match(regex);
-        if (matches) {
-          transformedText = transformedText.replace(regex, (match) => {
-            const matchLower = match.toLowerCase();
-            const searchLower = searchName.toLowerCase();
-
-            const leadingChar = !matchLower.startsWith(searchLower[0] ?? '')
-              ? match[0]
-              : '';
-            const trailingChar = !matchLower.endsWith(
-              searchLower[searchLower.length - 1] ?? ''
-            )
-              ? match[match.length - 1]
-              : '';
-
-            const actualMatch = match.slice(
-              leadingChar ? 1 : 0,
-              trailingChar ? -1 : undefined
-            );
-
-            const casedReplacement = this.preserveCase(
-              actualMatch,
-              replacement
-            );
-
-            organizationMappingsResult[searchName] = casedReplacement;
-            replacementCount++;
-
-            return `${leadingChar}${casedReplacement}${trailingChar}`;
-          });
-        }
-      }
+        replacementCount++;
+        return casedReplacement;
+      });
     }
 
     return {
@@ -291,31 +211,67 @@ export class CharacterMappingService {
     this.loadMappings();
     const foundNames: string[] = [];
 
-    for (const mapping of this.characterMappingsCache) {
-      const searchNames = [mapping.realName, ...mapping.aliases];
-
-      for (const searchName of searchNames) {
-        const regex = new RegExp(`\\b${escapeRegex(searchName)}\\b`, 'i');
-
-        if (regex.test(text)) {
-          foundNames.push(searchName);
-        }
-      }
-    }
-
-    for (const mapping of this.organizationMappingsCache) {
-      const searchNames = [mapping.realName, ...mapping.aliases];
-
-      for (const searchName of searchNames) {
-        const regex = new RegExp(`\\b${escapeRegex(searchName)}\\b`, 'i');
-
-        if (regex.test(text)) {
-          foundNames.push(searchName);
-        }
+    for (const term of this.buildNameTerms()) {
+      if (term.replacement === null) continue;
+      if (buildBoundedAlternation([term.term], 'iu').test(text)) {
+        foundNames.push(term.term);
       }
     }
 
     return foundNames;
+  }
+
+  /**
+   * Searchable name terms (real names/aliases with their replacement, plus
+   * parody names as protected tokens with `replacement: null`), longest
+   * first so multi-word names win over their parts. Earlier (higher
+   * priority) mappings win on duplicate terms.
+   */
+  private buildNameTerms(): NameTerm[] {
+    const byLower = new Map<string, NameTerm>();
+    const add = (term: NameTerm) => {
+      const key = term.term.toLowerCase();
+      if (!term.term.trim() || byLower.has(key)) return;
+      byLower.set(key, term);
+    };
+    const groups: Array<{
+      kind: NameTerm['kind'];
+      mappings: Array<CharacterMapping | OrganizationMapping>;
+    }> = [
+      { kind: 'character', mappings: this.characterMappingsCache },
+      { kind: 'organization', mappings: this.organizationMappingsCache },
+    ];
+    for (const { kind, mappings } of groups) {
+      for (const mapping of mappings) {
+        for (const searchName of [mapping.realName, ...mapping.aliases]) {
+          add({
+            term: searchName,
+            kind,
+            replacement: this.getReplacementForTerm(
+              searchName,
+              mapping.realName,
+              mapping.parodyName
+            ),
+          });
+        }
+      }
+    }
+    // Parody names are protected: real terms take precedence on an exact
+    // case-insensitive collision because they were added first.
+    for (const { kind, mappings } of groups) {
+      for (const mapping of mappings) {
+        add({ term: mapping.parodyName, kind, replacement: null });
+        for (const searchName of mapping.aliases) {
+          const parodyAlias = this.getReplacementForTerm(
+            searchName,
+            mapping.realName,
+            mapping.parodyName
+          );
+          add({ term: parodyAlias, kind, replacement: null });
+        }
+      }
+    }
+    return [...byLower.values()].sort((a, b) => b.term.length - a.term.length);
   }
 
   async getCharacterMappings(): Promise<ActiveCharacterMapping[]> {
@@ -332,6 +288,23 @@ export class CharacterMappingService {
     this.initialized = false;
     StaticDataRegistry.clearCache();
   }
+}
+
+interface NameTerm {
+  term: string;
+  kind: 'character' | 'organization';
+  /** null marks a protected (already-parody) token that is left unchanged */
+  replacement: string | null;
+}
+
+/**
+ * Alternation of terms bounded by non-consuming lookarounds: a term may not be
+ * preceded by a letter or "@" (mentions are handled separately) nor followed
+ * by a letter. Unicode-aware so accented names have real boundaries.
+ */
+function buildBoundedAlternation(terms: string[], flags: string): RegExp {
+  const alternation = terms.map(escapeRegex).join('|');
+  return new RegExp(`(?<![\\p{L}@])(?:${alternation})(?!\\p{L})`, flags);
 }
 
 function escapeRegex(str: string): string {

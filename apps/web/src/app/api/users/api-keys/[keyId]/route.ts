@@ -11,7 +11,7 @@ import {
   successResponse,
   withErrorHandling,
 } from '@feed/api';
-import { asUser, eq, userApiKeys } from '@feed/db';
+import { and, asUser, eq, isNull, userApiKeys } from '@feed/db';
 import { logger } from '@feed/shared';
 import type { NextRequest } from 'next/server';
 import { NextResponse } from 'next/server';
@@ -28,30 +28,23 @@ export const DELETE = withErrorHandling(
     const { keyId } = await context.params;
 
     // Use asUser to enforce RLS - user can only revoke their own keys
-    const deleted = await asUser(authUser.userId, async (dbClient) => {
-      // First verify the key exists and belongs to the user (RLS enforces this)
-      const key = await dbClient.query.userApiKeys.findFirst({
-        where: (keys, { eq, and: andFn, isNull: isNullFn }) =>
-          andFn(
-            eq(keys.id, keyId),
-            eq(keys.userId, authUser.userId),
-            isNullFn(keys.revokedAt)
-          ),
-      });
-
-      if (!key) {
-        return null;
-      }
-
-      // Revoke the key by setting revokedAt
-      return await dbClient
+    // Single conditional update: owner + still-active predicates are part of
+    // the write, so concurrent revokes cannot both succeed.
+    const deleted = await asUser(authUser.userId, async (dbClient) =>
+      dbClient
         .update(userApiKeys)
         .set({ revokedAt: new Date() })
-        .where(eq(userApiKeys.id, keyId))
-        .returning();
-    });
+        .where(
+          and(
+            eq(userApiKeys.id, keyId),
+            eq(userApiKeys.userId, authUser.userId),
+            isNull(userApiKeys.revokedAt)
+          )
+        )
+        .returning({ keyHash: userApiKeys.keyHash })
+    );
 
-    if (!deleted || deleted.length === 0) {
+    if (deleted.length === 0) {
       return NextResponse.json(
         { error: 'API key not found or already revoked' },
         { status: 404 }

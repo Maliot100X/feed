@@ -948,6 +948,8 @@ export async function dispatchAgentChat(
     {
       agentId: resolvedAgentId,
       agentUsername: agentUsername ?? null,
+      // Scope for readers: history is process-wide, consumers must filter by team chat.
+      teamChatId,
       command: params.message,
       response: responseText.slice(0, 500),
       actionsExecuted: traceActionResults.length,

@@ -59,14 +59,14 @@ export async function fetchRelevantPosts(
     maxTitleLength?: number;
   }
 ): Promise<FeedPostContext[]> {
-  const maxRelated = options?.maxRelated ?? 10;
   const maxTotal = options?.maxTotal ?? 15;
+  const maxRelated = Math.min(options?.maxRelated ?? 10, maxTotal);
   const maxContentLength = options?.maxContentLength ?? 500;
   const maxTitleLength = options?.maxTitleLength ?? 120;
 
   // Fetch posts from related actors first
   let relevantPosts: (typeof posts.$inferSelect)[] = [];
-  if (relatedActorIds.length > 0) {
+  if (relatedActorIds.length > 0 && maxRelated > 0) {
     relevantPosts = await db
       .select()
       .from(posts)

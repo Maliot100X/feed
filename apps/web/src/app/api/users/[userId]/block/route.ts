@@ -115,7 +115,16 @@ import {
   successResponse,
   withErrorHandling,
 } from '@feed/api';
-import { and, db, eq, follows, or, userBlocks, users } from '@feed/db';
+import {
+  and,
+  db,
+  eq,
+  follows,
+  or,
+  userBlocks,
+  users,
+  withTransaction,
+} from '@feed/db';
 import { BlockUserSchema, generateSnowflakeId, logger } from '@feed/shared';
 import type { NextRequest } from 'next/server';
 
@@ -188,44 +197,48 @@ export const POST = withErrorHandling(
         );
       }
 
-      // Create block
+      // Create the block and remove follows in both directions atomically so a
+      // failure cannot leave a block with surviving follow edges.
       const blockId = await generateSnowflakeId();
-      const [block] = await db
-        .insert(userBlocks)
-        .values({
-          id: blockId,
-          blockerId: authUser.userId,
-          blockedId: targetUserId,
-          reason: reason || null,
-        })
-        .returning();
+      const block = await withTransaction(async (tx) => {
+        const [created] = await tx
+          .insert(userBlocks)
+          .values({
+            id: blockId,
+            blockerId: authUser.userId,
+            blockedId: targetUserId,
+            reason: reason || null,
+          })
+          .returning();
 
-      if (!block) {
-        throw new InternalServerError('Failed to create block record');
-      }
+        if (!created) {
+          throw new InternalServerError('Failed to create block record');
+        }
 
-      // Also unfollow if following
-      await db
-        .delete(follows)
-        .where(
-          or(
-            and(
-              eq(follows.followerId, authUser.userId),
-              eq(follows.followingId, targetUserId)
-            ),
-            and(
-              eq(follows.followerId, targetUserId),
-              eq(follows.followingId, authUser.userId)
+        await tx
+          .delete(follows)
+          .where(
+            or(
+              and(
+                eq(follows.followerId, authUser.userId),
+                eq(follows.followingId, targetUserId)
+              ),
+              and(
+                eq(follows.followerId, targetUserId),
+                eq(follows.followingId, authUser.userId)
+              )
             )
-          )
-        );
+          );
+
+        return created;
+      });
 
       logger.info(
         'User blocked successfully',
         {
           userId: authUser.userId,
           targetUserId,
-          blockId: block?.id,
+          blockId: block.id,
         },
         'POST /api/users/[userId]/block'
       );

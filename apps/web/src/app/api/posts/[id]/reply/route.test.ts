@@ -72,10 +72,7 @@ describe('POST /api/posts/[id]/reply', () => {
 
   it('delegates to the generic comments handler for standard post IDs', async () => {
     mockAuthenticate.mockResolvedValue({ userId: 'user-1' });
-    mockParsePostId.mockReturnValue({
-      success: false,
-      metadata: {},
-    });
+    mockParsePostId.mockReturnValue({ success: false });
     mockCreateCommentPOST.mockResolvedValue(
       new Response(JSON.stringify({ delegated: true }), { status: 201 })
     );

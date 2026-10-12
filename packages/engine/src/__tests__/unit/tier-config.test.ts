@@ -252,6 +252,10 @@ describe('Tier Config', () => {
       const guidance = getTierMessageGuidance(null);
       expect(guidance).toContain('TIER 1 INNER CIRCLE');
     });
+
+    it('should reject invalid runtime tiers instead of granting full alpha', () => {
+      expect(() => getTierMessageGuidance(7 as never)).toThrow(RangeError);
+    });
   });
 
   describe('getEffectiveTierConfig', () => {

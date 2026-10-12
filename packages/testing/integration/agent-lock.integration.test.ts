@@ -11,6 +11,7 @@ import {
   AGENT_LOCK_DURATION_MS,
   acquireAgentLock,
   checkAgentLock,
+  createAgentLockOwner,
   releaseAgentLock,
 } from '@feed/agents/services/agent-lock-service';
 import { agentRegistry } from '@feed/agents/services/agent-registry.service';
@@ -215,7 +216,9 @@ describe('Agent Lock Service Integration', () => {
   });
 
   test('should generate unique serverless-safe process IDs', async () => {
-    expect(await acquireAgentLock(testAgentId1)).toBe(true);
+    expect(await acquireAgentLock(testAgentId1, createAgentLockOwner())).toBe(
+      true
+    );
 
     const firstLock = await db.generationLock.findUnique({
       where: { id: getAgentLockId(testAgentId1) },
@@ -224,7 +227,9 @@ describe('Agent Lock Service Integration', () => {
 
     await releaseAgentLock(testAgentId1, firstLock!.lockedBy);
 
-    expect(await acquireAgentLock(testAgentId1)).toBe(true);
+    expect(await acquireAgentLock(testAgentId1, createAgentLockOwner())).toBe(
+      true
+    );
 
     const secondLock = await db.generationLock.findUnique({
       where: { id: getAgentLockId(testAgentId1) },

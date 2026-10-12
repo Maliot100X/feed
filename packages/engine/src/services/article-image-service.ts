@@ -184,6 +184,9 @@ export async function generateArticleImageWithRetry(
   params: ArticleImageParams,
   maxRetries = 2
 ): Promise<string | null> {
+  // Disabled feature: nothing to retry, return immediately without backoff waits.
+  if (!isImageGenerationAvailable()) return null;
+
   for (let attempt = 0; attempt <= maxRetries; attempt++) {
     const imageUrl = await generateArticleImage(params);
     if (imageUrl) {

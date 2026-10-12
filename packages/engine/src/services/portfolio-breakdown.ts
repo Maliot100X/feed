@@ -183,6 +183,15 @@ export async function calculatePortfolioBreakdown(
 
   const agentCount = agentRows.length;
 
+  // The ownership set is the owner (plus legacy privyId alias) and every
+  // managed agent. Agent wallets are counted in `agents`, so their open
+  // positions and external transfers must be counted too; otherwise an agent
+  // buying a position looks like a loss for the owner, and owner<->agent
+  // transfers would be counted on one side only.
+  const ownershipUserIds = Array.from(
+    new Set([...positionUserIds, ...agentRows.map((agent) => agent.id)])
+  );
+
   const wallet = toNumber(user.virtualBalance);
   const agents = agentRows.reduce(
     (sum, agent) => sum + toNumber(agent.virtualBalance),
@@ -199,7 +208,7 @@ export async function calculatePortfolioBreakdown(
       .from(perpPositions)
       .where(
         and(
-          inArray(perpPositions.userId, positionUserIds),
+          inArray(perpPositions.userId, ownershipUserIds),
           isNull(perpPositions.closedAt)
         )
       ),
@@ -215,7 +224,7 @@ export async function calculatePortfolioBreakdown(
       .innerJoin(markets, eq(positions.marketId, markets.id))
       .where(
         and(
-          inArray(positions.userId, positionUserIds),
+          inArray(positions.userId, ownershipUserIds),
           eq(markets.resolved, false)
         )
       ),
@@ -266,7 +275,7 @@ export async function calculatePortfolioBreakdown(
     .from(balanceTransactions)
     .where(
       and(
-        inArray(balanceTransactions.userId, positionUserIds),
+        inArray(balanceTransactions.userId, ownershipUserIds),
         inArray(balanceTransactions.type, [
           ...CANONICAL_AGENT_TRANSFER_TRANSACTION_TYPES,
           ...CANONICAL_PEER_TRANSFER_TRANSACTION_TYPES,

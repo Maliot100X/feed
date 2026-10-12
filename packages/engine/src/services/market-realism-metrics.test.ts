@@ -142,4 +142,41 @@ describe('market-realism-metrics', () => {
       '1 perp markets have invalid canonical currentPrice values.'
     );
   });
+
+  it('excludes invalid quotes from summaries and keeps exact sub-dollar depth', () => {
+    const base = {
+      currentPrice: 100,
+      volume24h: 1000,
+      openInterest: 100,
+      bidPrice: 99,
+      askPrice: 101,
+      liquidityRegime: 'thin' as const,
+    };
+    const metrics = computePerpRealismMetrics({
+      markets: [
+        { ...base, ticker: 'OK', spreadBps: 50, bidDepth: 0.5, askDepth: 0.5 },
+        {
+          ...base,
+          ticker: 'NAN',
+          spreadBps: Number.NaN,
+          bidDepth: 100,
+          askDepth: 100,
+        },
+        {
+          ...base,
+          ticker: 'NEG',
+          spreadBps: 20,
+          bidDepth: -5,
+          askDepth: 100,
+        },
+      ],
+      sampleOrderSizes: [1],
+    });
+
+    expect(metrics.invalidQuoteCount).toBe(2);
+    expect(metrics.spreadBps?.count).toBe(1);
+    expect(metrics.spreadBps?.mean).toBe(50);
+    expect(metrics.bidDepth?.min).toBe(0.5);
+    expect(metrics.depthRatioByOrderSize['1']?.mean).toBe(2);
+  });
 });

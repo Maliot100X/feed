@@ -64,7 +64,7 @@ export const GET = withErrorHandling(async (req: NextRequest) => {
   const admin = await requireAdmin(req);
 
   // Audit log the view
-  logAdminView({
+  await logAdminView({
     adminId: admin.userId,
     ipAddress: getClientIp(req.headers) ?? undefined,
     resourceType: 'training_data',

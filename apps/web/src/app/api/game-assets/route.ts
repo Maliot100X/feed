@@ -88,39 +88,29 @@ import { asPublic, asUser } from '@feed/db';
 import { logger } from '@feed/shared';
 import type { NextRequest } from 'next/server';
 
-export const GET = withErrorHandling(async (_request: NextRequest) => {
-  // Optional auth - game assets are public but RLS still applies
-  const authUser = await optionalAuth(_request).catch(() => null);
+type ChatReader = Parameters<Parameters<typeof asPublic>[0]>[0];
 
-  // Get group chats from database with RLS
-  const groupChats =
-    authUser && authUser.userId
-      ? await asUser(authUser, async (db) => {
-          return await db.chat.findMany({
-            where: {
-              isGroup: true,
-              gameId: 'continuous',
-            },
-            select: {
-              id: true,
-              name: true,
-              // Map to expected format
-            },
-          });
-        })
-      : await asPublic(async (db) => {
-          return await db.chat.findMany({
-            where: {
-              isGroup: true,
-              gameId: 'continuous',
-            },
-            select: {
-              id: true,
-              name: true,
-              // Map to expected format
-            },
-          });
-        });
+async function listGameGroupChats(db: ChatReader) {
+  return db.chat.findMany({
+    where: {
+      isGroup: true,
+      gameId: 'continuous',
+    },
+    select: {
+      id: true,
+      name: true,
+    },
+  });
+}
+
+export const GET = withErrorHandling(async (request: NextRequest) => {
+  // Optional auth: game assets are public. optionalAuth already returns null
+  // for absent or invalid credentials; infrastructure errors propagate.
+  const authUser = await optionalAuth(request);
+
+  const groupChats = authUser?.userId
+    ? await asUser(authUser, listGameGroupChats)
+    : await asPublic(listGameGroupChats);
 
   // If you need additional game assets, store them in database or
   // have the client use /api/actors endpoint for actor/org/relationship data

@@ -19,19 +19,29 @@ FROM base AS install
 
 WORKDIR /app
 
-# Copy every package.json so bun can resolve the workspace graph.
+# Copy every workspace package.json (root "workspaces": apps/*, packages/*,
+# packages/examples/*) so bun can resolve the full workspace graph.
+# Keep this list in sync when adding a workspace package.
 COPY package.json bun.lock ./
-COPY apps/web/package.json apps/web/
 COPY apps/cli/package.json apps/cli/
+COPY apps/dag-visualizer/package.json apps/dag-visualizer/
+COPY apps/mobile/package.json apps/mobile/
+COPY apps/web/package.json apps/web/
 COPY packages/a2a/package.json packages/a2a/
 COPY packages/agents/package.json packages/agents/
 COPY packages/api/package.json packages/api/
 COPY packages/contracts/package.json packages/contracts/
 COPY packages/core/package.json packages/core/
+COPY packages/crypto-browserify/package.json packages/crypto-browserify/
 COPY packages/db/package.json packages/db/
 COPY packages/engine/package.json packages/engine/
 COPY packages/examples/package.json packages/examples/
+COPY packages/examples/feed-typescript-agent/package.json packages/examples/feed-typescript-agent/
+COPY packages/examples/harness/package.json packages/examples/harness/
+COPY packages/examples/local-a2a-server/package.json packages/examples/local-a2a-server/
 COPY packages/mcp/package.json packages/mcp/
+COPY packages/pack-corporate-30-under-30/package.json packages/pack-corporate-30-under-30/
+COPY packages/pack-default/package.json packages/pack-default/
 COPY packages/shared/package.json packages/shared/
 COPY packages/sim/package.json packages/sim/
 COPY packages/testing/package.json packages/testing/

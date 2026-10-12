@@ -21,7 +21,7 @@
  *         name: ids
  *         schema:
  *           type: string
- *         description: Comma-separated organization IDs for batch lookup
+ *         description: Comma-separated organization IDs for batch lookup (max 100)
  *         example: org1,org2,org3
  *     responses:
  *       200:
@@ -46,10 +46,15 @@
  *                         type: string
  *                       description:
  *                         type: string
+ *                 total:
+ *                   type: integer
+ *                 hasMore:
+ *                   type: boolean
+ *                   description: True when the unfiltered listing was capped at 100
  *
  * @example
  * ```typescript
- * // Get all organizations
+ * // List organizations (capped at 100; see hasMore)
  * const response = await fetch('/api/organizations');
  * const { organizations } = await response.json();
  *
@@ -57,7 +62,7 @@
  * const batch = await fetch('/api/organizations?ids=org1,org2');
  * ```
  *
- * @see {@link /lib/db/context} RLS context
+ * Reads the static data registry (no database/RLS involved).
  */
 
 import {
@@ -68,6 +73,8 @@ import {
 import { StaticDataRegistry } from '@feed/engine';
 import type { NextRequest } from 'next/server';
 import { NextResponse } from 'next/server';
+
+const MAX_ORGANIZATIONS = 100;
 
 /**
  * GET /api/organizations
@@ -87,25 +94,42 @@ export const GET = withErrorHandling(async function GET(request: NextRequest) {
 
   const allOrgs = StaticDataRegistry.getAllOrganizations();
 
-  const organizations = idsParam
-    ? allOrgs
-        .filter((org) => idsParam.split(',').includes(org.id))
-        .map((org) => ({
-          id: org.id,
-          name: org.name,
-          type: org.type,
-          description: org.description ?? null,
-        }))
-    : allOrgs.slice(0, 100).map((org) => ({
-        id: org.id,
-        name: org.name,
-        type: org.type,
-        description: org.description ?? null,
-      }));
+  // Parse ids once into a bounded, trimmed, de-duplicated set.
+  const requestedIds = idsParam
+    ? new Set(
+        idsParam
+          .split(',')
+          .map((id) => id.trim())
+          .filter((id) => id.length > 0)
+      )
+    : null;
+  if (requestedIds && requestedIds.size > MAX_ORGANIZATIONS) {
+    return NextResponse.json(
+      {
+        success: false,
+        error: `At most ${MAX_ORGANIZATIONS} ids may be requested`,
+      },
+      { status: 400 }
+    );
+  }
+
+  const selected = requestedIds
+    ? allOrgs.filter((org) => requestedIds.has(org.id))
+    : allOrgs.slice(0, MAX_ORGANIZATIONS);
+
+  const organizations = selected.map((org) => ({
+    id: org.id,
+    name: org.name,
+    type: org.type,
+    description: org.description ?? null,
+  }));
 
   const res = NextResponse.json({
     success: true,
     organizations,
+    // Unfiltered listings are capped; report whether the catalog was truncated.
+    total: requestedIds ? organizations.length : allOrgs.length,
+    hasMore: !requestedIds && allOrgs.length > MAX_ORGANIZATIONS,
   });
   if (rateLimitInfo) addPublicReadHeaders(res, rateLimitInfo);
   return res;

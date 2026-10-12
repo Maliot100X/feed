@@ -58,15 +58,18 @@ import { usePredictionMarketStream } from '@/hooks/usePredictionMarketStream';
 import { formatBalance } from '@/lib/market-formatters';
 import {
   type MarketKey,
+  serializeMarketKey,
   useMarketWatchlistStore,
 } from '@/stores/marketWatchlistStore';
 import {
   usePerpMarkets,
   usePerpMarketsRealtime,
+  usePerpMarketsStore,
 } from '@/stores/perpMarketsStore';
 import {
   usePredictionMarkets,
   usePredictionMarketsPolling,
+  usePredictionMarketsStore,
 } from '@/stores/predictionMarketsStore';
 import {
   invalidateUserPositions,
@@ -562,6 +565,12 @@ export function MarketsTradingTerminal({
     error: predictionError,
   } = usePredictionMarkets(userId ?? undefined);
   usePredictionMarketsPolling(30_000, userId ?? undefined);
+  const perpCatalogLoaded = usePerpMarketsStore(
+    (state) => state.lastFetchedAt !== null
+  );
+  const predictionCatalogLoaded = usePredictionMarketsStore(
+    (state) => state.lastFetchedAt !== null
+  );
 
   useUserPositionsPolling(userId);
   useWalletBalancePolling(userId);
@@ -876,7 +885,9 @@ export function MarketsTradingTerminal({
     if (nextPredSide) setPredictionSide(nextPredSide);
   }, [searchParams]);
 
-  const isFavorite = useMarketWatchlistStore((s) => s.isFavorite);
+  // Subscribe to the favorites set (not the stable isFavorite function) so
+  // the favorites filter recomputes when the watchlist changes.
+  const favoritesSet = useMarketWatchlistStore((s) => s.favoritesSet);
 
   const rows: UnifiedRow[] = useMemo(() => {
     const q = query.trim().toLowerCase();
@@ -925,7 +936,7 @@ export function MarketsTradingTerminal({
 
     const filtered = combined.filter((row) => {
       if (filter === 'favorites') {
-        if (!isFavorite(row.key)) return false;
+        if (!favoritesSet.has(serializeMarketKey(row.key))) return false;
       } else if (filter !== 'all' && row.kind !== filter) {
         return false;
       }
@@ -947,14 +958,16 @@ export function MarketsTradingTerminal({
       }
 
       if (sortBy === 'change') {
-        // Use direction-aware sentinel so nulls always sort last
-        const sentinel = sortDesc
-          ? Number.NEGATIVE_INFINITY
-          : Number.POSITIVE_INFINITY;
-        const valA = a.change24hPct ?? sentinel;
-        const valB = b.change24hPct ?? sentinel;
-        const byChange = compareNumbers(valA, valB);
-        if (byChange !== 0) return byChange;
+        // Missing change always sorts last; two missing values tie.
+        const valA = a.change24hPct;
+        const valB = b.change24hPct;
+        if (valA == null || valB == null) {
+          if (valA != null) return -1;
+          if (valB != null) return 1;
+        } else {
+          const byChange = compareNumbers(valA, valB);
+          if (byChange !== 0) return byChange;
+        }
       } else if (sortBy === 'openInterest') {
         const byOI = compareNumbers(a.sortOpenInterest, b.sortOpenInterest);
         if (byOI !== 0) return byOI;
@@ -974,17 +987,24 @@ export function MarketsTradingTerminal({
     filter,
     sortBy,
     sortDesc,
-    isFavorite,
+    favoritesSet,
   ]);
 
-  // When a market is selected but no longer exists in data, deselect back to dashboard
+  // When a selected market no longer exists in its (loaded) catalog, deselect
+  // back to the dashboard. Validate against the full catalog, not the
+  // search/filter-narrowed rows, and only once that catalog has loaded.
   useEffect(() => {
-    if (!selected || rows.length === 0) return;
-    const stillExists = rows.some(
-      (row) =>
-        row.key.kind === selected.kind &&
-        row.key.id.toString() === selected.id.toString()
-    );
+    if (!selected) return;
+    const catalogLoaded =
+      selected.kind === 'perp' ? perpCatalogLoaded : predictionCatalogLoaded;
+    if (!catalogLoaded) return;
+    const selectedId = selected.id.toString();
+    const stillExists =
+      selected.kind === 'perp'
+        ? perpMarkets.some(
+            (m) => m.ticker.toUpperCase() === selectedId.toUpperCase()
+          )
+        : predictionMarkets.some((m) => m.id.toString() === selectedId);
     if (!stillExists) {
       setSelected(null);
       const next = new URLSearchParams(searchParams.toString());
@@ -992,7 +1012,15 @@ export function MarketsTradingTerminal({
       next.delete('marketId');
       router.replace(`/markets?${next.toString()}`, { scroll: false });
     }
-  }, [selected, rows, router, searchParams]);
+  }, [
+    selected,
+    perpMarkets,
+    predictionMarkets,
+    perpCatalogLoaded,
+    predictionCatalogLoaded,
+    router,
+    searchParams,
+  ]);
 
   // Removed: auto-open dropdown — keep it closed by default
 
@@ -1169,14 +1197,21 @@ export function MarketsTradingTerminal({
     );
   }, [predictionPositions, selectedPredictionId]);
 
+  // Sells execute for the authenticated user, so only the user's own
+  // positions (not their agents') are sellable here.
+  const ownSelectedPredictionPositions = useMemo(
+    () => selectedPredictionPositions.filter((p) => !p.isAgentPosition),
+    [selectedPredictionPositions]
+  );
+
   // Compute sellable positions per side - only positions with shares >= MIN_SELLABLE_SHARES
   // are actually sellable. We check individual positions, not aggregated totals, because
   // a user might have multiple small positions that sum above threshold but none are sellable.
   const sellablePositions = useMemo(() => {
-    const sellableYes = selectedPredictionPositions.filter(
+    const sellableYes = ownSelectedPredictionPositions.filter(
       (p) => p.side === 'YES' && p.shares >= MIN_SELLABLE_SHARES
     );
-    const sellableNo = selectedPredictionPositions.filter(
+    const sellableNo = ownSelectedPredictionPositions.filter(
       (p) => p.side === 'NO' && p.shares >= MIN_SELLABLE_SHARES
     );
     return {
@@ -1185,7 +1220,7 @@ export function MarketsTradingTerminal({
       sellableYesCount: sellableYes.length,
       sellableNoCount: sellableNo.length,
     };
-  }, [selectedPredictionPositions]);
+  }, [ownSelectedPredictionPositions]);
 
   const canSellPrediction =
     authenticated &&
@@ -1276,7 +1311,7 @@ export function MarketsTradingTerminal({
 
   const sellPosition = useMemo(() => {
     const wantedSide = predictionSide.toUpperCase() as 'YES' | 'NO';
-    const candidates = selectedPredictionPositions.filter(
+    const candidates = ownSelectedPredictionPositions.filter(
       (p) => p.side === wantedSide && p.shares >= MIN_SELLABLE_SHARES
     );
     if (candidates.length === 0) return null;
@@ -1285,7 +1320,7 @@ export function MarketsTradingTerminal({
     return candidates
       .slice(1)
       .reduce((best, pos) => (pos.shares > best.shares ? pos : best), first);
-  }, [predictionSide, selectedPredictionPositions]);
+  }, [predictionSide, ownSelectedPredictionPositions]);
 
   const maxSellShares = sellPosition?.shares ?? 0;
   const clampedSellShares =

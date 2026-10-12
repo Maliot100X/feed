@@ -105,11 +105,52 @@ interface JsonRpcRequest {
  * JSON-RPC 2.0 response structure
  * @internal
  */
-interface JsonRpcResponse {
-  jsonrpc: '2.0';
-  id: string | number;
-  result?: JsonValue;
-  error?: { code: number; message: string; data?: JsonValue };
+type ValidatedJsonRpcResponse =
+  | { ok: true; id: string | number; result: JsonValue }
+  | { ok: false; error: { code: number; message: string } };
+
+function isRecord(value: JsonValue | undefined): value is {
+  [key: string]: JsonValue;
+} {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+/**
+ * Validate a JSON-RPC 2.0 response body against the request ID.
+ * Rejects wrong versions, mismatched IDs, and responses carrying both or
+ * neither of result/error, instead of reporting them as success.
+ */
+export function validateJsonRpcResponse(
+  body: JsonValue,
+  expectedId: string | number
+): ValidatedJsonRpcResponse {
+  if (!isRecord(body) || body.jsonrpc !== '2.0') {
+    throw new Error('Invalid JSON-RPC response: missing jsonrpc "2.0"');
+  }
+  if (body.id !== expectedId) {
+    throw new Error(
+      `Invalid JSON-RPC response: id ${JSON.stringify(body.id)} does not match request id ${JSON.stringify(expectedId)}`
+    );
+  }
+  const hasResult = 'result' in body && body.result !== undefined;
+  const hasError = 'error' in body && body.error !== undefined;
+  if (hasResult === hasError) {
+    throw new Error(
+      'Invalid JSON-RPC response: exactly one of result or error is required'
+    );
+  }
+  if (hasError) {
+    const error = body.error;
+    if (
+      !isRecord(error) ||
+      typeof error.code !== 'number' ||
+      typeof error.message !== 'string'
+    ) {
+      throw new Error('Invalid JSON-RPC response: malformed error object');
+    }
+    return { ok: false, error: { code: error.code, message: error.message } };
+  }
+  return { ok: true, id: expectedId, result: body.result as JsonValue };
 }
 
 /**
@@ -333,9 +374,12 @@ export class ExternalAgentAdapter {
       throw new Error(`A2A HTTP ${response.status}: ${response.statusText}`);
     }
 
-    const jsonRpcResponse = (await response.json()) as JsonRpcResponse;
+    const jsonRpcResponse = validateJsonRpcResponse(
+      (await response.json()) as JsonValue,
+      requestId
+    );
 
-    if (jsonRpcResponse.error) {
+    if (!jsonRpcResponse.ok) {
       return {
         success: false,
         error: `A2A Error ${jsonRpcResponse.error.code}: ${jsonRpcResponse.error.message}`,
@@ -344,7 +388,7 @@ export class ExternalAgentAdapter {
 
     return {
       success: true,
-      data: jsonRpcResponse.result as JsonValue,
+      data: jsonRpcResponse.result,
       messageId: String(jsonRpcResponse.id),
     };
   }
@@ -356,26 +400,32 @@ export class ExternalAgentAdapter {
     connection: ExternalAgentConnection,
     message: ExternalAgentMessage
   ): Promise<AgentResponse> {
+    const requestId = crypto.randomUUID();
     const response = await fetch(connection.endpoint, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
+        ...this.getAuthHeaders(connection.externalId),
       },
       body: JSON.stringify({
         jsonrpc: '2.0',
-        id: crypto.randomUUID(),
+        id: requestId,
         method: message.type,
         params: message.content,
       }),
+      signal: AbortSignal.timeout(30000),
     });
 
     if (!response.ok) {
       throw new Error(`MCP request failed: ${response.statusText}`);
     }
 
-    const data = await response.json();
+    const data = validateJsonRpcResponse(
+      (await response.json()) as JsonValue,
+      requestId
+    );
 
-    if (data.error) {
+    if (!data.ok) {
       return {
         success: false,
         error: data.error.message || 'MCP error',
@@ -400,8 +450,10 @@ export class ExternalAgentAdapter {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
+        ...this.getAuthHeaders(connection.externalId),
       },
       body: JSON.stringify(message),
+      signal: AbortSignal.timeout(30000),
     });
 
     if (!response.ok) {
@@ -427,8 +479,10 @@ export class ExternalAgentAdapter {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
+        ...this.getAuthHeaders(connection.externalId),
       },
       body: JSON.stringify(message),
+      signal: AbortSignal.timeout(30000),
     });
 
     if (!response.ok) {
@@ -562,19 +616,34 @@ export class ExternalAgentAdapter {
       return {};
     }
 
+    // Configured auth with missing credentials or an unsupported method must
+    // fail instead of silently sending an unauthenticated request.
     switch (auth.method) {
       case AuthMethod.BEARER_TOKEN:
-        return auth.token ? { Authorization: `Bearer ${auth.token}` } : {};
+        if (!auth.token) {
+          throw new Error(
+            `Bearer token missing for external agent ${externalId}`
+          );
+        }
+        return { Authorization: `Bearer ${auth.token}` };
       case AuthMethod.API_KEY:
-        return auth.apiKey ? { Authorization: auth.apiKey } : {};
+        if (!auth.apiKey) {
+          throw new Error(`API key missing for external agent ${externalId}`);
+        }
+        return { Authorization: auth.apiKey };
       case AuthMethod.OAUTH2:
-        return auth.oauth?.accessToken
-          ? {
-              Authorization: `${auth.oauth.tokenType || 'Bearer'} ${auth.oauth.accessToken}`,
-            }
-          : {};
+        if (!auth.oauth?.accessToken) {
+          throw new Error(
+            `OAuth2 access token missing for external agent ${externalId}`
+          );
+        }
+        return {
+          Authorization: `${auth.oauth.tokenType || 'Bearer'} ${auth.oauth.accessToken}`,
+        };
       default:
-        return {};
+        throw new Error(
+          `Unsupported auth method ${auth.method} for external agent ${externalId}`
+        );
     }
   }
 
@@ -688,10 +757,9 @@ export class ExternalAgentAdapter {
       }
     }
 
-    // Level 2: VERIFIED (capability verification - simplified for now)
-    if (trustLevel === TrustLevel.BASIC && connection.agentCard?.capabilities) {
-      trustLevel = TrustLevel.VERIFIED;
-    }
+    // VERIFIED requires identity/ownership evidence (e.g. on-chain
+    // registration). A self-published, unsigned agent card only proves the
+    // endpoint answers, so discovery alone never exceeds BASIC.
 
     // Update connection with trust info
     connection.trustLevel = trustLevel;

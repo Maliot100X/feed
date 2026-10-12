@@ -179,8 +179,15 @@ export class TimeframeArcPlanner {
     affiliatedActorIds: string[] = [],
     affiliatedOrgIds: string[] = []
   ): TimeframeArcPlan {
+    if (!Number.isFinite(durationMs) || durationMs <= 0) {
+      throw new RangeError(
+        `Arc plan duration must be a positive finite number of ms, got ${durationMs}`
+      );
+    }
     const category = TimeframeArcPlanner.getCategory(timeframe);
-    const phases = PHASE_CONFIGS[category];
+    // Each plan owns its phase config: returning the shared constant by
+    // reference would let one plan's mutation change every plan.
+    const phases = structuredClone(PHASE_CONFIGS[category]);
     const phaseOrder = Object.keys(phases);
 
     // Select insiders and deceivers
@@ -202,8 +209,8 @@ export class TimeframeArcPlanner {
       phaseOrder,
       insiders,
       deceivers,
-      affiliatedOrgIds,
-      affiliatedActorIds,
+      affiliatedOrgIds: [...affiliatedOrgIds],
+      affiliatedActorIds: [...affiliatedActorIds],
       createdAt: new Date(),
     };
 

@@ -8,8 +8,10 @@
  * Returns LLM token usage statistics for the game engine. Includes
  * aggregated totals, breakdowns by prompt type and model, and estimated costs.
  *
- * This endpoint is public but rate-limited to prevent abuse. Results are
- * cached for 5 minutes to reduce database load.
+ * This endpoint is public but rate-limited (shared public read limiter).
+ * Results are cached for 5 minutes to reduce database load. Totals aggregate
+ * the most recent `limit` persisted ticks within the period (a sample, not
+ * the entire period).
  *
  * @openapi
  * /api/stats/tokens:
@@ -108,326 +110,172 @@
  */
 
 import {
+  addPublicReadHeaders,
   CACHE_KEYS,
   DEFAULT_TTLS,
   getCacheOrFetch,
-  rateLimitError,
+  publicRateLimit,
   withErrorHandling,
 } from '@feed/api';
-import { and, db, desc, gte, tickTokenStats } from '@feed/db';
-import { tokenStatsService } from '@feed/engine';
-import { logger } from '@feed/shared';
+import { db, desc, gte, tickTokenStats } from '@feed/db';
 import type { NextRequest } from 'next/server';
 import { NextResponse } from 'next/server';
+import { z } from 'zod';
 
 // Disable static generation for this route
 export const dynamic = 'force-dynamic';
-// Cache config (5 minutes for public stats)
-export const revalidate = 300;
 
-// Simple IP-based rate limiting for anonymous access
-const ipRateLimitMap = new Map<string, { count: number; resetAt: number }>();
-const RATE_LIMIT_MAX = 30; // 30 requests per window
-const RATE_LIMIT_WINDOW_MS = 60000; // 1 minute window
+const PERIOD_MS = {
+  hour: 60 * 60 * 1000,
+  day: 24 * 60 * 60 * 1000,
+  week: 7 * 24 * 60 * 60 * 1000,
+} as const;
 
-function checkIpRateLimit(ip: string): {
-  allowed: boolean;
-  retryAfter?: number;
-} {
-  const now = Date.now();
-  const record = ipRateLimitMap.get(ip);
+const TokenStatsQuerySchema = z.object({
+  limit: z.coerce.number().int().min(1).max(100).default(10),
+  period: z.enum(['hour', 'day', 'week']).default('day'),
+});
 
-  // Clean expired entries
-  if (record && record.resetAt < now) {
-    ipRateLimitMap.delete(ip);
-  }
+const UsageCountsSchema = z.object({
+  callCount: z.number().finite(),
+  totalInputTokens: z.number().finite(),
+  totalOutputTokens: z.number().finite(),
+  totalTokens: z.number().finite(),
+});
 
-  const current = ipRateLimitMap.get(ip);
+const ByPromptTypeSchema = z.array(
+  UsageCountsSchema.extend({ promptType: z.string() })
+);
 
-  if (!current) {
-    ipRateLimitMap.set(ip, { count: 1, resetAt: now + RATE_LIMIT_WINDOW_MS });
-    return { allowed: true };
-  }
+const ByModelSchema = z.array(
+  UsageCountsSchema.extend({ provider: z.string(), model: z.string() })
+);
 
-  if (current.count >= RATE_LIMIT_MAX) {
-    return {
-      allowed: false,
-      retryAfter: Math.ceil((current.resetAt - now) / 1000),
-    };
-  }
+type UsageCounts = z.infer<typeof UsageCountsSchema>;
 
-  current.count++;
-  return { allowed: true };
+function emptyCounts(): UsageCounts {
+  return {
+    callCount: 0,
+    totalInputTokens: 0,
+    totalOutputTokens: 0,
+    totalTokens: 0,
+  };
+}
+
+function addCounts(target: UsageCounts, source: UsageCounts): void {
+  target.callCount += source.callCount;
+  target.totalInputTokens += source.totalInputTokens;
+  target.totalOutputTokens += source.totalOutputTokens;
+  target.totalTokens += source.totalTokens;
+}
+
+function avgPerCall(data: UsageCounts): number {
+  return data.callCount > 0 ? Math.round(data.totalTokens / data.callCount) : 0;
 }
 
 export const GET = withErrorHandling(async function GET(request: NextRequest) {
-  // Get client IP for rate limiting
-  const ip =
-    request.headers.get('x-forwarded-for')?.split(',')[0]?.trim() ??
-    request.headers.get('x-real-ip') ??
-    'unknown';
+  const { error, rateLimitInfo } = await publicRateLimit(request);
+  if (error) return error;
 
-  // Check rate limit
-  const rateLimit = checkIpRateLimit(ip);
-  if (!rateLimit.allowed) {
-    logger.warn(
-      'Token stats rate limit exceeded',
-      { ip },
-      'GET /api/stats/tokens'
-    );
-    return rateLimitError(rateLimit.retryAfter);
-  }
-
-  // Parse query parameters
   const searchParams = request.nextUrl.searchParams;
-  const limit = Math.min(
-    100,
-    Math.max(1, Number(searchParams.get('limit')) || 10)
-  );
-  const period = searchParams.get('period') ?? 'day';
+  const { limit, period } = TokenStatsQuerySchema.parse({
+    limit: searchParams.get('limit') ?? undefined,
+    period: searchParams.get('period') ?? undefined,
+  });
 
-  // Calculate time range based on period
   const now = new Date();
-  let periodStart: Date;
-  switch (period) {
-    case 'hour':
-      periodStart = new Date(now.getTime() - 60 * 60 * 1000);
-      break;
-    case 'week':
-      periodStart = new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000);
-      break;
-    case 'day':
-    default:
-      periodStart = new Date(now.getTime() - 24 * 60 * 60 * 1000);
-  }
+  const periodStart = new Date(now.getTime() - PERIOD_MS[period]);
 
-  // Create cache key based on parameters
+  // Cache key only contains validated values (bounded key space).
   const cacheKey = `token-stats:${period}:${limit}`;
 
-  // Get cached or fetch fresh data
   const stats = await getCacheOrFetch(
     cacheKey,
     async () => {
-      // First try to get from in-memory stats (for recent data)
-      const memorySummary = tokenStatsService.getSummary(limit);
-
-      // Also fetch from database for historical data
+      // Persisted per-tick stats are the only source; worker-local in-memory
+      // stats are not substituted because they ignore the requested period.
+      // NOTE: this aggregates the most recent `limit` ticks within the period
+      // (sample), not the entire period.
       const dbStats = await db
         .select()
         .from(tickTokenStats)
-        .where(and(gte(tickTokenStats.tickStartedAt, periodStart)))
+        .where(gte(tickTokenStats.tickStartedAt, periodStart))
         .orderBy(desc(tickTokenStats.tickStartedAt))
         .limit(limit);
 
-      // If we have database stats, use those as they're more complete
-      if (dbStats.length > 0) {
-        // Aggregate database stats
-        const totalCalls = dbStats.reduce((sum, t) => sum + t.totalCalls, 0);
-        const totalInputTokens = dbStats.reduce(
-          (sum, t) => sum + t.totalInputTokens,
-          0
-        );
-        const totalOutputTokens = dbStats.reduce(
-          (sum, t) => sum + t.totalOutputTokens,
-          0
-        );
-        const totalTokens = totalInputTokens + totalOutputTokens;
+      const totals = emptyCounts();
+      const promptTypeMap = new Map<string, UsageCounts>();
+      const modelMap = new Map<
+        string,
+        UsageCounts & { provider: string; model: string }
+      >();
 
-        // Aggregate by prompt type
-        const promptTypeMap = new Map<
-          string,
-          {
-            callCount: number;
-            totalInputTokens: number;
-            totalOutputTokens: number;
-            totalTokens: number;
-          }
-        >();
+      for (const tick of dbStats) {
+        totals.callCount += tick.totalCalls;
+        totals.totalInputTokens += tick.totalInputTokens;
+        totals.totalOutputTokens += tick.totalOutputTokens;
 
-        for (const tick of dbStats) {
-          const byPromptType = tick.byPromptType as Array<{
-            promptType: string;
-            callCount: number;
-            totalInputTokens: number;
-            totalOutputTokens: number;
-            totalTokens: number;
-          }>;
-
-          if (Array.isArray(byPromptType)) {
-            for (const pt of byPromptType) {
-              const existing = promptTypeMap.get(pt.promptType) ?? {
-                callCount: 0,
-                totalInputTokens: 0,
-                totalOutputTokens: 0,
-                totalTokens: 0,
-              };
-              existing.callCount += pt.callCount;
-              existing.totalInputTokens += pt.totalInputTokens;
-              existing.totalOutputTokens += pt.totalOutputTokens;
-              existing.totalTokens += pt.totalTokens;
-              promptTypeMap.set(pt.promptType, existing);
-            }
-          }
+        for (const pt of ByPromptTypeSchema.parse(tick.byPromptType)) {
+          const existing = promptTypeMap.get(pt.promptType) ?? emptyCounts();
+          addCounts(existing, pt);
+          promptTypeMap.set(pt.promptType, existing);
         }
 
-        // Aggregate by model
-        const modelMap = new Map<
-          string,
-          {
-            provider: string;
-            callCount: number;
-            totalInputTokens: number;
-            totalOutputTokens: number;
-            totalTokens: number;
-          }
-        >();
-
-        for (const tick of dbStats) {
-          const byModel = tick.byModel as Array<{
-            provider: string;
-            model: string;
-            callCount: number;
-            totalInputTokens: number;
-            totalOutputTokens: number;
-            totalTokens: number;
-          }>;
-
-          if (Array.isArray(byModel)) {
-            for (const m of byModel) {
-              const key = `${m.provider}:${m.model}`;
-              const existing = modelMap.get(key) ?? {
-                provider: m.provider,
-                callCount: 0,
-                totalInputTokens: 0,
-                totalOutputTokens: 0,
-                totalTokens: 0,
-              };
-              existing.callCount += m.callCount;
-              existing.totalInputTokens += m.totalInputTokens;
-              existing.totalOutputTokens += m.totalOutputTokens;
-              existing.totalTokens += m.totalTokens;
-              modelMap.set(key, existing);
-            }
-          }
+        for (const m of ByModelSchema.parse(tick.byModel)) {
+          // Structural key: model names may contain ':'
+          const key = JSON.stringify([m.provider, m.model]);
+          const existing = modelMap.get(key) ?? {
+            provider: m.provider,
+            model: m.model,
+            ...emptyCounts(),
+          };
+          addCounts(existing, m);
+          modelMap.set(key, existing);
         }
-
-        // Calculate estimated cost (rough approximation)
-        // Using average cost of ~$0.50 per 1M tokens for mixed usage
-        const estimatedTotalCostUSD = (totalTokens / 1_000_000) * 0.5;
-
-        return {
-          summary: {
-            periodStart:
-              dbStats[dbStats.length - 1]?.tickStartedAt ?? periodStart,
-            periodEnd: dbStats[0]?.tickCompletedAt ?? now,
-            tickCount: dbStats.length,
-            totalCalls,
-            totalInputTokens,
-            totalOutputTokens,
-            totalTokens,
-            avgCallsPerTick:
-              dbStats.length > 0 ? Math.round(totalCalls / dbStats.length) : 0,
-            avgInputTokensPerTick:
-              dbStats.length > 0
-                ? Math.round(totalInputTokens / dbStats.length)
-                : 0,
-            avgOutputTokensPerTick:
-              dbStats.length > 0
-                ? Math.round(totalOutputTokens / dbStats.length)
-                : 0,
-            avgTotalTokensPerTick:
-              dbStats.length > 0 ? Math.round(totalTokens / dbStats.length) : 0,
-            estimatedTotalCostUSD,
-          },
-          byPromptType: Array.from(promptTypeMap.entries())
-            .map(([promptType, data]) => ({
-              promptType,
-              ...data,
-              avgTokensPerCall:
-                data.callCount > 0
-                  ? Math.round(data.totalTokens / data.callCount)
-                  : 0,
-            }))
-            .sort((a, b) => b.totalTokens - a.totalTokens),
-          byModel: Array.from(modelMap.entries())
-            .map(([key, data]) => {
-              const [, model] = key.split(':');
-              return {
-                model: model ?? 'unknown',
-                provider: data.provider,
-                callCount: data.callCount,
-                totalInputTokens: data.totalInputTokens,
-                totalOutputTokens: data.totalOutputTokens,
-                totalTokens: data.totalTokens,
-                avgTokensPerCall:
-                  data.callCount > 0
-                    ? Math.round(data.totalTokens / data.callCount)
-                    : 0,
-              };
-            })
-            .sort((a, b) => b.totalTokens - a.totalTokens),
-          recentTicks: dbStats.slice(0, 5).map((t) => ({
-            tickId: t.tickId,
-            tickStartedAt: t.tickStartedAt,
-            tickCompletedAt: t.tickCompletedAt,
-            totalCalls: t.totalCalls,
-            totalTokens: t.totalTokens,
-          })),
-        };
       }
+      totals.totalTokens = totals.totalInputTokens + totals.totalOutputTokens;
 
-      // Fall back to in-memory summary
-      if (memorySummary) {
-        return {
-          summary: {
-            periodStart: memorySummary.periodStart,
-            periodEnd: memorySummary.periodEnd,
-            tickCount: memorySummary.tickCount,
-            totalCalls: memorySummary.totalCalls,
-            totalInputTokens: memorySummary.totalInputTokens,
-            totalOutputTokens: memorySummary.totalOutputTokens,
-            totalTokens: memorySummary.totalTokens,
-            avgCallsPerTick: memorySummary.avgCallsPerTick,
-            avgInputTokensPerTick: memorySummary.avgInputTokensPerTick,
-            avgOutputTokensPerTick: memorySummary.avgOutputTokensPerTick,
-            avgTotalTokensPerTick: memorySummary.avgTotalTokensPerTick,
-            estimatedTotalCostUSD: memorySummary.estimatedTotalCostUSD,
-          },
-          byPromptType: memorySummary.byPromptType.sort(
-            (a, b) => b.totalTokens - a.totalTokens
-          ),
-          byModel: memorySummary.byModel.sort(
-            (a, b) => b.totalTokens - a.totalTokens
-          ),
-          recentTicks: tokenStatsService.getRecentTicks(5).map((t) => ({
-            tickId: t.tickId,
-            tickStartedAt: t.tickStartedAt,
-            tickCompletedAt: t.tickCompletedAt,
-            totalCalls: t.totalCalls,
-            totalTokens: t.totalTokens,
-          })),
-        };
-      }
+      const tickCount = dbStats.length;
+      const perTick = (value: number) =>
+        tickCount > 0 ? Math.round(value / tickCount) : 0;
 
-      // No data available
+      // Calculate estimated cost (rough approximation)
+      // Using average cost of ~$0.50 per 1M tokens for mixed usage
+      const estimatedTotalCostUSD = (totals.totalTokens / 1_000_000) * 0.5;
+
       return {
         summary: {
-          periodStart,
-          periodEnd: now,
-          tickCount: 0,
-          totalCalls: 0,
-          totalInputTokens: 0,
-          totalOutputTokens: 0,
-          totalTokens: 0,
-          avgCallsPerTick: 0,
-          avgInputTokensPerTick: 0,
-          avgOutputTokensPerTick: 0,
-          avgTotalTokensPerTick: 0,
-          estimatedTotalCostUSD: 0,
+          periodStart:
+            dbStats[dbStats.length - 1]?.tickStartedAt ?? periodStart,
+          periodEnd: dbStats[0]?.tickCompletedAt ?? now,
+          tickCount,
+          totalCalls: totals.callCount,
+          totalInputTokens: totals.totalInputTokens,
+          totalOutputTokens: totals.totalOutputTokens,
+          totalTokens: totals.totalTokens,
+          avgCallsPerTick: perTick(totals.callCount),
+          avgInputTokensPerTick: perTick(totals.totalInputTokens),
+          avgOutputTokensPerTick: perTick(totals.totalOutputTokens),
+          avgTotalTokensPerTick: perTick(totals.totalTokens),
+          estimatedTotalCostUSD,
         },
-        byPromptType: [],
-        byModel: [],
-        recentTicks: [],
+        byPromptType: Array.from(promptTypeMap.entries())
+          .map(([promptType, data]) => ({
+            promptType,
+            ...data,
+            avgTokensPerCall: avgPerCall(data),
+          }))
+          .sort((a, b) => b.totalTokens - a.totalTokens),
+        byModel: Array.from(modelMap.values())
+          .map((data) => ({ ...data, avgTokensPerCall: avgPerCall(data) }))
+          .sort((a, b) => b.totalTokens - a.totalTokens),
+        recentTicks: dbStats.slice(0, 5).map((t) => ({
+          tickId: t.tickId,
+          tickStartedAt: t.tickStartedAt,
+          tickCompletedAt: t.tickCompletedAt,
+          totalCalls: t.totalCalls,
+          totalTokens: t.totalTokens,
+        })),
       };
     },
     {
@@ -436,19 +284,10 @@ export const GET = withErrorHandling(async function GET(request: NextRequest) {
     }
   );
 
-  logger.info(
-    'Token stats fetched',
-    {
-      period,
-      limit,
-      tickCount: stats.summary.tickCount,
-      totalTokens: stats.summary.totalTokens,
-    },
-    'GET /api/stats/tokens'
-  );
-
-  return NextResponse.json({
+  const response = NextResponse.json({
     success: true,
     ...stats,
   });
+  if (rateLimitInfo) addPublicReadHeaders(response, rateLimitInfo);
+  return response;
 });

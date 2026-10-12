@@ -7,56 +7,26 @@
  * Tests will skip gracefully if rate limited or API unavailable.
  */
 
-import { beforeAll, describe, expect, setDefaultTimeout, test } from 'bun:test';
+import { beforeAll, describe, expect, test } from 'bun:test';
 import { resolveLiveLlmTestConfig } from '../../../../testing/integration/helpers/live-runtime';
 import type { GeneratedGame } from '../../GameGenerator';
 import { GameGenerator } from '../../GameGenerator';
-import { formatError } from '../../utils/error-utils';
 
-setDefaultTimeout(600000);
 const liveLlmConfig = resolveLiveLlmTestConfig();
 
 describe.skipIf(!liveLlmConfig.enabled)('Game Output Validation', () => {
   let game: GeneratedGame | null = null;
-  let skipped = false;
-  let skipReason = '';
 
-  // Generate one game before all tests
+  // Live generation is explicitly opted into (RUN_LIVE_LLM_TESTS), so
+  // generation failures fail the suite instead of turning every test green.
   beforeAll(async () => {
-    try {
-      const generator = new GameGenerator();
-      game = await generator.generateCompleteGame();
-    } catch (error) {
-      const errorMessage = formatError(error);
-      if (
-        errorMessage.includes('429') ||
-        errorMessage.includes('rate_limit') ||
-        errorMessage.includes('Rate limit') ||
-        errorMessage.includes('401') ||
-        errorMessage.includes('Invalid API Key') ||
-        errorMessage.includes('API key') ||
-        errorMessage.includes('Unauthorized') ||
-        errorMessage.includes('Failed to generate') ||
-        (errorMessage.includes('after') && errorMessage.includes('attempts'))
-      ) {
-        console.log(
-          '⏭️  LLM API unavailable or generation failed - tests will skip gracefully'
-        );
-        skipped = true;
-        skipReason = 'API rate limited, unavailable, or generation failed';
-      } else {
-        // Re-throw non-API errors
-        throw error;
-      }
-    }
-  });
+    const generator = new GameGenerator();
+    game = await generator.generateCompleteGame();
+  }, 600_000);
 
   describe('Schema Validation', () => {
     test('has all required top-level fields', () => {
-      if (skipped || !game) {
-        console.log(`⏭️  Skipping - ${skipReason || 'No game generated'}`);
-        return;
-      }
+      if (!game) throw new Error('Game was not generated');
       expect(game.id).toBeDefined();
       expect(game.version).toBeDefined();
       expect(game.generatedAt).toBeDefined();
@@ -66,10 +36,7 @@ describe.skipIf(!liveLlmConfig.enabled)('Game Output Validation', () => {
     });
 
     test('has all 30 days in timeline', () => {
-      if (skipped || !game) {
-        console.log(`⏭️  Skipping - ${skipReason || 'No game generated'}`);
-        return;
-      }
+      if (!game) throw new Error('Game was not generated');
       expect(game.timeline.length).toBe(30);
 
       game.timeline.forEach((day, i) => {
@@ -78,58 +45,37 @@ describe.skipIf(!liveLlmConfig.enabled)('Game Output Validation', () => {
     });
 
     test('has 3 main actors', () => {
-      if (skipped || !game) {
-        console.log(`⏭️  Skipping - ${skipReason || 'No game generated'}`);
-        return;
-      }
+      if (!game) throw new Error('Game was not generated');
       expect(game.setup.mainActors.length).toBe(3);
     });
 
     test('has 15 supporting actors', () => {
-      if (skipped || !game) {
-        console.log(`⏭️  Skipping - ${skipReason || 'No game generated'}`);
-        return;
-      }
+      if (!game) throw new Error('Game was not generated');
       expect(game.setup.supportingActors.length).toBe(15);
     });
 
     test('has extras', () => {
-      if (skipped || !game) {
-        console.log(`⏭️  Skipping - ${skipReason || 'No game generated'}`);
-        return;
-      }
+      if (!game) throw new Error('Game was not generated');
       expect(game.setup.extras.length).toBeGreaterThan(0);
     });
 
     test('has 3 scenarios', () => {
-      if (skipped || !game) {
-        console.log(`⏭️  Skipping - ${skipReason || 'No game generated'}`);
-        return;
-      }
+      if (!game) throw new Error('Game was not generated');
       expect(game.setup.scenarios.length).toBe(3);
     });
 
     test('has 3 questions', () => {
-      if (skipped || !game) {
-        console.log(`⏭️  Skipping - ${skipReason || 'No game generated'}`);
-        return;
-      }
+      if (!game) throw new Error('Game was not generated');
       expect(game.setup.questions.length).toBe(3);
     });
 
     test('has group chats', () => {
-      if (skipped || !game) {
-        console.log(`⏭️  Skipping - ${skipReason || 'No game generated'}`);
-        return;
-      }
+      if (!game) throw new Error('Game was not generated');
       expect(game.setup.groupChats.length).toBeGreaterThan(0);
     });
 
     test('all questions have outcomes', () => {
-      if (skipped || !game) {
-        console.log(`⏭️  Skipping - ${skipReason || 'No game generated'}`);
-        return;
-      }
+      if (!game) throw new Error('Game was not generated');
       game.setup.questions.forEach((q) => {
         expect(typeof q.outcome).toBe('boolean');
       });
@@ -138,10 +84,7 @@ describe.skipIf(!liveLlmConfig.enabled)('Game Output Validation', () => {
 
   describe('Content Validation', () => {
     test('events reference valid actors', () => {
-      if (skipped || !game) {
-        console.log(`⏭️  Skipping - ${skipReason || 'No game generated'}`);
-        return;
-      }
+      if (!game) throw new Error('Game was not generated');
       const allActorIds = [
         ...game.setup.mainActors.map((a) => a.id),
         ...game.setup.supportingActors.map((a) => a.id),
@@ -158,20 +101,14 @@ describe.skipIf(!liveLlmConfig.enabled)('Game Output Validation', () => {
     });
 
     test('each day has events', () => {
-      if (skipped || !game) {
-        console.log(`⏭️  Skipping - ${skipReason || 'No game generated'}`);
-        return;
-      }
+      if (!game) throw new Error('Game was not generated');
       game.timeline.forEach((day) => {
         expect(day.events.length).toBeGreaterThan(0);
       });
     });
 
     test('group chats have valid members', () => {
-      if (skipped || !game) {
-        console.log(`⏭️  Skipping - ${skipReason || 'No game generated'}`);
-        return;
-      }
+      if (!game) throw new Error('Game was not generated');
       const allActorIds = [
         ...game.setup.mainActors.map((a) => a.id),
         ...game.setup.supportingActors.map((a) => a.id),
@@ -187,10 +124,7 @@ describe.skipIf(!liveLlmConfig.enabled)('Game Output Validation', () => {
     });
 
     test('events have unique IDs', () => {
-      if (skipped || !game) {
-        console.log(`⏭️  Skipping - ${skipReason || 'No game generated'}`);
-        return;
-      }
+      if (!game) throw new Error('Game was not generated');
       const eventIds = new Set<string>();
 
       game.timeline.forEach((day) => {
@@ -202,10 +136,7 @@ describe.skipIf(!liveLlmConfig.enabled)('Game Output Validation', () => {
     });
 
     test('timestamps are valid', () => {
-      if (skipped || !game) {
-        console.log(`⏭️  Skipping - ${skipReason || 'No game generated'}`);
-        return;
-      }
+      if (!game) throw new Error('Game was not generated');
       const generatedAt = new Date(game.generatedAt);
       expect(generatedAt.getTime()).toBeGreaterThan(0);
     });
@@ -213,10 +144,7 @@ describe.skipIf(!liveLlmConfig.enabled)('Game Output Validation', () => {
 
   describe('Narrative Coherence', () => {
     test('scenarios connect to questions', () => {
-      if (skipped || !game) {
-        console.log(`⏭️  Skipping - ${skipReason || 'No game generated'}`);
-        return;
-      }
+      if (!game) throw new Error('Game was not generated');
       game.setup.questions.forEach((q) => {
         expect(q.scenario).toBeGreaterThanOrEqual(1);
         expect(q.scenario).toBeLessThanOrEqual(3);
@@ -224,10 +152,7 @@ describe.skipIf(!liveLlmConfig.enabled)('Game Output Validation', () => {
     });
 
     test('events distributed across days', () => {
-      if (skipped || !game) {
-        console.log(`⏭️  Skipping - ${skipReason || 'No game generated'}`);
-        return;
-      }
+      if (!game) throw new Error('Game was not generated');
       const eventCounts = game.timeline.map((d) => d.events.length);
       const total = eventCounts.reduce((sum, c) => sum + c, 0);
 
@@ -235,10 +160,7 @@ describe.skipIf(!liveLlmConfig.enabled)('Game Output Validation', () => {
     });
 
     test('has resolution for all questions', () => {
-      if (skipped || !game) {
-        console.log(`⏭️  Skipping - ${skipReason || 'No game generated'}`);
-        return;
-      }
+      if (!game) throw new Error('Game was not generated');
       expect(game.resolution.outcomes.length).toBe(3);
 
       game.resolution.outcomes.forEach((outcome) => {
@@ -249,11 +171,8 @@ describe.skipIf(!liveLlmConfig.enabled)('Game Output Validation', () => {
   });
 
   describe('Quality Validation', () => {
-    test('early days have fewer events than late days', () => {
-      if (skipped || !game) {
-        console.log(`⏭️  Skipping - ${skipReason || 'No game generated'}`);
-        return;
-      }
+    test('early (days 1-10) and late (days 21-25) windows both have events', () => {
+      if (!game) throw new Error('Game was not generated');
       const earlyEvents = game.timeline
         .slice(0, 10)
         .reduce((sum, d) => sum + d.events.length, 0);
@@ -266,12 +185,9 @@ describe.skipIf(!liveLlmConfig.enabled)('Game Output Validation', () => {
     });
 
     test('file size is reasonable (<10MB)', () => {
-      if (skipped || !game) {
-        console.log(`⏭️  Skipping - ${skipReason || 'No game generated'}`);
-        return;
-      }
+      if (!game) throw new Error('Game was not generated');
       const json = JSON.stringify(game);
-      const sizeInMB = json.length / (1024 * 1024);
+      const sizeInMB = Buffer.byteLength(json, 'utf8') / (1024 * 1024);
 
       expect(sizeInMB).toBeLessThan(10);
     });

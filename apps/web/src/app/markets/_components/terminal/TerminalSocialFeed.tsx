@@ -30,9 +30,12 @@ export function TerminalSocialFeed({ perpTicker }: TerminalSocialFeedProps) {
   const [tagHasMore, setTagHasMore] = useState(true);
   const [tagOffset, setTagOffset] = useState(0);
   const [tagNotFound, setTagNotFound] = useState(false);
+  const [tagError, setTagError] = useState(false);
+  // User opted into the unfiltered feed via "Show all".
+  const [showAll, setShowAll] = useState(false);
   const inFlightTagRef = useRef<AbortController | null>(null);
 
-  const tagMode = tag != null && !tagNotFound;
+  const tagMode = tag != null && !showAll;
 
   const {
     posts: globalPosts,
@@ -73,6 +76,7 @@ export function TerminalSocialFeed({ perpTicker }: TerminalSocialFeedProps) {
 
       if (append) setTagLoadingMore(true);
       else setTagLoading(true);
+      setTagError(false);
 
       inFlightTagRef.current?.abort();
       const controller = new AbortController();
@@ -92,6 +96,7 @@ export function TerminalSocialFeed({ perpTicker }: TerminalSocialFeedProps) {
       }
 
       if (!response) {
+        setTagError(true);
         setTagLoading(false);
         setTagLoadingMore(false);
         return;
@@ -109,24 +114,26 @@ export function TerminalSocialFeed({ perpTicker }: TerminalSocialFeedProps) {
       }
 
       if (!response.ok) {
+        setTagError(true);
         setTagLoading(false);
         setTagLoadingMore(false);
         return;
       }
 
-      const data = (await response.json()) as {
+      const data = (await response.json().catch(() => null)) as {
         success: boolean;
         tag?: { name: string; displayName: string; category?: string | null };
         posts?: FeedPost[];
         total?: number;
-      };
+      } | null;
 
       // Guard again after async json parsing
       if (inFlightTagRef.current !== controller || controller.signal.aborted) {
         return;
       }
 
-      if (!data.success) {
+      if (!data?.success) {
+        setTagError(true);
         setTagLoading(false);
         setTagLoadingMore(false);
         return;
@@ -155,15 +162,31 @@ export function TerminalSocialFeed({ perpTicker }: TerminalSocialFeedProps) {
     [tag]
   );
 
-  useEffect(() => {
+  const resetTagState = useCallback(() => {
     setTagNotFound(false);
+    setTagError(false);
     setTagPosts([]);
     setTagInfo(null);
     setTagHasMore(true);
     setTagOffset(0);
+  }, []);
+
+  useEffect(() => {
+    resetTagState();
+    setShowAll(false);
     if (!tag) return;
     void fetchTagPosts({ append: false });
-  }, [tag, fetchTagPosts]);
+    return () => {
+      inFlightTagRef.current?.abort();
+      inFlightTagRef.current = null;
+    };
+  }, [tag, fetchTagPosts, resetTagState]);
+
+  const restoreTagFilter = useCallback(() => {
+    resetTagState();
+    setShowAll(false);
+    void fetchTagPosts({ append: false });
+  }, [fetchTagPosts, resetTagState]);
 
   const onLoadMore = useCallback(() => {
     if (tagMode) {
@@ -210,7 +233,7 @@ export function TerminalSocialFeed({ perpTicker }: TerminalSocialFeedProps) {
                 </span>
                 <button
                   type="button"
-                  onClick={() => setTagNotFound(true)}
+                  onClick={() => setShowAll(true)}
                   className="shrink-0 rounded px-2 py-1 font-semibold text-foreground/80 hover:bg-muted/20 hover:text-foreground"
                 >
                   Show all
@@ -221,12 +244,7 @@ export function TerminalSocialFeed({ perpTicker }: TerminalSocialFeedProps) {
                 <span className="min-w-0 truncate">Showing all posts</span>
                 <button
                   type="button"
-                  onClick={() => {
-                    setTagNotFound(false);
-                    setTagPosts([]);
-                    setTagOffset(0);
-                    setTagHasMore(true);
-                  }}
+                  onClick={restoreTagFilter}
                   className="shrink-0 rounded px-2 py-1 font-semibold text-foreground/80 hover:bg-muted/20 hover:text-foreground"
                 >
                   {perpTicker ?? 'Filtered'}
@@ -240,6 +258,32 @@ export function TerminalSocialFeed({ perpTicker }: TerminalSocialFeedProps) {
       <div className="min-h-0 flex-1 overflow-y-auto overscroll-contain px-2 py-3">
         {loading ? (
           <FeedSkeleton count={6} />
+        ) : tagMode && posts.length === 0 && (tagNotFound || tagError) ? (
+          <div className="flex h-full flex-col items-center justify-center gap-2 text-muted-foreground text-xs">
+            <span>
+              {tagNotFound
+                ? `No topic found for ${perpTicker ?? 'this market'}.`
+                : 'Could not load posts.'}
+            </span>
+            <div className="flex gap-2">
+              {tagError && (
+                <button
+                  type="button"
+                  onClick={restoreTagFilter}
+                  className="rounded px-2 py-1 font-semibold text-foreground/80 hover:bg-muted/20 hover:text-foreground"
+                >
+                  Retry
+                </button>
+              )}
+              <button
+                type="button"
+                onClick={() => setShowAll(true)}
+                className="rounded px-2 py-1 font-semibold text-foreground/80 hover:bg-muted/20 hover:text-foreground"
+              >
+                Show all posts
+              </button>
+            </div>
+          </div>
         ) : posts.length === 0 ? (
           <div className="flex h-full items-center justify-center text-muted-foreground text-xs">
             No posts yet.

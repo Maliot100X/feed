@@ -100,10 +100,16 @@ export const GET = withErrorHandling(async function GET(
       bio: true,
       profileImageUrl: true,
       isAgent: true,
+      isBanned: true,
     },
   });
 
-  if (!agent || !agent.isAgent) {
+  // Only publish a card for agents that actually accept A2A traffic; banned
+  // agents are not discoverable.
+  const agentConfig =
+    agent?.isAgent && !agent.isBanned ? await getAgentConfig(agentId) : null;
+
+  if (!agent || !agentConfig?.a2aEnabled) {
     return NextResponse.json(
       {
         error: 'Agent not found',
@@ -112,17 +118,11 @@ export const GET = withErrorHandling(async function GET(
     );
   }
 
-  // Get agent config for agent-specific fields
-  const agentConfig = await getAgentConfig(agentId);
-
   const agentCard = generateAgentCardSync({
     id: agent.id,
     displayName: agent.displayName,
     bio: agent.bio,
     profileImageUrl: agent.profileImageUrl,
-    systemPrompt: agentConfig?.systemPrompt,
-    personality: agentConfig?.personality,
-    tradingStrategy: agentConfig?.tradingStrategy,
   });
 
   let responseCard: ExtendedAgentCard = agentCard;
@@ -138,7 +138,7 @@ export const GET = withErrorHandling(async function GET(
     .where(eq(agentRegistries.userId, agentId))
     .limit(1);
 
-  if (registry?.agent0TokenId) {
+  if (registry?.agent0TokenId != null) {
     const tokenId = String(registry.agent0TokenId);
 
     responseCard = {

@@ -120,6 +120,7 @@
  */
 
 import {
+  BusinessLogicError,
   evaluateReport,
   NotFoundError,
   requireAdmin,
@@ -130,6 +131,7 @@ import {
 import { db } from '@feed/db';
 import { AdminReportActionSchema, logger } from '@feed/shared';
 import type { NextRequest } from 'next/server';
+import { parseStoredEvaluation } from '../_evaluation';
 
 /**
  * GET /api/admin/reports/[reportId]
@@ -183,53 +185,55 @@ export const GET = withErrorHandling(
       throw new NotFoundError('Report', reportId);
     }
 
-    // Get related reports for the same user/post
-    const relatedReports = await db.report.findMany({
-      where: {
-        OR: [
-          { reportedUserId: report.reportedUserId || undefined },
-          { reportedPostId: report.reportedPostId || undefined },
-        ],
-        id: { not: reportId },
-      },
-      orderBy: { createdAt: 'desc' },
-      take: 10,
-      select: {
-        id: true,
-        createdAt: true,
-        updatedAt: true,
-        reason: true,
-        status: true,
-        category: true,
-        resolution: true,
-        resolvedAt: true,
-        priority: true,
-        reportedUserId: true,
-        reportedPostId: true,
-        reportedCommentId: true,
-        reporterId: true,
-        resolvedBy: true,
-      },
-      include: {
-        reporter: {
-          select: {
-            id: true,
-            username: true,
-            displayName: true,
-          },
-        },
-      },
-    });
+    // Get related reports for the same user/post/comment. Only non-null
+    // subjects are matched; an OR with undefined fields would match nothing
+    // meaningful (or everything, depending on the adapter).
+    const relatedSubjects = [
+      report.reportedUserId ? { reportedUserId: report.reportedUserId } : null,
+      report.reportedPostId ? { reportedPostId: report.reportedPostId } : null,
+      report.reportedCommentId
+        ? { reportedCommentId: report.reportedCommentId }
+        : null,
+    ].filter((subject) => subject !== null);
 
-    // Parse evaluation if it exists
-    let evaluation = null;
-    if (report.resolution) {
-      // Check if it's valid JSON before parsing
-      const trimmed = report.resolution.trim();
-      if (trimmed.startsWith('{') || trimmed.startsWith('[')) {
-        evaluation = JSON.parse(report.resolution);
-      }
-    }
+    const relatedReports =
+      relatedSubjects.length === 0
+        ? []
+        : await db.report.findMany({
+            where: {
+              OR: relatedSubjects,
+              id: { not: reportId },
+            },
+            orderBy: { createdAt: 'desc' },
+            take: 10,
+            select: {
+              id: true,
+              createdAt: true,
+              updatedAt: true,
+              reason: true,
+              status: true,
+              category: true,
+              resolution: true,
+              resolvedAt: true,
+              priority: true,
+              reportedUserId: true,
+              reportedPostId: true,
+              reportedCommentId: true,
+              reporterId: true,
+              resolvedBy: true,
+            },
+            include: {
+              reporter: {
+                select: {
+                  id: true,
+                  username: true,
+                  displayName: true,
+                },
+              },
+            },
+          });
+
+    const evaluation = parseStoredEvaluation(report.resolution);
 
     return successResponse({
       report: {
@@ -330,11 +334,17 @@ export const POST = withErrorHandling(
           priority: 'critical',
           status: 'reviewing',
           resolution,
+          // Escalated reports are open again; drop any previous resolver.
+          resolvedBy: null,
+          resolvedAt: null,
         },
       });
     } else if (action === 'ban_user') {
       if (!report.reportedUserId) {
-        throw new Error('Cannot ban user: no user associated with this report');
+        throw new BusinessLogicError(
+          'Cannot ban user: no user associated with this report',
+          'NO_REPORTED_USER'
+        );
       }
 
       // Ban the reported user

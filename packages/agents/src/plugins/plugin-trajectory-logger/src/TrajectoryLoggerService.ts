@@ -129,12 +129,26 @@ export class TrajectoryLoggerService extends Service {
   }
 
   async stop(): Promise<void> {
+    // Drain in-flight LLM call writes before dropping state
+    await this.flushPendingWrites();
     this.activeTrajectories.clear();
     this.activeStepIds.clear();
+    this.finalizedTrajectoryIds.clear();
+  }
+
+  /**
+   * Wait for all in-flight LLM call log writes to settle.
+   */
+  async flushPendingWrites(): Promise<void> {
+    while (this.pendingWrites.size > 0) {
+      await Promise.allSettled([...this.pendingWrites]);
+    }
   }
 
   private activeTrajectories: Map<string, Trajectory> = new Map();
   private activeStepIds: Map<string, string> = new Map(); // Maps trajectoryId -> current stepId
+  private finalizedTrajectoryIds: Set<string> = new Set();
+  private pendingWrites: Set<Promise<void>> = new Set();
 
   /**
    * Start a new trajectory
@@ -246,16 +260,23 @@ export class TrajectoryLoggerService extends Service {
 
     step.llmCalls.push(fullLLMCall);
 
-    // Also save to database for analysis
-    this.saveLLMCallToDB(trajectory.trajectoryId, stepId, fullLLMCall).catch(
-      (error) => {
+    // Also save to database for analysis; tracked so stop() can drain it
+    const write = this.saveLLMCallToDB(
+      trajectory.trajectoryId,
+      stepId,
+      fullLLMCall
+    )
+      .catch((error) => {
         logger.error(
           'Failed to save LLM call to database',
           error,
           'TrajectoryLoggerService'
         );
-      }
-    );
+      })
+      .finally(() => {
+        this.pendingWrites.delete(write);
+      });
+    this.pendingWrites.add(write);
   }
 
   /**
@@ -277,7 +298,7 @@ export class TrajectoryLoggerService extends Service {
       stepId,
       callId: llmCall.callId,
       timestamp: new Date(llmCall.timestamp),
-      latencyMs: llmCall.latencyMs || undefined,
+      latencyMs: llmCall.latencyMs ?? undefined,
       model: llmCall.model,
       purpose: llmCall.purpose,
       actionType: llmCall.actionType || null,
@@ -288,14 +309,17 @@ export class TrajectoryLoggerService extends Service {
       reasoning: llmCall.reasoning || null,
       temperature: llmCall.temperature,
       maxTokens: llmCall.maxTokens,
-      topP: llmCall.topP || null,
-      promptTokens: llmCall.promptTokens || null,
-      completionTokens: llmCall.completionTokens || null,
+      topP: llmCall.topP ?? null,
+      // Nullish checks: a legitimate 0-token count must not become null
+      promptTokens: llmCall.promptTokens ?? null,
+      completionTokens: llmCall.completionTokens ?? null,
       totalTokens:
-        llmCall.promptTokens && llmCall.completionTokens
+        llmCall.promptTokens != null && llmCall.completionTokens != null
           ? llmCall.promptTokens + llmCall.completionTokens
           : null,
       metadata: JSON.stringify({
+        // Caller metadata first so it cannot override provenance fields
+        ...(llmCall.metadata ?? {}),
         purpose: llmCall.purpose,
         actionType: llmCall.actionType,
         modelVersion: llmCall.modelVersion,
@@ -304,7 +328,6 @@ export class TrajectoryLoggerService extends Service {
         traceVisibility: llmCall.traceVisibility ?? null,
         rawReasoningTrace: llmCall.rawReasoningTrace ?? null,
         privateAnalysis: llmCall.privateAnalysis ?? null,
-        ...(llmCall.metadata ?? {}),
       }),
     });
   }
@@ -455,6 +478,16 @@ export class TrajectoryLoggerService extends Service {
       return;
     }
 
+    // Steps are created with an empty attemptId; a non-empty one means the
+    // step was already completed. Re-completing would add the reward twice.
+    if (step.action.attemptId !== '') {
+      logger.warn('Step already completed; ignoring repeated completeStep', {
+        trajectoryId,
+        stepId,
+      });
+      return;
+    }
+
     step.action = {
       attemptId: uuidv4(),
       timestamp: Date.now(),
@@ -476,8 +509,11 @@ export class TrajectoryLoggerService extends Service {
       };
     }
 
-    // Clear current step ID
-    this.activeStepIds.delete(trajectoryId);
+    // Clear current step ID only if it still points at this step; completing
+    // an older step must not clear a newer in-progress step.
+    if (this.activeStepIds.get(trajectoryId) === stepId) {
+      this.activeStepIds.delete(trajectoryId);
+    }
   }
 
   /**
@@ -509,45 +545,48 @@ export class TrajectoryLoggerService extends Service {
       logger.warn('Trajectory not found for endTrajectory', { trajectoryId });
       return;
     }
+    if (this.finalizedTrajectoryIds.has(trajectoryId)) {
+      logger.warn('Trajectory already ended; ignoring repeated endTrajectory', {
+        trajectoryId,
+      });
+      return;
+    }
+    this.finalizedTrajectoryIds.add(trajectoryId);
 
     trajectory.endTime = Date.now();
     trajectory.durationMs = trajectory.endTime - trajectory.startTime;
-    trajectory.metrics.finalStatus = status;
-    trajectory.metrics.episodeLength = trajectory.steps.length;
 
-    if (finalMetrics) {
-      trajectory.metrics = {
-        ...trajectory.metrics,
-        ...finalMetrics,
-      };
-    }
+    // Reserved fields are applied after caller metrics so they cannot be
+    // overwritten by finalMetrics.
+    trajectory.metrics = {
+      ...trajectory.metrics,
+      ...(finalMetrics ?? {}),
+      finalStatus: status,
+      episodeLength: trajectory.steps.length,
+    };
 
     // Step-level reward attribution: distribute totalReward across individual steps
     // so GRPO can identify which decisions mattered most in multi-turn episodes.
     // Must run BEFORE database save so attributed rewards are persisted.
-    try {
-      const totalReward = trajectory.totalReward;
-      const steps = trajectory.steps;
-      if (steps.length > 0 && totalReward !== 0) {
-        let totalWeight = 0;
-        for (const step of steps) {
-          // A "real" action is one that was completed (not still 'pending' from init)
-          const hasRealAction =
-            step.action?.actionType !== undefined &&
-            step.action.actionType !== 'pending' &&
-            step.action.success === true;
-          const hasLLMCall = (step.llmCalls?.length ?? 0) > 0;
-          // Successful action steps get 2x weight, LLM-only steps get 1x, empty/pending steps get 0.5x
-          step.stepWeight = hasRealAction ? 2.0 : hasLLMCall ? 1.0 : 0.5;
-          totalWeight += step.stepWeight;
-        }
-        for (const step of steps) {
-          step.attributedReward =
-            totalReward * ((step.stepWeight ?? 1) / totalWeight);
-        }
+    const totalReward = trajectory.totalReward;
+    const steps = trajectory.steps;
+    if (steps.length > 0 && totalReward !== 0) {
+      let totalWeight = 0;
+      for (const step of steps) {
+        // A "real" action is one that was completed (not still 'pending' from init)
+        const hasRealAction =
+          step.action?.actionType !== undefined &&
+          step.action.actionType !== 'pending' &&
+          step.action.success === true;
+        const hasLLMCall = (step.llmCalls?.length ?? 0) > 0;
+        // Successful action steps get 2x weight, LLM-only steps get 1x, empty/pending steps get 0.5x
+        step.stepWeight = hasRealAction ? 2.0 : hasLLMCall ? 1.0 : 0.5;
+        totalWeight += step.stepWeight;
       }
-    } catch {
-      // Non-fatal — step attribution is best-effort
+      for (const step of steps) {
+        step.attributedReward =
+          totalReward * ((step.stepWeight ?? 1) / totalWeight);
+      }
     }
 
     // Save to database using Drizzle

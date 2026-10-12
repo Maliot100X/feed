@@ -641,45 +641,30 @@ export class NPCInvestmentManager {
           .forEach((org) => targetOrgIds.add(org.id));
       }
 
-      const targetTickers = Array.from(targetOrgIds)
-        .map((orgId) => organizationTickerMap.get(orgId))
-        .filter((ticker): ticker is string => Boolean(ticker))
+      const targets = Array.from(targetOrgIds)
+        .map((orgId) => ({ orgId, ticker: organizationTickerMap.get(orgId) }))
+        .filter((t): t is { orgId: string; ticker: string } =>
+          Boolean(t.ticker)
+        )
         .slice(0, 5);
 
-      if (targetTickers.length === 0) {
-        continue;
-      }
-
-      let remainingBudget = investBudget;
-
-      targetTickers.forEach((ticker, index) => {
-        // Skip if NPC already has an open position on this organization
-        const positionKey = `${actor.id}:${ticker.toLowerCase()}`;
-        if (existingPerpPositionKeys.has(positionKey)) {
-          return;
-        }
-
-        const allocationsRemaining = targetTickers.length - index;
-        let allocation = remainingBudget / allocationsRemaining;
-        allocation = Number(allocation.toFixed(2));
-
-        if (allocation <= 0) {
-          return;
-        }
-
-        remainingBudget = Math.max(remainingBudget - allocation, 0);
-
+      for (const { ticker, amount } of planBaselinePerpAllocations(
+        actor.id,
+        targets,
+        investBudget,
+        existingPerpPositionKeys
+      )) {
         baselineDecisions.push({
           npcId: actor.id,
           npcName: actor.name,
           action: 'open_long',
           marketType: 'perp',
           ticker,
-          amount: allocation,
+          amount,
           confidence: 0.9,
           reasoning: 'Baseline allocation to aligned organizations',
         });
-      });
+      }
     }
 
     return baselineDecisions;
@@ -1213,4 +1198,36 @@ export class NPCInvestmentManager {
 
     return positionSize;
   }
+}
+
+/**
+ * Split an NPC's baseline perp budget across target organizations.
+ *
+ * Targets the NPC already holds an open position on are skipped. Existing
+ * position keys are `${actorId}:${organizationId.toLowerCase()}`, so matching
+ * is done on the organization ID (tickers often differ from org IDs). The
+ * budget is divided only among targets that will actually be allocated.
+ */
+export function planBaselinePerpAllocations(
+  actorId: string,
+  targets: ReadonlyArray<{ orgId: string; ticker: string }>,
+  budget: number,
+  existingPositionKeys: ReadonlySet<string>
+): Array<{ ticker: string; amount: number }> {
+  const eligible = targets.filter(
+    ({ orgId, ticker }) =>
+      !existingPositionKeys.has(`${actorId}:${orgId.toLowerCase()}`) &&
+      !existingPositionKeys.has(`${actorId}:${ticker.toLowerCase()}`)
+  );
+
+  const allocations: Array<{ ticker: string; amount: number }> = [];
+  let remainingBudget = budget;
+  eligible.forEach(({ ticker }, index) => {
+    const allocationsRemaining = eligible.length - index;
+    const amount = Number((remainingBudget / allocationsRemaining).toFixed(2));
+    if (amount <= 0) return;
+    remainingBudget = Math.max(remainingBudget - amount, 0);
+    allocations.push({ ticker, amount });
+  });
+  return allocations;
 }

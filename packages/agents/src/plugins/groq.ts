@@ -21,14 +21,9 @@ import {
   ModelType,
   type TokenizeTextParams,
 } from '@elizaos/core';
-import {
-  GROQ_MODELS,
-  getAgentLLMBridge,
-  getSurplusConfig,
-  type JsonValue,
-} from '@feed/shared';
+import { GROQ_MODELS, getAgentLLMBridge, type JsonValue } from '@feed/shared';
 import { generateObject, generateText, jsonSchema } from 'ai';
-import { encodingForModel, type TiktokenModel } from 'js-tiktoken';
+import { getEncoding } from 'js-tiktoken';
 import { createAgentGroq, resolveGroqModel } from '../llm/direct-groq';
 import { buildReasoningTraceMetadata } from '../llm/reasoning-trace';
 import { getAgentLLMTimeoutMs } from '../llm/request-timeout';
@@ -47,36 +42,32 @@ function resolveGroqRuntimeModel(
 }
 
 /**
- * Finds model name for tokenization
+ * Groq/Surplus model IDs (e.g. Llama, gpt-oss) are not tiktoken models, so
+ * `encodingForModel(<provider id>)` throws "Unknown model". Tokenization here
+ * is an explicit approximation using the o200k_base encoding, not the
+ * provider's exact tokenizer.
  * @internal
  */
-function findModelName(model: ModelTypeName): TiktokenModel {
-  const name =
-    getSurplusConfig()?.model ||
-    (model === ModelType.TEXT_SMALL
-      ? GROQ_MODELS.FREE.modelId
-      : GROQ_MODELS.PRO.modelId);
-  return name as TiktokenModel;
+let approximateEncoding: ReturnType<typeof getEncoding> | null = null;
+function getApproximateEncoding(): ReturnType<typeof getEncoding> {
+  approximateEncoding ??= getEncoding('o200k_base');
+  return approximateEncoding;
 }
 
 /**
- * Tokenizes text using tiktoken
+ * Tokenizes text (approximate; see getApproximateEncoding)
  * @internal
  */
-async function tokenizeText(model: ModelTypeName, prompt: string) {
-  const encoding = encodingForModel(findModelName(model));
-  const tokens = encoding.encode(prompt);
-  return tokens;
+async function tokenizeText(_model: ModelTypeName, prompt: string) {
+  return getApproximateEncoding().encode(prompt);
 }
 
 /**
- * Detokenizes tokens back to text
+ * Detokenizes tokens back to text (approximate; see getApproximateEncoding)
  * @internal
  */
-async function detokenizeText(model: ModelTypeName, tokens: number[]) {
-  const modelName = findModelName(model);
-  const encoding = encodingForModel(modelName);
-  return encoding.decode(tokens);
+async function detokenizeText(_model: ModelTypeName, tokens: number[]) {
+  return getApproximateEncoding().decode(tokens);
 }
 
 /**

@@ -10,7 +10,7 @@ import {
   Users,
   VolumeX,
 } from 'lucide-react';
-import { useCallback, useEffect, useState, useTransition } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { toast } from 'sonner';
 import { z } from 'zod';
 import { BlockUserModal } from '@/components/moderation/BlockUserModal';
@@ -98,7 +98,7 @@ type SortByType =
  *
  * Displays a comprehensive list of users and actors with filtering, sorting,
  * and search functionality. Provides user management actions including ban,
- * mute, block, and send money. Shows user statistics and moderation metrics.
+ * mute and block. Shows user statistics and moderation metrics.
  *
  * Features:
  * - User/actor list display
@@ -108,7 +108,6 @@ type SortByType =
  * - User details view
  * - Ban functionality
  * - Mute/block functionality
- * - Send money functionality
  * - Moderation metrics display
  * - Loading states
  * - Error handling
@@ -118,10 +117,18 @@ type SortByType =
 export function UserManagementTab() {
   const [users, setUsers] = useState<User[]>([]);
   const [loading, setLoading] = useState(true);
-  const [isRefreshing, startRefresh] = useTransition();
+  const [isRefreshing, setIsRefreshing] = useState(false);
+  const [loadError, setLoadError] = useState<string | null>(null);
+  const latestRequest = useRef(0);
   const [filter, setFilter] = useState<FilterType>('all');
   const [sortBy, setSortBy] = useState<SortByType>('created');
   const [searchQuery, setSearchQuery] = useState('');
+  const [debouncedSearch, setDebouncedSearch] = useState('');
+
+  useEffect(() => {
+    const timer = setTimeout(() => setDebouncedSearch(searchQuery), 300);
+    return () => clearTimeout(timer);
+  }, [searchQuery]);
   const [selectedUser, setSelectedUser] = useState<User | null>(null);
   const [showBanModal, setShowBanModal] = useState(false);
   const [showMuteModal, setShowMuteModal] = useState(false);
@@ -129,76 +136,98 @@ export function UserManagementTab() {
   const [banReason, setBanReason] = useState('');
   const [isScammer, setIsScammer] = useState(false);
   const [isCSAM, setIsCSAM] = useState(false);
-  const [isBanning, startBanning] = useTransition();
+  const [isBanning, setIsBanning] = useState(false);
   const [whitelistingUserId, setWhitelistingUserId] = useState<string | null>(
     null
   );
 
-  const fetchUsers = useCallback(
-    (showRefreshing = false) => {
-      const fetchLogic = async () => {
-        const params = new URLSearchParams({
-          limit: '50',
-          filter,
-          sortBy,
-          sortOrder: 'desc',
-        });
-        if (searchQuery) params.set('search', searchQuery);
+  // Only the latest request may update state, so a slow response for an
+  // older search/filter cannot overwrite newer results.
+  const fetchUsers = useCallback(async () => {
+    const requestId = ++latestRequest.current;
+    setIsRefreshing(true);
+    const params = new URLSearchParams({
+      limit: '50',
+      filter,
+      sortBy,
+      sortOrder: 'desc',
+    });
+    if (debouncedSearch) params.set('search', debouncedSearch);
 
-        const response = await fetch(apiUrl(`/api/admin/users?${params}`));
-        if (!response.ok) throw new Error('Failed to fetch users');
+    let nextError: string | null = null;
+    let nextUsers: User[] | null = null;
+    try {
+      const response = await fetch(apiUrl(`/api/admin/users?${params}`));
+      if (!response.ok) {
+        nextError = `Failed to fetch users (HTTP ${response.status})`;
+      } else {
         const data = await response.json();
         const validation = z.array(UserSchema).safeParse(data.users);
-        if (!validation.success) {
-          throw new Error('Invalid user data structure');
-        }
-        setUsers(validation.data || []);
-        setLoading(false);
-      };
-
-      if (showRefreshing) {
-        startRefresh(fetchLogic);
-      } else {
-        void fetchLogic();
+        if (validation.success) nextUsers = validation.data;
+        else nextError = 'Invalid user data structure';
       }
-    },
-    [filter, sortBy, searchQuery]
-  );
+    } catch (err) {
+      nextError = err instanceof Error ? err.message : 'Failed to fetch users';
+    }
+
+    if (requestId !== latestRequest.current) return;
+    if (nextUsers) setUsers(nextUsers);
+    setLoadError(nextError);
+    setLoading(false);
+    setIsRefreshing(false);
+  }, [filter, sortBy, debouncedSearch]);
 
   useEffect(() => {
-    fetchUsers();
+    void fetchUsers();
   }, [fetchUsers]);
 
-  const handleBanUser = (user: User, action: 'ban' | 'unban') => {
+  const handleBanUser = async (user: User, action: 'ban' | 'unban') => {
+    if (isBanning) return;
     if (action === 'ban' && !banReason.trim()) {
       toast.error('Please provide a reason for banning');
       return;
     }
 
-    startBanning(async () => {
-      const response = await fetch(apiUrl(`/api/admin/users/${user.id}/ban`), {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          action,
-          reason: action === 'ban' ? banReason : undefined,
-          isScammer: action === 'ban' ? isScammer : false,
-          isCSAM: action === 'ban' ? isCSAM : false,
-        }),
-      });
+    setIsBanning(true);
+    try {
+      const response = await fetch(
+        apiUrl(`/api/admin/users/${encodeURIComponent(user.id)}/ban`),
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            action,
+            reason: action === 'ban' ? banReason : undefined,
+            isScammer: action === 'ban' ? isScammer : false,
+            isCSAM: action === 'ban' ? isCSAM : false,
+          }),
+        }
+      );
 
       if (!response.ok) {
-        const error = await response.json();
-        throw new Error(error.message || 'Failed to update user');
+        const error: { message?: string; error?: string } = await response
+          .json()
+          .catch(() => ({}));
+        toast.error(
+          error.message ??
+            error.error ??
+            `Failed to update user (HTTP ${response.status})`
+        );
+        return;
       }
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : 'Failed to update user');
+      return;
+    } finally {
+      setIsBanning(false);
+    }
 
-      setShowBanModal(false);
-      setBanReason('');
-      setIsScammer(false);
-      setIsCSAM(false);
-      setSelectedUser(null);
-      fetchUsers(true);
-    });
+    setShowBanModal(false);
+    setBanReason('');
+    setIsScammer(false);
+    setIsCSAM(false);
+    setSelectedUser(null);
+    void fetchUsers();
   };
 
   const handleWhitelistUser = async (userId: string) => {
@@ -309,11 +338,11 @@ export function UserManagementTab() {
 
             {/* Activity Stats */}
             <div className="flex gap-4 text-muted-foreground text-xs">
-              <span>Posts: {user._count?.comments ?? 0}</span>
-              <span>Reactions: {user._count?.reactions ?? 0}</span>
-              <span>Positions: {user._count?.positions ?? 0}</span>
-              <span>Followers: {user._count?.followedBy ?? 0}</span>
-              <span>Following: {user._count?.following ?? 0}</span>
+              <span>Comments: {user._count?.comments ?? '—'}</span>
+              <span>Reactions: {user._count?.reactions ?? '—'}</span>
+              <span>Positions: {user._count?.positions ?? '—'}</span>
+              <span>Followers: {user._count?.followedBy ?? '—'}</span>
+              <span>Following: {user._count?.following ?? '—'}</span>
             </div>
 
             {/* Moderation Metrics */}
@@ -431,7 +460,7 @@ export function UserManagementTab() {
               </button>
               {user.isBanned ? (
                 <button
-                  onClick={() => handleBanUser(user, 'unban')}
+                  onClick={() => void handleBanUser(user, 'unban')}
                   disabled={isBanning}
                   className="flex items-center gap-1 rounded bg-green-500/20 px-3 py-1.5 font-medium text-green-500 text-sm transition-colors hover:bg-green-500/30 disabled:opacity-50"
                 >
@@ -532,7 +561,7 @@ export function UserManagementTab() {
           </div>
 
           <button
-            onClick={() => fetchUsers(true)}
+            onClick={() => void fetchUsers()}
             disabled={isRefreshing}
             className="ml-auto flex items-center gap-2 rounded bg-muted px-3 py-1.5 font-medium text-sm transition-colors hover:bg-muted/80 disabled:opacity-50"
           >
@@ -544,11 +573,24 @@ export function UserManagementTab() {
         </div>
       </div>
 
+      {loadError && (
+        <div className="rounded-lg border border-red-500/20 bg-red-500/10 p-3 text-red-500 text-sm">
+          {loadError}{' '}
+          <button
+            type="button"
+            onClick={() => void fetchUsers()}
+            className="underline"
+          >
+            Retry
+          </button>
+        </div>
+      )}
+
       {/* Users List */}
       {users.length === 0 ? (
         <div className="py-12 text-center text-muted-foreground">
           <Users className="mx-auto mb-3 h-12 w-12 opacity-50" />
-          <p>No users found</p>
+          <p>{loadError ? 'Users unavailable' : 'No users found'}</p>
         </div>
       ) : (
         <div className="space-y-3">
@@ -571,7 +613,7 @@ export function UserManagementTab() {
             selectedUser.displayName || selectedUser.username || 'User'
           }
           onSuccess={() => {
-            fetchUsers(true);
+            void fetchUsers();
           }}
         />
       )}
@@ -589,7 +631,7 @@ export function UserManagementTab() {
             selectedUser.displayName || selectedUser.username || 'User'
           }
           onSuccess={() => {
-            fetchUsers(true);
+            void fetchUsers();
           }}
         />
       )}
@@ -676,7 +718,7 @@ export function UserManagementTab() {
                 Cancel
               </button>
               <button
-                onClick={() => handleBanUser(selectedUser, 'ban')}
+                onClick={() => void handleBanUser(selectedUser, 'ban')}
                 disabled={isBanning || !banReason.trim()}
                 className="flex flex-1 items-center justify-center gap-2 rounded-lg bg-red-500 px-4 py-2 text-primary-foreground transition-colors hover:bg-red-600 disabled:opacity-50"
               >

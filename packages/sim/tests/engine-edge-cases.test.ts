@@ -250,8 +250,8 @@ describe('shutdown cleans up lastIntervalRun', () => {
   });
 });
 
-describe('destroy order matches reverse registration', () => {
-  it('destroys in reverse registration order regardless of phase', async () => {
+describe('destroy order matches reverse boot order', () => {
+  it('destroys in reverse boot (phase-sorted) order, not registration order', async () => {
     const order: string[] = [];
     const engine = makeTestEngine();
 
@@ -277,7 +277,7 @@ describe('destroy order matches reverse registration', () => {
     await engine.boot();
     await engine.shutdown();
 
-    // Reverse of registration order: a, then z
-    expect(order).toEqual(['a', 'z']);
+    // Boot order is a-bootstrap, z-finalize; teardown reverses it.
+    expect(order).toEqual(['z', 'a']);
   });
 });

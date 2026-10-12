@@ -135,3 +135,101 @@ export function createEmptyState(): JsonStorageState {
     },
   };
 }
+
+type DateKeys<T> = {
+  [K in keyof T]-?: NonNullable<T[K]> extends Date ? K : never;
+}[keyof T];
+
+function reviveDateFields<T extends object>(
+  collection: string,
+  record: T,
+  fields: readonly DateKeys<T>[]
+): void {
+  const target = record as Record<
+    DateKeys<T>,
+    Date | string | null | undefined
+  >;
+  for (const field of fields) {
+    const value = target[field];
+    if (typeof value !== 'string') continue;
+    const date = new Date(value);
+    if (Number.isNaN(date.getTime())) {
+      throw new Error(
+        `Invalid date in JSON storage snapshot: ${collection}.${String(field)} = ${JSON.stringify(value)}`
+      );
+    }
+    target[field] = date;
+  }
+}
+
+function reviveMap<T extends object>(
+  collection: string,
+  records: Record<string, T> | undefined,
+  fields: readonly DateKeys<T>[]
+): void {
+  if (!records) return;
+  for (const record of Object.values(records)) {
+    reviveDateFields(collection, record, fields);
+  }
+}
+
+function reviveList<T extends object>(
+  collection: string,
+  records: T[] | undefined,
+  fields: readonly DateKeys<T>[]
+): void {
+  if (!records) return;
+  for (const record of records) {
+    reviveDateFields(collection, record, fields);
+  }
+}
+
+/**
+ * Parse a serialized JSON storage snapshot, restoring the declared `Date`
+ * fields of every record collection. Only fields typed as `Date` on the
+ * record types are converted; free-form strings (post content, messages,
+ * metadata timestamps) are left untouched.
+ */
+export function parseJsonStorageState(json: string): Partial<JsonStorageState> {
+  const state = JSON.parse(json) as Partial<JsonStorageState>;
+
+  reviveMap('actorStates', state.actorStates, ['updatedAt']);
+  reviveMap('organizationStates', state.organizationStates, ['updatedAt']);
+  reviveMap('users', state.users, ['createdAt', 'updatedAt']);
+  reviveMap('agentConfigs', state.agentConfigs, ['updatedAt']);
+  reviveList('agentLogs', state.agentLogs, ['createdAt']);
+  reviveList('agentMessages', state.agentMessages, ['createdAt']);
+  reviveList('agentPointsTransactions', state.agentPointsTransactions, [
+    'createdAt',
+  ]);
+  reviveList('agentTrades', state.agentTrades, ['createdAt']);
+  reviveList('pointsTransactions', state.pointsTransactions, ['createdAt']);
+  reviveMap('posts', state.posts, ['timestamp', 'deletedAt']);
+  reviveMap('questions', state.questions, [
+    'resolutionDate',
+    'createdAt',
+    'updatedAt',
+  ]);
+  reviveMap('markets', state.markets, ['endDate', 'createdAt']);
+  reviveList('marketSnapshots', state.marketSnapshots, ['timestamp']);
+  reviveMap('pools', state.pools, ['openedAt', 'updatedAt']);
+  reviveMap('positions', state.positions, [
+    'openedAt',
+    'closedAt',
+    'updatedAt',
+  ]);
+  reviveList('npcTrades', state.npcTrades, ['createdAt']);
+  if (state.game) {
+    reviveDateFields('game', state.game, [
+      'currentDate',
+      'lastTickAt',
+      'lastSnapshotAt',
+      'createdAt',
+      'updatedAt',
+    ]);
+  }
+  reviveList('worldEvents', state.worldEvents, ['timestamp']);
+  reviveList('stockPrices', state.stockPrices, ['timestamp']);
+
+  return state;
+}

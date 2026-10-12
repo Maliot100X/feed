@@ -31,7 +31,7 @@ import {
   X,
   XCircle,
 } from 'lucide-react';
-import { useCallback, useEffect, useState, useTransition } from 'react';
+import { useCallback, useEffect, useRef, useState, useTransition } from 'react';
 import { toast } from 'sonner';
 import { Skeleton } from '@/components/shared/Skeleton';
 import { apiUrl } from '@/utils/api-url';
@@ -80,6 +80,47 @@ interface MarketActionBody {
   newEndDate?: string;
 }
 
+/**
+ * Extract a readable error from a failed response body. JSON bodies (with
+ * any leading whitespace) yield their `error`/`message`; anything else is
+ * returned as plain text. Never throws on malformed JSON.
+ */
+export function parseErrorText(text: string): string {
+  const trimmed = text.trim();
+  if (!trimmed) return '';
+  try {
+    const parsed: unknown = JSON.parse(trimmed);
+    if (parsed && typeof parsed === 'object') {
+      if ('error' in parsed && typeof parsed.error === 'string') {
+        return parsed.error;
+      }
+      if (
+        'error' in parsed &&
+        parsed.error &&
+        typeof parsed.error === 'object' &&
+        'message' in parsed.error &&
+        typeof parsed.error.message === 'string'
+      ) {
+        return parsed.error.message;
+      }
+      if ('message' in parsed && typeof parsed.message === 'string') {
+        return parsed.message;
+      }
+    }
+  } catch (error) {
+    if (!(error instanceof SyntaxError)) throw error;
+  }
+  return trimmed;
+}
+
+/** Format a Date as a `datetime-local` input value in the viewer's timezone. */
+export function toLocalDateTimeInputValue(date: Date): string {
+  const pad = (n: number) => String(n).padStart(2, '0');
+  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(
+    date.getDate()
+  )}T${pad(date.getHours())}:${pad(date.getMinutes())}`;
+}
+
 export function MarketOversightTab() {
   const [data, setData] = useState<MarketsData | null>(null);
   const [loading, setLoading] = useState(true);
@@ -95,21 +136,34 @@ export function MarketOversightTab() {
   const [actionReason, setActionReason] = useState('');
   const [isActioning, startActioning] = useTransition();
 
+  // Only the latest request (e.g. after a filter switch) may update state.
+  const latestRequest = useRef(0);
+
   const fetchMarkets = useCallback(
     (showRefreshing = false) => {
       const fetchLogic = async () => {
+        const requestId = ++latestRequest.current;
         const params = new URLSearchParams();
         if (statusFilter !== 'all') params.set('status', statusFilter);
 
-        const response = await fetch(apiUrl(`/api/admin/markets?${params}`));
-        if (!response.ok) {
-          toast.error('Failed to load market data');
-          setLoading(false);
-          return;
+        try {
+          const response = await fetch(apiUrl(`/api/admin/markets?${params}`));
+          if (requestId !== latestRequest.current) return;
+          if (!response.ok) {
+            toast.error(`Failed to load market data (HTTP ${response.status})`);
+            return;
+          }
+          const result = await response.json();
+          if (requestId !== latestRequest.current) return;
+          setData(result);
+        } catch (err) {
+          if (requestId !== latestRequest.current) return;
+          toast.error(
+            err instanceof Error ? err.message : 'Failed to load market data'
+          );
+        } finally {
+          if (requestId === latestRequest.current) setLoading(false);
         }
-        const result = await response.json();
-        setData(result);
-        setLoading(false);
       };
 
       if (showRefreshing) {
@@ -147,27 +201,41 @@ export function MarketOversightTab() {
         return;
       }
 
+      // datetime-local yields a timezone-less local wall-clock value; convert
+      // it explicitly to an absolute ISO instant before sending.
+      const newEndDate =
+        actionType === 'extend'
+          ? new Date(extendDate).toISOString()
+          : undefined;
+
       const body: MarketActionBody = {
         action: actionType,
         reason: actionReason || undefined,
         ...(actionType === 'resolve' && { resolution }),
-        ...(actionType === 'extend' &&
-          extendDate && { newEndDate: extendDate }),
+        ...(newEndDate && { newEndDate }),
       };
 
-      const response = await fetch(
-        apiUrl(`/api/admin/markets/${selectedMarket.id}`),
-        {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify(body),
-        }
-      );
+      let response: Response;
+      try {
+        response = await fetch(
+          apiUrl(`/api/admin/markets/${selectedMarket.id}`),
+          {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(body),
+          }
+        );
+      } catch (err) {
+        toast.error(
+          err instanceof Error ? err.message : 'Failed to perform action'
+        );
+        return;
+      }
 
       if (!response.ok) {
-        const text = await response.text();
-        const error = text.startsWith('{') ? JSON.parse(text).error : text;
-        toast.error(error || 'Failed to perform action');
+        toast.error(
+          parseErrorText(await response.text()) || 'Failed to perform action'
+        );
         return;
       }
 
@@ -349,7 +417,10 @@ export function MarketOversightTab() {
             {(['all', 'active', 'expired', 'resolved'] as const).map((s) => (
               <button
                 key={s}
+                type="button"
+                aria-pressed={statusFilter === s}
                 onClick={() => {
+                  if (s === statusFilter) return;
                   setStatusFilter(s);
                   setLoading(true);
                 }}
@@ -514,13 +585,14 @@ export function MarketOversightTab() {
             {actionType === 'extend' && (
               <div className="mb-4">
                 <label className="mb-2 block font-medium text-sm">
-                  New End Date
+                  New End Date (
+                  {Intl.DateTimeFormat().resolvedOptions().timeZone})
                 </label>
                 <input
                   type="datetime-local"
                   value={extendDate}
                   onChange={(e) => setExtendDate(e.target.value)}
-                  min={new Date().toISOString().slice(0, 16)}
+                  min={toLocalDateTimeInputValue(new Date())}
                   className="w-full rounded-lg border border-border bg-background px-3 py-2"
                 />
               </div>

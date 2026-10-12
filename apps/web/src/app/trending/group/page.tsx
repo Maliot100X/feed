@@ -3,25 +3,12 @@
 export const dynamic = 'force-dynamic';
 
 import { logger } from '@feed/shared';
-import { ArrowLeft, TrendingUp } from 'lucide-react';
-import nextDynamic from 'next/dynamic';
-import { useRouter, useSearchParams } from 'next/navigation';
+import { useSearchParams } from 'next/navigation';
 import { useCallback, useEffect, useState } from 'react';
 import { PostCard } from '@/components/posts/PostCard';
-import { PageContainer } from '@/components/shared/PageContainer';
 import { Skeleton } from '@/components/shared/Skeleton';
 import { apiUrl } from '@/utils/api-url';
-
-const WidgetSidebar = nextDynamic(
-  () =>
-    import('@/components/shared/WidgetSidebar').then((m) => ({
-      default: m.WidgetSidebar,
-    })),
-  {
-    ssr: false,
-    loading: () => <div className="hidden w-96 flex-none xl:block" />,
-  }
-);
+import { TrendingFeedShell } from '../_components/TrendingFeedShell';
 
 interface PostData {
   id: string;
@@ -48,67 +35,108 @@ interface TagInfo {
   category: string | null;
 }
 
+const MAX_TAGS = 10;
+const GROUP_LIMIT = 50;
+
+type LoadState =
+  | { status: 'loading' }
+  | { status: 'error' }
+  | { status: 'ready'; posts: PostData[]; tags: TagInfo[] };
+
+/** Normalize the comma-separated `tags` query value into a bounded slug list. */
+function parseTags(raw: string | null): string[] {
+  if (!raw) return [];
+  const slugs = raw
+    .split(',')
+    .map((slug) => slug.trim())
+    .filter((slug) => slug.length > 0);
+  return [...new Set(slugs)].slice(0, MAX_TAGS);
+}
+
 export default function GroupedTrendingPage() {
   const searchParams = useSearchParams();
-  const router = useRouter();
-  const tagsParam = searchParams.get('tags') || '';
-  const [posts, setPosts] = useState<PostData[]>([]);
-  const [loading, setLoading] = useState(true);
-  const [tags, setTags] = useState<TagInfo[]>([]);
+  const tagsKey = parseTags(searchParams.get('tags')).join(',');
+  const [state, setState] = useState<LoadState>({ status: 'loading' });
+  const [reloadKey, setReloadKey] = useState(0);
 
-  const fetchPosts = useCallback(async () => {
-    if (!tagsParam) {
-      setLoading(false);
-      return;
-    }
-
-    setLoading(true);
-
-    const response = await fetch(
-      apiUrl(`/api/trending/group?tags=${tagsParam}&limit=50`)
-    );
-
-    if (!response.ok) {
-      logger.warn(
-        'Failed to fetch grouped trending posts',
-        { tagsParam },
-        'GroupedTrendingPage'
-      );
-      setLoading(false);
-      return;
-    }
-
-    const data = await response.json();
-
-    if (data.success) {
-      setPosts(data.posts || []);
-      setTags(data.tags || []);
-    }
-
-    setLoading(false);
-  }, [tagsParam]);
-
+  // biome-ignore lint/correctness/useExhaustiveDependencies: reloadKey intentionally re-triggers the fetch
   useEffect(() => {
-    fetchPosts();
-  }, [fetchPosts]);
+    if (!tagsKey) {
+      setState({ status: 'ready', posts: [], tags: [] });
+      return;
+    }
 
+    const controller = new AbortController();
+    setState({ status: 'loading' });
+
+    const query = new URLSearchParams({
+      tags: tagsKey,
+      limit: String(GROUP_LIMIT),
+    });
+
+    const load = async () => {
+      const response = await fetch(
+        apiUrl(`/api/trending/group?${query.toString()}`),
+        { signal: controller.signal }
+      );
+      if (!response.ok) {
+        logger.warn(
+          'Failed to fetch grouped trending posts',
+          { tags: tagsKey, status: response.status },
+          'GroupedTrendingPage'
+        );
+        setState({ status: 'error' });
+        return;
+      }
+      const data = (await response.json()) as {
+        posts?: PostData[];
+        tags?: TagInfo[];
+      };
+      if (controller.signal.aborted) return;
+      setState({
+        status: 'ready',
+        posts: data.posts ?? [],
+        tags: data.tags ?? [],
+      });
+    };
+
+    load().catch(() => {
+      if (controller.signal.aborted) return;
+      setState({ status: 'error' });
+    });
+
+    return () => controller.abort();
+  }, [tagsKey, reloadKey]);
+
+  const retry = useCallback(() => setReloadKey((key) => key + 1), []);
+
+  const tags = state.status === 'ready' ? state.tags : [];
   const headerTitle =
     tags.length > 0
       ? tags.map((t) => t.displayName).join(' · ')
       : 'Grouped Trending';
+  const headerCategory = tags[0]?.category ?? null;
 
-  const headerCategory =
-    tags.length > 0 && tags[0]?.category ? tags[0].category : null;
-
-  const feedContent = (
-    <>
-      {loading ? (
+  return (
+    <TrendingFeedShell title={headerTitle} subtitle={headerCategory}>
+      {state.status === 'loading' ? (
         <div className="space-y-4 sm:px-4 sm:py-6">
           <Skeleton className="h-24 w-full" />
           <Skeleton className="h-24 w-full" />
           <Skeleton className="h-24 w-full" />
         </div>
-      ) : posts.length === 0 ? (
+      ) : state.status === 'error' ? (
+        <div className="flex flex-col items-center justify-center gap-3 py-12 text-center">
+          <h2 className="font-semibold text-xl">Couldn&apos;t load posts</h2>
+          <button
+            type="button"
+            onClick={retry}
+            className="rounded-lg bg-primary px-6 py-2 text-primary-foreground transition-opacity hover:opacity-90"
+          >
+            Try again
+          </button>
+        </div>
+      ) : state.posts.length === 0 ? (
         <div className="flex items-center justify-center py-12">
           <div className="text-center">
             <h2 className="mb-2 font-semibold text-xl">No posts found</h2>
@@ -119,91 +147,16 @@ export default function GroupedTrendingPage() {
         </div>
       ) : (
         <div>
-          {posts.map((post) => (
+          {state.posts.map((post) => (
             <PostCard key={post.id} post={post} showCommentInputBar={false} />
           ))}
-
-          {posts.length > 0 && (
+          {state.posts.length < GROUP_LIMIT && (
             <div className="py-4 text-center text-muted-foreground text-xs">
               You&apos;re all caught up.
             </div>
           )}
         </div>
       )}
-
-      {/* Spacer for login bar */}
-      <div className="pb-24" />
-    </>
-  );
-
-  return (
-    <PageContainer noPadding className="flex w-full flex-col">
-      <div className="relative flex min-h-dvh flex-1 md:min-h-screen">
-        {/* Desktop: Content area */}
-        <div className="hidden min-w-0 flex-1 flex-col border-border lg:flex lg:border-r lg:border-l">
-          {/* Desktop header */}
-          <div className="sticky top-0 z-10 shrink-0 bg-background shadow-sm">
-            <div className="px-6 py-4">
-              <div className="flex items-center gap-4">
-                <button
-                  onClick={() => router.back()}
-                  className="rounded-full p-2 text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
-                  aria-label="Go back"
-                >
-                  <ArrowLeft size={20} />
-                </button>
-                <div className="flex items-center gap-2">
-                  <TrendingUp className="h-5 w-5 text-primary" />
-                  <h1 className="font-bold text-xl">{headerTitle}</h1>
-                </div>
-                {headerCategory && (
-                  <p className="ml-auto text-muted-foreground text-sm">
-                    {headerCategory}
-                  </p>
-                )}
-              </div>
-            </div>
-          </div>
-
-          {/* Feed content */}
-          <div className="flex-1 bg-background">
-            <div className="w-full lg:mx-auto lg:max-w-[700px]">
-              {feedContent}
-            </div>
-          </div>
-        </div>
-
-        {/* Widget sidebar - desktop only */}
-        <WidgetSidebar />
-
-        {/* Mobile/Tablet: Single column layout */}
-        <div className="flex flex-1 flex-col overflow-hidden lg:hidden">
-          {/* Mobile header */}
-          <div className="sticky top-0 z-10 shrink-0 border-border border-b bg-background">
-            <div className="flex items-center gap-4 px-4 py-3">
-              <button
-                onClick={() => router.back()}
-                className="rounded-full p-2 text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
-                aria-label="Go back"
-              >
-                <ArrowLeft size={20} />
-              </button>
-              <div className="flex items-center gap-2">
-                <TrendingUp className="h-5 w-5 text-primary" />
-                <h1 className="font-bold text-xl">{headerTitle}</h1>
-              </div>
-              {headerCategory && (
-                <p className="ml-auto text-muted-foreground text-sm">
-                  {headerCategory}
-                </p>
-              )}
-            </div>
-          </div>
-
-          {/* Mobile content */}
-          <div className="flex-1 overflow-y-auto">{feedContent}</div>
-        </div>
-      </div>
-    </PageContainer>
+    </TrendingFeedShell>
   );
 }

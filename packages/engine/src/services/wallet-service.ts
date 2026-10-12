@@ -3,10 +3,9 @@
  *
  * @description Manages user's virtual USD balance for trading. Provides
  * methods for checking balances, debiting/crediting funds, and tracking
- * transaction history. All users start with $1,000 virtual balance.
+ * transaction history.
  *
  * Features:
- * - Starting balance: $1,000
  * - Tracks all transactions
  * - Validates sufficient funds
  * - Calculates PnL
@@ -22,7 +21,11 @@ import {
   users,
   withTransaction,
 } from '@feed/db';
-import { generateSnowflakeId, InsufficientFundsError } from '@feed/shared';
+import {
+  generateSnowflakeId,
+  InsufficientFundsError,
+  logger,
+} from '@feed/shared';
 import { EarnedPointsService } from './earned-points-service';
 
 /**
@@ -71,13 +74,6 @@ export type CacheInvalidationCallback = (userId: string) => Promise<void>;
  */
 export class WalletService {
   /**
-   * Starting balance for new users ($1,000 USD)
-   *
-   * @private
-   */
-  private static readonly STARTING_BALANCE = 1000; // $1,000 USD
-
-  /**
    * Optional cache invalidation callback
    */
   private static cacheInvalidationCallback: CacheInvalidationCallback | null =
@@ -97,11 +93,38 @@ export class WalletService {
   }
 
   /**
-   * Invalidate user cache if callback is set
+   * Invalidate user cache if callback is set.
+   *
+   * Best-effort: by the time this runs the balance mutation has already been
+   * applied, so a cache failure must not surface as a failed debit/credit
+   * (callers would retry and double-apply the mutation).
    */
   private static async invalidateCache(userId: string): Promise<void> {
-    if (WalletService.cacheInvalidationCallback) {
-      await WalletService.cacheInvalidationCallback(userId);
+    const callback = WalletService.cacheInvalidationCallback;
+    if (!callback) return;
+    await callback(userId).catch((error: Error) => {
+      logger.warn(
+        'Wallet cache invalidation failed',
+        { userId, error: error.message },
+        'WalletService'
+      );
+    });
+  }
+
+  /**
+   * Validate a debit/credit amount: must be a finite, non-negative number.
+   * Negative amounts would silently invert the operation (a negative debit
+   * mints balance).
+   */
+  private static assertValidAmount(
+    operation: 'debit' | 'credit',
+    userId: string,
+    amount: number
+  ): void {
+    if (!Number.isFinite(amount) || amount < 0) {
+      throw new Error(
+        `Invalid ${operation} amount for ${userId}: ${amount}. Amount must be a finite non-negative number.`
+      );
     }
   }
 
@@ -109,7 +132,9 @@ export class WalletService {
    * Apply balance change atomically
    *
    * @description Internal method to apply a balance change and create a
-   * transaction record. Used by debit and credit methods.
+   * transaction record. Used by debit and credit methods. The user row is
+   * locked (SELECT ... FOR UPDATE) so concurrent mutations serialize instead
+   * of overwriting each other's absolute balance.
    *
    * @param {Transaction} tx - Drizzle transaction client
    * @param {string} userId - User ID
@@ -134,7 +159,8 @@ export class WalletService {
       })
       .from(users)
       .where(eq(users.id, userId))
-      .limit(1);
+      .limit(1)
+      .for('update');
 
     const [user] = result;
     if (!user) {
@@ -285,6 +311,7 @@ export class WalletService {
     relatedId?: string,
     tx?: Transaction | DrizzleClient
   ): Promise<void> {
+    WalletService.assertValidAmount('debit', userId, amount);
     const delta = -amount;
 
     if (tx) {
@@ -323,6 +350,7 @@ export class WalletService {
     relatedId?: string,
     tx?: Transaction | DrizzleClient
   ): Promise<void> {
+    WalletService.assertValidAmount('credit', userId, amount);
     if (tx) {
       await WalletService.applyBalanceChange(
         tx,
@@ -351,39 +379,42 @@ export class WalletService {
   /**
    * Record PnL (update lifetime PnL and earned points)
    *
-   * Uses a transaction to atomically update both lifetimePnL and earnedPoints
-   * to prevent race conditions that could cause sync issues.
+   * Locks the user row and updates lifetimePnL and earnedPoints atomically.
+   * Pass `tx` when the caller already holds a transaction that mutated this
+   * user (e.g. a wallet debit/credit) — opening a second transaction against
+   * the same locked row would block on the caller's own lock.
    */
   static async recordPnL(
     userId: string,
     pnl: number,
     tradeType: string,
-    relatedId?: string
+    relatedId?: string,
+    tx?: Transaction | DrizzleClient
   ): Promise<{
     previousLifetimePnL: number;
     newLifetimePnL: number;
     earnedPointsDelta: number;
   }> {
-    return await withTransaction(async (tx) => {
-      const result = await tx
-        .select()
+    // Reject non-finite PnL to prevent lifetime stats corruption
+    if (!Number.isFinite(pnl)) {
+      throw new Error(
+        `Invalid PnL for ${userId}: pnl=${pnl}, tradeType=${tradeType}`
+      );
+    }
+
+    const apply = async (transaction: Transaction | DrizzleClient) => {
+      const [user] = await transaction
+        .select({ lifetimePnL: users.lifetimePnL })
         .from(users)
         .where(eq(users.id, userId))
-        .limit(1);
+        .limit(1)
+        .for('update');
 
-      const [user] = result;
       if (!user) {
         // Fail-fast: NPCs should have User records after bootstrap (ensureNpcUsers).
         // A missing user here indicates a bug in bootstrap or an invalid userId.
         throw new Error(
           `User not found for PnL recording: ${userId}. NPCs should have User records after bootstrap.`
-        );
-      }
-
-      // Reject non-finite PnL to prevent lifetime stats corruption
-      if (!Number.isFinite(pnl)) {
-        throw new Error(
-          `Invalid PnL for ${userId}: pnl=${pnl}, tradeType=${tradeType}`
         );
       }
 
@@ -396,21 +427,19 @@ export class WalletService {
         );
       }
 
-      // Update lifetimePnL first within the transaction
-      await tx
+      await transaction
         .update(users)
         .set({ lifetimePnL: String(newLifetimePnL) })
         .where(eq(users.id, userId));
 
-      // Now award earned points within the same transaction
-      // This ensures atomicity and prevents race conditions
+      // Award earned points within the same transaction (row already locked)
       const earnedPointsDelta =
         await EarnedPointsService.awardEarnedPointsForPnL(
           userId,
           newLifetimePnL,
           tradeType,
           relatedId,
-          tx
+          transaction
         );
 
       return {
@@ -418,7 +447,9 @@ export class WalletService {
         newLifetimePnL,
         earnedPointsDelta,
       };
-    });
+    };
+
+    return tx ? apply(tx) : withTransaction(apply);
   }
 
   /**
@@ -445,43 +476,5 @@ export class WalletService {
       relatedId: tx.relatedId,
       createdAt: tx.createdAt,
     }));
-  }
-
-  /**
-   * Initialize user balance (for new users)
-   */
-  static async initializeBalance(userId: string): Promise<void> {
-    const result = await db
-      .select()
-      .from(users)
-      .where(eq(users.id, userId))
-      .limit(1);
-
-    const [user] = result;
-    if (!user) {
-      throw new Error(`User not found: ${userId}`);
-    }
-
-    if (Number(user.virtualBalance ?? 0) === 0) {
-      await withTransaction(async (tx) => {
-        await tx
-          .update(users)
-          .set({
-            virtualBalance: String(WalletService.STARTING_BALANCE),
-            totalDeposited: String(WalletService.STARTING_BALANCE),
-          })
-          .where(eq(users.id, userId));
-
-        await tx.insert(balanceTransactions).values({
-          id: await generateSnowflakeId(),
-          userId,
-          type: 'deposit',
-          amount: String(WalletService.STARTING_BALANCE),
-          balanceBefore: '0',
-          balanceAfter: String(WalletService.STARTING_BALANCE),
-          description: 'Initial deposit - Welcome to Feed!',
-        });
-      });
-    }
   }
 }

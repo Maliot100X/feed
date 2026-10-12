@@ -2,7 +2,7 @@
  * Admin Moderation Escrow List API
  *
  * @route GET /api/admin/moderation-escrow/list - List escrow payments
- * @access Admin
+ * @access Admin with manage_escrow permission (SUPER_ADMIN by default)
  *
  * @description
  * Returns list of moderation escrow payments with filtering by recipient,
@@ -74,7 +74,7 @@
  * ```
  */
 
-import { requireAdmin, withErrorHandling } from '@feed/api';
+import { requirePermission, withErrorHandling } from '@feed/api';
 import { and, db, desc, eq, lt, moderationEscrows, sql } from '@feed/db';
 import { toISO, toISOOrNull } from '@feed/shared';
 import type { NextRequest } from 'next/server';
@@ -85,20 +85,22 @@ const ListEscrowQuerySchema = z.object({
   recipientId: z.string().optional(),
   adminId: z.string().optional(),
   status: z.enum(['pending', 'paid', 'refunded', 'expired']).optional(),
-  limit: z.coerce.number().min(1).max(100).optional().default(50),
-  offset: z.coerce.number().min(0).optional().default(0),
+  limit: z.coerce.number().int().min(1).max(100).default(50),
+  offset: z.coerce.number().int().min(0).default(0),
 });
 
 export const GET = withErrorHandling(async (req: NextRequest) => {
-  await requireAdmin(req);
+  await requirePermission(req, 'manage_escrow');
 
   const { searchParams } = new URL(req.url);
   const validation = ListEscrowQuerySchema.safeParse({
-    recipientId: searchParams.get('recipientId'),
-    adminId: searchParams.get('adminId'),
-    status: searchParams.get('status'),
-    limit: searchParams.get('limit'),
-    offset: searchParams.get('offset'),
+    // searchParams.get returns null for absent params; optional/default
+    // schemas only apply to undefined.
+    recipientId: searchParams.get('recipientId') ?? undefined,
+    adminId: searchParams.get('adminId') ?? undefined,
+    status: searchParams.get('status') ?? undefined,
+    limit: searchParams.get('limit') ?? undefined,
+    offset: searchParams.get('offset') ?? undefined,
   });
 
   if (!validation.success) {
@@ -188,7 +190,7 @@ export const GET = withErrorHandling(async (req: NextRequest) => {
       sql`${moderationEscrows.refundedBy} = ${refunderAlias}."id"`
     )
     .where(whereClause)
-    .orderBy(desc(moderationEscrows.createdAt))
+    .orderBy(desc(moderationEscrows.createdAt), desc(moderationEscrows.id))
     .limit(limit)
     .offset(offset);
 

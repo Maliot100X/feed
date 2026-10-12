@@ -140,28 +140,6 @@ export function isTransientError(error: unknown): boolean {
 }
 
 /**
- * Wrap an async operation with error handling that logs but doesn't throw.
- * Returns null on error. Useful for non-critical operations.
- *
- * @param operation - The async operation to execute
- * @param context - Description of the operation for logging
- * @param service - Service name for logging
- * @returns The result or null on error
- */
-export async function safeExecute<T>(
-  operation: () => Promise<T>,
-  context: string,
-  service = 'Engine'
-): Promise<T | null> {
-  try {
-    return await operation();
-  } catch (error) {
-    logWarning(error, `${context} (non-blocking)`, service);
-    return null;
-  }
-}
-
-/**
  * Handle non-critical operations that should not break the main flow.
  * Logs errors and returns null on failure, allowing the caller to continue.
  *
@@ -198,62 +176,40 @@ export async function handleNonCritical<T>(
 }
 
 /**
- * Handle non-critical operations with a default value on failure.
- * Similar to handleNonCritical but returns a default instead of null.
- *
- * @param operation - The async operation to execute
- * @param defaultValue - Value to return on error
- * @param context - Description of the operation for logging
- * @param service - Service name for logging
- * @returns The result or defaultValue on error
- */
-export async function handleNonCriticalWithDefault<T>(
-  operation: () => Promise<T>,
-  defaultValue: T,
-  context: string,
-  service = 'Engine'
-): Promise<T> {
-  try {
-    return await operation();
-  } catch (error) {
-    logger.error(context, { error: formatError(error) }, service);
-    return defaultValue;
-  }
-}
-
-/**
  * Wrap an async operation with retry logic for transient errors.
  *
  * @param operation - The async operation to execute
- * @param maxRetries - Maximum number of retry attempts
+ * @param maxAttempts - Total number of attempts (positive integer, includes the first call)
  * @param context - Description of the operation for logging
  * @param service - Service name for logging
  * @returns The result of the operation
- * @throws The last error if all retries fail
+ * @throws The last error if all attempts fail, or immediately for non-transient errors
  */
 export async function withRetry<T>(
   operation: () => Promise<T>,
-  maxRetries: number,
+  maxAttempts: number,
   context: string,
   service = 'Engine'
 ): Promise<T> {
-  let lastError: unknown;
+  if (!Number.isSafeInteger(maxAttempts) || maxAttempts < 1) {
+    throw new Error(
+      `withRetry: maxAttempts must be a positive integer, got ${maxAttempts}`
+    );
+  }
 
-  for (let attempt = 1; attempt <= maxRetries; attempt++) {
+  for (let attempt = 1; ; attempt++) {
     try {
       return await operation();
     } catch (error) {
-      lastError = error;
-
       // Only retry on transient errors
-      if (!isTransientError(error) || attempt === maxRetries) {
+      if (!isTransientError(error) || attempt >= maxAttempts) {
         throw error;
       }
 
       // Exponential backoff
       const delay = Math.min(1000 * Math.pow(2, attempt - 1), 10000);
       logger.debug(
-        `${context} failed (attempt ${attempt}/${maxRetries}), retrying in ${delay}ms`,
+        `${context} failed (attempt ${attempt}/${maxAttempts}), retrying in ${delay}ms`,
         { error: formatError(error) },
         service
       );
@@ -261,10 +217,4 @@ export async function withRetry<T>(
       await new Promise((resolve) => setTimeout(resolve, delay));
     }
   }
-
-  // TypeScript exhaustiveness safeguard: This throw is unreachable in practice
-  // because non-transient or final-attempt errors are thrown inside the loop.
-  // Kept as a defensive measure to satisfy the return type and ensure lastError
-  // is always thrown if control flow somehow escapes the loop.
-  throw lastError;
 }

@@ -727,35 +727,6 @@ describe('Admin Dashboard RBAC Integration Tests', () => {
     });
   });
 
-  describe('Admin Environment API', () => {
-    test('GET /api/admin/environment - requires auth', async () => {
-      requireServer();
-
-      const res = await publicRequest('/api/admin/environment');
-      expect(res.status).toBe(401);
-    });
-
-    test('GET /api/admin/environment - returns current environment', async () => {
-      requireAuth();
-
-      const res = await adminRequest('/api/admin/environment');
-      expect(res.status).toBe(200);
-
-      const data = await res.json();
-      expect(['development', 'staging', 'production']).toContain(data.actual);
-    });
-
-    test('POST /api/admin/environment - validates environment value', async () => {
-      requireAuth();
-
-      const res = await adminRequest('/api/admin/environment', {
-        method: 'POST',
-        body: JSON.stringify({ environment: 'invalid-env' }),
-      });
-      expect(res.status).toBe(400);
-    });
-  });
-
   describe('Error Handling', () => {
     test('invalid JSON body returns 400', async () => {
       requireAuth();

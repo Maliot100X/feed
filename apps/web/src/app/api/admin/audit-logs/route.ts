@@ -34,10 +34,9 @@
  *           maximum: 1000
  *       - name: cursor
  *         in: query
- *         description: ISO timestamp cursor for cursor-based pagination. Use nextCursor from previous response.
+ *         description: Opaque (createdAt, id) cursor for cursor-based pagination. Use nextCursor from the previous response; cannot be combined with offset.
  *         schema:
  *           type: string
- *           format: date-time
  *       - name: adminId
  *         in: query
  *         schema:
@@ -65,7 +64,17 @@ import {
   successResponse,
   withErrorHandling,
 } from '@feed/api';
-import { adminAuditLogs, and, count, db, desc, eq, lt, users } from '@feed/db';
+import {
+  adminAuditLogs,
+  and,
+  count,
+  db,
+  desc,
+  eq,
+  type SQL,
+  sql,
+  users,
+} from '@feed/db';
 import { logger, toISO } from '@feed/shared';
 import type { NextRequest } from 'next/server';
 import { z } from 'zod';
@@ -74,18 +83,48 @@ import { z } from 'zod';
 // Action and resourceType accept any string value from the database
 // to avoid validation mismatches when new resource types are logged
 const AuditLogFiltersSchema = z.object({
-  limit: z.coerce.number().min(1).max(100).default(50),
+  limit: z.coerce.number().int().min(1).max(100).default(50),
   // Offset-based pagination (legacy, max 1000 to prevent performance issues)
-  offset: z.coerce.number().min(0).max(1000).default(0),
-  // Cursor-based pagination (recommended for large datasets)
-  // Cursor is the ISO timestamp of the last item from previous page
-  cursor: z.string().datetime().optional(),
+  offset: z.coerce.number().int().min(0).max(1000).default(0),
+  // Cursor-based pagination (recommended for large datasets).
+  // Opaque value returned as pagination.nextCursor.
+  cursor: z.string().max(200).optional(),
   adminId: z.string().min(1).optional(),
   // Accept any action string to match database values dynamically
   action: z.string().min(1).max(64).optional(),
   // Accept any resource type string to match database values dynamically
   resourceType: z.string().min(1).max(64).optional(),
 });
+
+/**
+ * Compound (createdAt, id) cursor. createdAt is kept as the exact Postgres
+ * text value (microsecond precision) so rows sharing a timestamp, or
+ * differing below millisecond precision, are neither skipped nor repeated.
+ */
+const CursorSchema = z.object({
+  createdAt: z.string().min(1).max(64),
+  id: z.string().min(1).max(64),
+});
+type AuditCursor = z.infer<typeof CursorSchema>;
+
+function encodeCursor(cursor: AuditCursor): string {
+  return Buffer.from(JSON.stringify(cursor)).toString('base64url');
+}
+
+function decodeCursor(raw: string): AuditCursor | null {
+  let json: ReturnType<typeof JSON.parse>;
+  try {
+    json = JSON.parse(Buffer.from(raw, 'base64url').toString('utf8'));
+  } catch (error) {
+    if (error instanceof SyntaxError) return null;
+    throw error;
+  }
+  const parsed = CursorSchema.safeParse(json);
+  if (!parsed.success || Number.isNaN(Date.parse(parsed.data.createdAt))) {
+    return null;
+  }
+  return parsed.data;
+}
 
 export const GET = withErrorHandling(async (request: NextRequest) => {
   await requireAdmin(request);
@@ -119,6 +158,17 @@ export const GET = withErrorHandling(async (request: NextRequest) => {
 
   // Determine pagination mode (cursor-based preferred for performance)
   const useCursorPagination = !!cursor;
+  if (useCursorPagination && offset > 0) {
+    return errorResponse(
+      'cursor and offset cannot be combined',
+      'VALIDATION_ERROR',
+      400
+    );
+  }
+  const decodedCursor = cursor ? decodeCursor(cursor) : null;
+  if (cursor && !decodedCursor) {
+    return errorResponse('Invalid cursor', 'VALIDATION_ERROR', 400);
+  }
 
   logger.info(
     'Admin audit logs requested',
@@ -135,7 +185,7 @@ export const GET = withErrorHandling(async (request: NextRequest) => {
   );
 
   // Build filter conditions (not cursor)
-  const filterConditions: ReturnType<typeof eq>[] = [];
+  const filterConditions: SQL[] = [];
   if (filterAdminId) {
     filterConditions.push(eq(adminAuditLogs.adminId, filterAdminId));
   }
@@ -161,9 +211,11 @@ export const GET = withErrorHandling(async (request: NextRequest) => {
 
   // Build full query conditions including cursor
   const queryConditions = [...filterConditions];
-  if (cursor) {
-    // Cursor is the createdAt timestamp of the last item - get items older than cursor
-    queryConditions.push(lt(adminAuditLogs.createdAt, new Date(cursor)));
+  if (decodedCursor) {
+    // Rows strictly after the cursor in (createdAt DESC, id DESC) order
+    queryConditions.push(
+      sql`(${adminAuditLogs.createdAt}, ${adminAuditLogs.id}) < (${decodedCursor.createdAt}::timestamp, ${decodedCursor.id})`
+    );
   }
   const whereCondition =
     queryConditions.length > 0 ? and(...queryConditions) : undefined;
@@ -184,6 +236,7 @@ export const GET = withErrorHandling(async (request: NextRequest) => {
       ipAddress: adminAuditLogs.ipAddress,
       metadata: adminAuditLogs.metadata,
       createdAt: adminAuditLogs.createdAt,
+      createdAtCursor: sql<string>`${adminAuditLogs.createdAt}::text`,
       adminUsername: users.username,
       adminDisplayName: users.displayName,
       adminProfileImageUrl: users.profileImageUrl,
@@ -191,7 +244,7 @@ export const GET = withErrorHandling(async (request: NextRequest) => {
     .from(adminAuditLogs)
     .leftJoin(users, eq(adminAuditLogs.adminId, users.id))
     .where(whereCondition)
-    .orderBy(desc(adminAuditLogs.createdAt))
+    .orderBy(desc(adminAuditLogs.createdAt), desc(adminAuditLogs.id))
     .limit(limit + 1) // Fetch one extra to determine if there are more
     .offset(useCursorPagination ? 0 : offset);
 
@@ -201,22 +254,25 @@ export const GET = withErrorHandling(async (request: NextRequest) => {
 
   // Generate next cursor from the last item
   const lastLog = resultLogs[resultLogs.length - 1];
-  const nextCursor = hasMore && lastLog ? toISO(lastLog.createdAt) : null;
+  const nextCursor =
+    hasMore && lastLog
+      ? encodeCursor({ createdAt: lastLog.createdAtCursor, id: lastLog.id })
+      : null;
 
-  // Get unique action types for filter dropdown
-  const actionTypes = await db
-    .selectDistinct({ action: adminAuditLogs.action })
-    .from(adminAuditLogs)
-    .orderBy(adminAuditLogs.action);
-
-  // Get unique resource types for filter dropdown
-  const resourceTypes = await db
-    .selectDistinct({ resourceType: adminAuditLogs.resourceType })
-    .from(adminAuditLogs)
-    .orderBy(adminAuditLogs.resourceType);
+  // Unique action / resource types for filter dropdowns
+  const [actionTypes, resourceTypes] = await Promise.all([
+    db
+      .selectDistinct({ action: adminAuditLogs.action })
+      .from(adminAuditLogs)
+      .orderBy(adminAuditLogs.action),
+    db
+      .selectDistinct({ resourceType: adminAuditLogs.resourceType })
+      .from(adminAuditLogs)
+      .orderBy(adminAuditLogs.resourceType),
+  ]);
 
   return successResponse({
-    logs: resultLogs.map((log) => ({
+    logs: resultLogs.map(({ createdAtCursor: _cursor, ...log }) => ({
       ...log,
       createdAt: toISO(log.createdAt),
       admin: {

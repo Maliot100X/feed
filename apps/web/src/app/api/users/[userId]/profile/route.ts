@@ -202,7 +202,8 @@ export const GET = withErrorHandling(
       sanitizeForJson({
         user: {
           id: dbUser.id,
-          walletAddress: dbUser.walletAddress,
+          // Respect the owner's public visibility settings for linked identities.
+          walletAddress: dbUser.showWalletPublic ? dbUser.walletAddress : null,
           username: dbUser.username,
           displayName: dbUser.displayName,
           bio: dbUser.bio,
@@ -225,7 +226,9 @@ export const GET = withErrorHandling(
           referralCount: dbUser.referralCount,
           referralCode: dbUser.referralCode,
           hasTwitter: dbUser.hasTwitter,
-          twitterUsername: dbUser.twitterUsername,
+          twitterUsername: dbUser.showTwitterPublic
+            ? dbUser.twitterUsername
+            : null,
           usernameChangedAt: toISOOrNull(dbUser.usernameChangedAt),
           createdAt: toISO(dbUser.createdAt),
           stats,

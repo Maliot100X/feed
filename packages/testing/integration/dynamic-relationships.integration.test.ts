@@ -10,7 +10,7 @@
 
 import { afterAll, beforeAll, describe, expect, test } from 'bun:test';
 import { db } from '@feed/db';
-import { InteractionTracker, RelationshipEvolutionEngine } from '@feed/engine';
+import { RelationshipEvolutionEngine } from '@feed/engine';
 import type { Actor, Organization } from '@feed/shared';
 
 // Test data
@@ -190,106 +190,6 @@ describe('Dynamic Relationships System', () => {
       expect(rel.history).toContain(''); // Has description
 
       console.log(`\n✅ Shared affiliation relationship: "${rel.history}"`);
-    });
-  });
-
-  describe('Interaction Tracking', () => {
-    test('should track post mentions', async () => {
-      const beforeCount = await db.npcInteraction.count({
-        where: {
-          actor1Id: 'test-actor-1',
-          actor2Id: 'test-actor-2',
-        },
-      });
-
-      await InteractionTracker.trackPostMention(
-        'test-actor-1',
-        'test-actor-2',
-        'Test Sam is brilliant! Love what he is doing with AI.',
-        0.8
-      );
-
-      const afterCount = await db.npcInteraction.count({
-        where: {
-          actor1Id: 'test-actor-1',
-          actor2Id: 'test-actor-2',
-        },
-      });
-
-      expect(afterCount).toBe(beforeCount + 1);
-
-      // Check interaction details
-      const interaction = await db.npcInteraction.findFirst({
-        where: {
-          actor1Id: 'test-actor-1',
-          actor2Id: 'test-actor-2',
-        },
-        orderBy: { timestamp: 'desc' },
-      });
-
-      expect(interaction).toBeTruthy();
-      expect(interaction!.interactionType).toBe('mention');
-      expect(interaction!.sentiment).toBe(0.8);
-      expect(interaction!.context).toContain('mentioned');
-
-      console.log(`\n✅ Tracked mention: ${interaction!.context}`);
-    });
-
-    test('should track replies with sentiment', async () => {
-      await InteractionTracker.trackReply(
-        'test-actor-2',
-        'test-actor-1',
-        'Disagree with that terrible take',
-        -0.6
-      );
-
-      const interaction = await db.npcInteraction.findFirst({
-        where: {
-          actor1Id: 'test-actor-1',
-          actor2Id: 'test-actor-2',
-          interactionType: 'reply',
-        },
-        orderBy: { timestamp: 'desc' },
-      });
-
-      expect(interaction).toBeTruthy();
-      expect(interaction!.sentiment).toBe(-0.6);
-
-      console.log(`\n✅ Tracked reply: ${interaction!.context}`);
-    });
-
-    test('should extract actor mentions from text', () => {
-      const postContent =
-        'Test AIlon and Test Sam are working together on this AI project!';
-      const mentions = InteractionTracker.extractMentions(
-        postContent,
-        testActors
-      );
-
-      expect(mentions).toContain('test-actor-1'); // Test AIlon
-      expect(mentions).toContain('test-actor-2'); // Test Sam
-      expect(mentions.length).toBeGreaterThanOrEqual(2);
-
-      console.log(`\n✅ Extracted mentions: ${mentions.join(', ')}`);
-    });
-
-    test('should analyze sentiment from text', () => {
-      const positiveText = 'This is amazing! Great work, love it!';
-      const negativeText = 'This is terrible and awful. Complete disaster!';
-      const neutralText = 'The project continues as planned.';
-
-      const posSentiment = InteractionTracker.analyzeSentiment(positiveText);
-      const negSentiment = InteractionTracker.analyzeSentiment(negativeText);
-      const neutralSentiment = InteractionTracker.analyzeSentiment(neutralText);
-
-      expect(posSentiment).toBeGreaterThan(0);
-      expect(negSentiment).toBeLessThan(0);
-      expect(neutralSentiment).toBe(0);
-
-      console.log('\n✅ Sentiment analysis:');
-      console.log(`  Positive: ${posSentiment.toFixed(2)}`);
-      console.log(`  Negative: ${negSentiment.toFixed(2)}`);
-      console.log(`  Neutral: ${neutralSentiment.toFixed(2)}`);
     });
   });
 

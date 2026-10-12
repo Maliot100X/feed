@@ -116,9 +116,9 @@ import type { NextRequest } from 'next/server';
 import { z } from 'zod';
 
 const QuerySchema = z.object({
-  limit: z.coerce.number().min(1).max(100).default(50),
-  offset: z.coerce.number().min(0).default(0),
-  search: z.string().optional(),
+  limit: z.coerce.number().int().min(1).max(100).default(50),
+  offset: z.coerce.number().int().min(0).default(0),
+  search: z.string().trim().min(1).max(100).optional(),
   filter: z.enum(['all', 'actors', 'users', 'banned', 'admins']).default('all'),
   sortBy: z
     .enum([
@@ -187,19 +187,53 @@ export const GET = withErrorHandling(async (request: NextRequest) => {
 
   const whereClause = conditions.length > 0 ? and(...conditions) : undefined;
 
-  // Determine sort order
+  // Determine sort order. Moderation sort keys are computed in SQL so they
+  // apply before LIMIT/OFFSET (sorting the current page in memory hid the
+  // most-reported users on later pages). Every ordering ends with id so
+  // pagination is stable.
   const sortFn = params.sortOrder === 'asc' ? asc : desc;
-  let orderByClause: SQL | undefined;
+  const countWhere = (table: SQL, column: SQL) =>
+    sql`(SELECT count(*) FROM ${table} WHERE ${column} = ${users.id})`;
+  const reportsReceivedExpr = countWhere(
+    sql`${reports}`,
+    sql`${reports.reportedUserId}`
+  );
+  const blocksReceivedExpr = countWhere(
+    sql`${userBlocks}`,
+    sql`${userBlocks.blockedId}`
+  );
+  const mutesReceivedExpr = countWhere(
+    sql`${userMutes}`,
+    sql`${userMutes.mutedId}`
+  );
+  const followersExpr = countWhere(
+    sql`${follows}`,
+    sql`${follows.followingId}`
+  );
+  // Matches the in-memory ratio below: count / followers, or count when the
+  // user has no followers.
+  const ratioExpr = (received: SQL) =>
+    sql`(CASE WHEN ${followersExpr} > 0 THEN ${received}::float8 / ${followersExpr} ELSE ${received}::float8 END)`;
 
-  if (params.sortBy === 'created') {
-    orderByClause = sortFn(users.createdAt);
-  } else if (params.sortBy === 'balance') {
-    orderByClause = sortFn(users.virtualBalance);
-  } else if (params.sortBy === 'reputation') {
-    orderByClause = sortFn(users.reputationPoints);
-  } else if (params.sortBy === 'username') {
-    orderByClause = sortFn(users.username);
-  }
+  const sortExpressions: Record<
+    typeof params.sortBy,
+    Parameters<typeof asc>[0]
+  > = {
+    created: users.createdAt,
+    balance: users.virtualBalance,
+    reputation: users.reputationPoints,
+    username: users.username,
+    reports_received: reportsReceivedExpr,
+    blocks_received: blocksReceivedExpr,
+    mutes_received: mutesReceivedExpr,
+    report_ratio: ratioExpr(reportsReceivedExpr),
+    block_ratio: ratioExpr(blocksReceivedExpr),
+    bad_user_score: sql`(${ratioExpr(reportsReceivedExpr)} * 5 + ${ratioExpr(blocksReceivedExpr)} * 3 + ${ratioExpr(mutesReceivedExpr)})`,
+  };
+  const orderByClauses = [
+    sortFn(sortExpressions[params.sortBy]),
+    sortFn(users.id),
+  ];
 
   // Get users
   const usersResult = await db
@@ -228,7 +262,7 @@ export const GET = withErrorHandling(async (request: NextRequest) => {
     })
     .from(users)
     .where(whereClause)
-    .orderBy(orderByClause ?? desc(users.createdAt))
+    .orderBy(...orderByClauses)
     .limit(params.limit)
     .offset(params.offset);
 
@@ -311,8 +345,7 @@ export const GET = withErrorHandling(async (request: NextRequest) => {
             .from(reports)
             .where(inArray(reports.reporterId, userIds))
             .groupBy(reports.reporterId),
-          // Whitelist status (active entries only).
-          // Wrapped in catch so a missing Whitelist table doesn't break the admin endpoint.
+          // Whitelist status (active entries only)
           db
             .select({ userId: whitelist.userId })
             .from(whitelist)
@@ -321,8 +354,7 @@ export const GET = withErrorHandling(async (request: NextRequest) => {
                 inArray(whitelist.userId, userIds),
                 isNull(whitelist.revokedAt)
               )
-            )
-            .catch(() => [] as { userId: string }[]),
+            ),
         ])
       : [[], [], [], [], [], [], [], [], [], []];
 
@@ -401,55 +433,6 @@ export const GET = withErrorHandling(async (request: NextRequest) => {
       },
     };
   });
-
-  // Sort based on query parameter (for moderation metrics, we sort after fetching)
-  //
-  // KNOWN LIMITATION: Moderation-based sorting (reports_received, blocks_received,
-  // mutes_received, report_ratio, block_ratio, bad_user_score) requires fetching
-  // all users within the filter and sorting in-memory, ignoring the LIMIT parameter.
-  // This is because moderation metrics are computed from aggregated counts across
-  // multiple tables (reports, blocks, mutes) and cannot be efficiently sorted in SQL
-  // without either:
-  // 1. Pre-computing scores in a denormalized column (adds maintenance overhead)
-  // 2. Using SQL window functions with CTEs (complex query, still full scan)
-  //
-  // For typical admin use cases with < 100k users, in-memory sorting is acceptable.
-  // If performance becomes an issue, consider:
-  // - Pre-computing badUserScore in a scheduled job
-  // - Adding materialized views for moderation metrics
-  // - Caching results with TTL for repeated queries
-  if (params.sortBy === 'reports_received') {
-    usersWithMetrics.sort((a, b) => {
-      const diff =
-        b._moderation.reportsReceived - a._moderation.reportsReceived;
-      return params.sortOrder === 'asc' ? -diff : diff;
-    });
-  } else if (params.sortBy === 'blocks_received') {
-    usersWithMetrics.sort((a, b) => {
-      const diff = b._moderation.blocksReceived - a._moderation.blocksReceived;
-      return params.sortOrder === 'asc' ? -diff : diff;
-    });
-  } else if (params.sortBy === 'mutes_received') {
-    usersWithMetrics.sort((a, b) => {
-      const diff = b._moderation.mutesReceived - a._moderation.mutesReceived;
-      return params.sortOrder === 'asc' ? -diff : diff;
-    });
-  } else if (params.sortBy === 'report_ratio') {
-    usersWithMetrics.sort((a, b) => {
-      const diff = b._moderation.reportRatio - a._moderation.reportRatio;
-      return params.sortOrder === 'asc' ? -diff : diff;
-    });
-  } else if (params.sortBy === 'block_ratio') {
-    usersWithMetrics.sort((a, b) => {
-      const diff = b._moderation.blockRatio - a._moderation.blockRatio;
-      return params.sortOrder === 'asc' ? -diff : diff;
-    });
-  } else if (params.sortBy === 'bad_user_score') {
-    usersWithMetrics.sort((a, b) => {
-      const diff = b._moderation.badUserScore - a._moderation.badUserScore;
-      return params.sortOrder === 'asc' ? -diff : diff;
-    });
-  }
 
   return successResponse({
     users: usersWithMetrics.map((user) => ({

@@ -6,7 +6,15 @@
  * points for trades.
  */
 
-import { db, eq, pointsTransactions, type Transaction, users } from '@feed/db';
+import {
+  type DrizzleClient,
+  db,
+  eq,
+  pointsTransactions,
+  type Transaction,
+  users,
+  withTransaction,
+} from '@feed/db';
 import { generateSnowflakeId, logger } from '@feed/shared';
 
 /**
@@ -78,7 +86,16 @@ export class EarnedPointsService {
    * @throws {Error} If user not found
    */
   static async syncEarnedPointsFromPnL(userId: string): Promise<void> {
-    const result = await db
+    await withTransaction((tx) =>
+      EarnedPointsService.syncEarnedPointsFromPnLInTx(userId, tx)
+    );
+  }
+
+  private static async syncEarnedPointsFromPnLInTx(
+    userId: string,
+    tx: Transaction
+  ): Promise<void> {
+    const result = await tx
       .select({
         lifetimePnL: users.lifetimePnL,
         earnedPoints: users.earnedPoints,
@@ -88,7 +105,8 @@ export class EarnedPointsService {
       })
       .from(users)
       .where(eq(users.id, userId))
-      .limit(1);
+      .limit(1)
+      .for('update');
 
     const user = result[0];
 
@@ -111,7 +129,7 @@ export class EarnedPointsService {
       user.bonusPoints
     );
 
-    await db
+    await tx
       .update(users)
       .set({
         earnedPoints: newEarnedPoints,
@@ -153,9 +171,20 @@ export class EarnedPointsService {
     newLifetimePnL: number,
     tradeType: string,
     relatedId?: string,
-    tx?: Transaction
+    tx?: Transaction | DrizzleClient
   ): Promise<number> {
-    const database = tx ?? db;
+    if (!tx) {
+      return withTransaction((transaction) =>
+        EarnedPointsService.awardEarnedPointsForPnL(
+          userId,
+          newLifetimePnL,
+          tradeType,
+          relatedId,
+          transaction
+        )
+      );
+    }
+    const database = tx;
     const computedEarnedPoints =
       EarnedPointsService.pnlToPoints(newLifetimePnL);
 
@@ -169,7 +198,8 @@ export class EarnedPointsService {
       })
       .from(users)
       .where(eq(users.id, userId))
-      .limit(1);
+      .limit(1)
+      .for('update');
 
     const user = result[0];
 
@@ -180,24 +210,16 @@ export class EarnedPointsService {
     const currentEarnedPoints = user.earnedPoints;
     const storedLifetimePnL = Number(user.lifetimePnL);
 
-    // Compute what earnedPoints should be based on the NEW lifetimePnL
-    // The newLifetimePnL was already written to the DB in the same transaction
-    // so storedLifetimePnL should equal newLifetimePnL
+    // Points are recomputed from the new lifetime P&L, so any earlier drift
+    // is corrected by this delta.
     const earnedPointsDelta = computedEarnedPoints - currentEarnedPoints;
 
-    // Log if there was a pre-existing mismatch (for monitoring purposes)
-    // Points may be out of sync due to concurrent updates or race conditions
-    const expectedPointsFromPreviousPnL = EarnedPointsService.pnlToPoints(
-      storedLifetimePnL - (newLifetimePnL - storedLifetimePnL)
-    );
-    if (
-      expectedPointsFromPreviousPnL !== currentEarnedPoints &&
-      storedLifetimePnL !== newLifetimePnL
-    ) {
-      // storedLifetimePnL should equal newLifetimePnL since we're in the same transaction
-      // If they differ, something unexpected happened
+    // Callers persist newLifetimePnL in the same transaction before awarding,
+    // so the stored value should match. A mismatch means the caller skipped
+    // that write.
+    if (storedLifetimePnL !== newLifetimePnL) {
       logger.warn(
-        'Earned points may have been out of sync (auto-correcting)',
+        'Stored lifetime P&L does not match the value points are awarded for',
         {
           userId,
           storedLifetimePnL,
@@ -274,7 +296,8 @@ export class EarnedPointsService {
    * @param {string} userId - User ID to award points to
    * @param {number} points - Number of bonus points to award (must be finite and non-negative)
    * @param {string} reason - Reason for the bonus (e.g., 'onboarding_welcome')
-   * @param {Transaction} [tx] - Optional transaction for atomic operations
+   * @param {Transaction} [tx] - Optional transaction for atomic operations;
+   *   when omitted the award runs in its own transaction
    * @returns {Promise<number>} New total bonus points
    * @throws {Error} If points is not a finite non-negative number
    */
@@ -282,7 +305,7 @@ export class EarnedPointsService {
     userId: string,
     points: number,
     reason: string,
-    tx: Transaction | typeof db = db
+    tx?: Transaction
   ): Promise<number> {
     // Validate points parameter
     if (!Number.isFinite(points)) {
@@ -304,6 +327,17 @@ export class EarnedPointsService {
       return 0;
     }
 
+    if (!tx) {
+      return withTransaction((transaction) =>
+        EarnedPointsService.awardBonusPoints(
+          userId,
+          points,
+          reason,
+          transaction
+        )
+      );
+    }
+
     const result = await tx
       .select({
         earnedPoints: users.earnedPoints,
@@ -313,7 +347,8 @@ export class EarnedPointsService {
       })
       .from(users)
       .where(eq(users.id, userId))
-      .limit(1);
+      .limit(1)
+      .for('update');
 
     const user = result[0];
 
@@ -371,12 +406,12 @@ export class EarnedPointsService {
 
   /**
    * Bulk sync earned points for all users
-   * Useful for migration or recalculation
-   * Note: Individual user errors are caught to allow continuation
+   * Useful for migration or recalculation.
+   * Fails fast: the first user error aborts the sync (each user is synced in
+   * its own transaction, so already-synced users stay committed).
    */
   static async bulkSyncAllUsers(): Promise<{
     success: number;
-    errors: number;
   }> {
     const usersList = await db
       .select({ id: users.id })
@@ -390,7 +425,6 @@ export class EarnedPointsService {
     );
 
     let successCount = 0;
-    const errorCount = 0;
 
     for (const user of usersList) {
       await EarnedPointsService.syncEarnedPointsFromPnL(user.id);
@@ -402,11 +436,10 @@ export class EarnedPointsService {
       {
         total: usersList.length,
         success: successCount,
-        errors: errorCount,
       },
       'EarnedPointsService'
     );
 
-    return { success: successCount, errors: errorCount };
+    return { success: successCount };
   }
 }

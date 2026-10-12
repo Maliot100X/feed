@@ -33,6 +33,8 @@
  *                 default: true
  *               threshold:
  *                 type: number
+ *                 exclusiveMinimum: 0
+ *                 maximum: 2
  *                 default: 0.95
  *     responses:
  *       200:
@@ -47,7 +49,7 @@
  *                 results:
  *                   type: object
  *       400:
- *         description: Model ID required
+ *         description: Invalid body (modelId required; compare must be boolean; threshold in (0, 2])
  *       401:
  *         description: Unauthorized
  *       403:
@@ -68,16 +70,26 @@ import { logger } from '@feed/shared';
 import { benchmarkService } from '@feed/training';
 import type { NextRequest } from 'next/server';
 import { NextResponse } from 'next/server';
+import { z } from 'zod';
+
+const BenchmarkSchema = z.object({
+  modelId: z.string().trim().min(1, 'Model ID required').max(256),
+  compare: z.boolean().default(true),
+  // Fraction of the previous best score required (0.95 = 95%)
+  threshold: z.number().gt(0).max(2).default(0.95),
+});
 
 export const POST = withErrorHandling(async (request: NextRequest) => {
   await requireAdmin(request);
 
-  const body = await request.json();
-  const { modelId, compare = true, threshold = 0.95 } = body;
-
-  if (!modelId) {
-    return NextResponse.json({ error: 'Model ID required' }, { status: 400 });
+  const parsed = BenchmarkSchema.safeParse(await request.json());
+  if (!parsed.success) {
+    return NextResponse.json(
+      { error: parsed.error.issues[0]?.message ?? 'Invalid request body' },
+      { status: 400 }
+    );
   }
+  const { modelId, compare, threshold } = parsed.data;
 
   logger.info('Starting model benchmark', { modelId }, 'BenchmarkAPI');
 

@@ -167,7 +167,7 @@ export const correlations: OrgCorrelation[] = [
   // Media competition
   {
     orgId: 'faix-news',
-    relatedOrgId: 'ainbc',
+    relatedOrgId: 'msainbc',
     type: 'competitor',
     strength: -0.1,
   },

@@ -2,11 +2,13 @@
  * Admin Management Promote/Demote API
  *
  * @route POST /api/admin/admins/[userId] - Promote/demote admin
- * @access Admin
+ * @access Super admin
  *
  * @description
- * Promotes a user to admin or demotes an admin to regular user. Admin only.
- * Cannot demote yourself.
+ * Promotes a user to admin or demotes an admin to regular user via the legacy
+ * isAdmin flag. SUPER_ADMIN only. Cannot demote yourself; banned users cannot
+ * be promoted; users holding an AdminRole row must be revoked via
+ * /api/admin/roles.
  *
  * @openapi
  * /api/admin/admins/{userId}:
@@ -14,7 +16,7 @@
  *     tags:
  *       - Admin
  *     summary: Promote/demote admin
- *     description: Promotes user to admin or demotes admin to user (admin only)
+ *     description: Promotes user to admin or demotes admin to user (super admin only)
  *     security:
  *       - BearerAuth: []
  *     parameters:
@@ -40,11 +42,11 @@
  *       200:
  *         description: Action completed successfully
  *       400:
- *         description: Cannot demote yourself or invalid action
+ *         description: Cannot demote yourself, invalid action, banned promotion, or target holds an AdminRole
  *       401:
  *         description: Unauthorized
  *       403:
- *         description: Admin access required
+ *         description: Super admin access required
  *       404:
  *         description: User not found
  *
@@ -63,11 +65,11 @@ import {
   getClientIp,
   logAdminAction,
   NotFoundError,
-  requireAdmin,
+  requireSuperAdmin,
   successResponse,
   withErrorHandling,
 } from '@feed/api';
-import { db } from '@feed/db';
+import { adminRoles, and, db, eq, isNull } from '@feed/db';
 import { logger } from '@feed/shared';
 import type { NextRequest } from 'next/server';
 import { z } from 'zod';
@@ -81,8 +83,9 @@ export const POST = withErrorHandling(
     request: NextRequest,
     context: { params: Promise<{ userId: string }> }
   ) => {
-    // Require admin authentication
-    const adminUser = await requireAdmin(request);
+    // Privilege changes are SUPER_ADMIN-only (same authority as
+    // /api/admin/roles); any admin promoting others is a privilege escalation.
+    const adminUser = await requireSuperAdmin(request);
 
     // Parse params
     const { userId } = await context.params;
@@ -126,10 +129,10 @@ export const POST = withErrorHandling(
       );
     }
 
-    // Prevent modifying banned users
-    if (targetUser.isBanned) {
+    // Banned users cannot be promoted (demoting them is always allowed)
+    if (action === 'promote' && targetUser.isBanned) {
       throw new BusinessLogicError(
-        'Cannot modify admin status of banned users',
+        'Cannot promote banned users',
         'USER_BANNED'
       );
     }
@@ -149,6 +152,24 @@ export const POST = withErrorHandling(
         'Cannot demote yourself',
         'CANNOT_DEMOTE_SELF'
       );
+    }
+
+    // Users with an active AdminRole row keep that role even if the legacy
+    // isAdmin flag is cleared, so demoting here would report success without
+    // removing access. Role holders must be revoked via /api/admin/roles,
+    // which enforces the last-super-admin invariant.
+    if (action === 'demote') {
+      const [activeRole] = await db
+        .select({ role: adminRoles.role })
+        .from(adminRoles)
+        .where(and(eq(adminRoles.userId, userId), isNull(adminRoles.revokedAt)))
+        .limit(1);
+      if (activeRole) {
+        throw new BusinessLogicError(
+          `User holds the ${activeRole.role} role; revoke it via role management`,
+          'HAS_ADMIN_ROLE'
+        );
+      }
     }
 
     // Update user admin status

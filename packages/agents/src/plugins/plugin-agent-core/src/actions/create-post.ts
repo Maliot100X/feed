@@ -98,7 +98,8 @@ export const createPostAction: Action = {
       | CreatePostParams
       | undefined;
 
-    const content = actionParams?.content;
+    const rawContent: unknown = actionParams?.content;
+    const content = typeof rawContent === 'string' ? rawContent : undefined;
 
     if (!content || content.trim().length === 0) {
       logger.error('[CREATE_POST] No content provided');

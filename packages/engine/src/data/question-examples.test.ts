@@ -29,4 +29,18 @@ describe('getQuestionExamples', () => {
       )
     ).toBe(true);
   });
+
+  it('uses only the supported {resolutionDate} placeholder', () => {
+    for (const line of getQuestionExamples()) {
+      const placeholders = line.match(/\{[^}]*\}/g) ?? [];
+      expect(placeholders.every((p) => p === '{resolutionDate}')).toBe(true);
+    }
+  });
+
+  it('uses canonical pack spellings for referenced entities', () => {
+    const text = getQuestionExamples().join('\n');
+    expect(text).not.toContain('Deparment');
+    expect(text).not.toContain('AInthropic');
+    expect(text).not.toMatch(/Satya Nadella\b/);
+  });
 });

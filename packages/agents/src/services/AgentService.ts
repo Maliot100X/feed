@@ -618,7 +618,8 @@ export class AgentServiceV2 {
     managerUserId: string,
     amount: number
   ): Promise<User> {
-    if (amount <= 0) throw new Error('Amount must be positive');
+    if (!Number.isFinite(amount) || amount <= 0)
+      throw new Error('Amount must be a positive finite number');
 
     const agentWithConfig = await this.getAgentWithConfig(
       agentUserId,
@@ -651,13 +652,14 @@ export class AgentServiceV2 {
         .where(eq(users.id, agentUserId))
         .for('update');
 
-      const agentBalance = Number(agent?.virtualBalance ?? 0);
+      if (!agent) throw new Error('Agent not found');
+      const agentBalance = Number(agent.virtualBalance ?? 0);
 
       // Debit from manager
       await tx
         .update(users)
         .set({
-          virtualBalance: sql`CAST(CAST(${users.virtualBalance} AS DECIMAL) - ${amount} AS TEXT)`,
+          virtualBalance: sql`${users.virtualBalance} - ${amount}`,
           updatedAt: new Date(),
         })
         .where(eq(users.id, managerUserId));
@@ -666,8 +668,8 @@ export class AgentServiceV2 {
       await tx
         .update(users)
         .set({
-          virtualBalance: sql`CAST(CAST(${users.virtualBalance} AS DECIMAL) + ${amount} AS TEXT)`,
-          totalDeposited: sql`CAST(CAST(${users.totalDeposited} AS DECIMAL) + ${amount} AS TEXT)`,
+          virtualBalance: sql`${users.virtualBalance} + ${amount}`,
+          totalDeposited: sql`${users.totalDeposited} + ${amount}`,
           updatedAt: new Date(),
         })
         .where(eq(users.id, agentUserId));
@@ -729,7 +731,8 @@ export class AgentServiceV2 {
     managerUserId: string,
     amount: number
   ): Promise<User> {
-    if (amount <= 0) throw new Error('Amount must be positive');
+    if (!Number.isFinite(amount) || amount <= 0)
+      throw new Error('Amount must be a positive finite number');
 
     const agentWithConfig = await this.getAgentWithConfig(
       agentUserId,
@@ -747,7 +750,8 @@ export class AgentServiceV2 {
         .where(eq(users.id, agentUserId))
         .for('update');
 
-      const agentBalance = Number(agentRow?.virtualBalance ?? 0);
+      if (!agentRow) throw new Error('Agent not found');
+      const agentBalance = Number(agentRow.virtualBalance ?? 0);
       if (agentBalance < amount) {
         throw new Error(
           `Insufficient agent trading balance. Have: $${agentBalance.toFixed(2)}, Need: $${amount.toFixed(2)}`
@@ -760,14 +764,15 @@ export class AgentServiceV2 {
         .where(eq(users.id, managerUserId))
         .for('update');
 
-      const managerBalance = Number(managerRow?.virtualBalance ?? 0);
+      if (!managerRow) throw new Error('Manager not found');
+      const managerBalance = Number(managerRow.virtualBalance ?? 0);
 
       // Debit from agent (update both virtualBalance and totalWithdrawn)
       await tx
         .update(users)
         .set({
-          virtualBalance: sql`CAST(CAST(${users.virtualBalance} AS DECIMAL) - ${amount} AS TEXT)`,
-          totalWithdrawn: sql`CAST(CAST(${users.totalWithdrawn} AS DECIMAL) + ${amount} AS TEXT)`,
+          virtualBalance: sql`${users.virtualBalance} - ${amount}`,
+          totalWithdrawn: sql`${users.totalWithdrawn} + ${amount}`,
           updatedAt: new Date(),
         })
         .where(eq(users.id, agentUserId));
@@ -776,7 +781,7 @@ export class AgentServiceV2 {
       await tx
         .update(users)
         .set({
-          virtualBalance: sql`CAST(CAST(${users.virtualBalance} AS DECIMAL) + ${amount} AS TEXT)`,
+          virtualBalance: sql`${users.virtualBalance} + ${amount}`,
           updatedAt: new Date(),
         })
         .where(eq(users.id, managerUserId));

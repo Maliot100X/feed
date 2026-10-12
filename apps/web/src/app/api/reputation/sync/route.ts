@@ -93,6 +93,8 @@
  */
 
 import {
+  BadRequestError,
+  NotFoundError,
   requireAdmin,
   requireUserByIdentifier,
   withErrorHandling,
@@ -138,7 +140,10 @@ export const POST = withErrorHandling(async (request: NextRequest) => {
  */
 export const GET = withErrorHandling(async (request: NextRequest) => {
   const { searchParams } = new URL(request.url);
-  const userId = searchParams.get('userId')!;
+  const userId = searchParams.get('userId');
+  if (!userId) {
+    throw new BadRequestError('userId query parameter is required');
+  }
 
   const user = await requireUserByIdentifier(userId);
 
@@ -153,24 +158,27 @@ export const GET = withErrorHandling(async (request: NextRequest) => {
       onChainAccuracyScore: true,
     },
   });
+  if (!reputation || !metrics) {
+    throw new NotFoundError('Reputation metrics');
+  }
 
   return NextResponse.json({
     userId: user.id,
-    synced: metrics!.onChainReputationSync,
-    lastSyncedAt: metrics!.lastSyncedAt,
+    synced: metrics.onChainReputationSync,
+    lastSyncedAt: metrics.lastSyncedAt,
     reputation: {
-      score: reputation!.reputationScore,
-      trustLevel: reputation!.trustLevel,
-      confidence: reputation!.confidenceScore,
-      onChainTrustScore: metrics!.onChainTrustScore,
-      onChainAccuracyScore: metrics!.onChainAccuracyScore,
+      score: reputation.reputationScore,
+      trustLevel: reputation.trustLevel,
+      confidence: reputation.confidenceScore,
+      onChainTrustScore: metrics.onChainTrustScore,
+      onChainAccuracyScore: metrics.onChainAccuracyScore,
     },
     metrics: {
-      gamesPlayed: reputation!.metrics.gamesPlayed,
-      winRate: reputation!.metrics.winRate,
-      normalizedPnL: reputation!.metrics.normalizedPnL,
-      averageFeedbackScore: reputation!.metrics.averageFeedbackScore,
-      totalFeedback: reputation!.metrics.totalFeedbackCount,
+      gamesPlayed: reputation.metrics.gamesPlayed,
+      winRate: reputation.metrics.winRate,
+      normalizedPnL: reputation.metrics.normalizedPnL,
+      averageFeedbackScore: reputation.metrics.averageFeedbackScore,
+      totalFeedback: reputation.metrics.totalFeedbackCount,
     },
   });
 });

@@ -35,6 +35,7 @@
  * @see {@link https://developer.twitter.com/en/docs/authentication/oauth-2-0} Twitter OAuth 2.0
  */
 
+import crypto from 'node:crypto';
 import { authenticate, withErrorHandling } from '@feed/api';
 import { db } from '@feed/db';
 import {
@@ -43,7 +44,6 @@ import {
   logger,
   toISO,
 } from '@feed/shared';
-import crypto from 'crypto';
 import type { NextRequest } from 'next/server';
 import { NextResponse } from 'next/server';
 
@@ -65,8 +65,18 @@ export const GET = withErrorHandling(async function GET(request: NextRequest) {
   const authUser = await authenticate(request);
   const userId = authUser.userId;
 
+  const clientId = process.env.TWITTER_CLIENT_ID;
+  if (!clientId) {
+    return NextResponse.json(
+      { error: 'Twitter OAuth is not configured' },
+      { status: 503 }
+    );
+  }
+
   // Use | as separator instead of : to avoid conflicts with Privy DIDs (did:privy:...)
-  const state = `${userId}|${Date.now()}|${Math.random().toString(36).substring(7)}`;
+  // The trailing nonce is cryptographically random; the DB record is the
+  // authority for user/provider/expiry.
+  const state = `${userId}|${Date.now()}|${crypto.randomUUID()}`;
 
   // Generate PKCE parameters
   const codeVerifier = generateCodeVerifier();
@@ -88,7 +98,6 @@ export const GET = withErrorHandling(async function GET(request: NextRequest) {
     'Created OAuth state record',
     {
       userId,
-      state,
       oauthRecordId: oauthRecord.id,
       expiresAt: toISO(oauthRecord.expiresAt),
     },
@@ -97,7 +106,7 @@ export const GET = withErrorHandling(async function GET(request: NextRequest) {
 
   const authUrl = new URL('https://x.com/i/oauth2/authorize');
   authUrl.searchParams.set('response_type', 'code');
-  authUrl.searchParams.set('client_id', process.env.TWITTER_CLIENT_ID!);
+  authUrl.searchParams.set('client_id', clientId);
   authUrl.searchParams.set(
     'redirect_uri',
     `${getWaitlistBaseUrl()}/api/auth/twitter/callback`
@@ -112,7 +121,7 @@ export const GET = withErrorHandling(async function GET(request: NextRequest) {
 
   logger.info(
     'Initiating Twitter OAuth with PKCE',
-    { userId, state: state.substring(0, 20) + '...' },
+    { userId },
     'TwitterInitiate'
   );
 

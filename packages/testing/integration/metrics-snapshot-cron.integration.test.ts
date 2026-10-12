@@ -8,7 +8,14 @@
  */
 
 import { afterAll, beforeAll, describe, expect, test } from 'bun:test';
-import { db, eq, inArray, systemMetricsSnapshots } from '@feed/db';
+import { getSystemStatusSnapshot } from '@feed/api';
+import {
+  db,
+  eq,
+  generateSnowflakeId,
+  inArray,
+  systemMetricsSnapshots,
+} from '@feed/db';
 import { getAdminToken } from './helpers';
 
 const BASE_URL =
@@ -85,6 +92,52 @@ describe('Metrics Snapshot Cron Job', () => {
       } catch (error) {
         console.error('Error cleaning up test snapshots:', error);
       }
+    }
+  });
+
+  test('serializes a persisted snapshot from another process in UTC', async () => {
+    // Populate Postgres without recording this process's in-memory cron metrics.
+    // Match the configured deployment environment without changing its flags.
+    const ids = await Promise.all([0, 1, 2].map(() => generateSnowflakeId()));
+    const createdAt = new Date('2026-03-07T12:34:56.123Z');
+    const timestamp = new Date(Date.now() + 24 * 60 * 60 * 1000);
+    await db.insert(systemMetricsSnapshots).values(
+      (['development', 'staging', 'production'] as const).map(
+        (environment, i) => ({
+          id: ids[i]!,
+          timestamp,
+          environment,
+          createdAt,
+          totalUsers: 0,
+          activeUsers: 0,
+          newSignups: 0,
+          tradingVolume: '0',
+          activeMarkets: 0,
+          openPositions: 0,
+          totalVirtualBalance: '0',
+          feesCollectedHourly: '0',
+          apiUptime: 100,
+          avgResponseTime: 1,
+          errorRate: 0,
+          snapshotDurationMs: 7,
+        })
+      )
+    );
+    try {
+      const status = await getSystemStatusSnapshot();
+      const job = status.cronJobs.allJobs.find(
+        (item) => item.jobName === 'metrics-snapshot'
+      );
+      expect(job).toBeDefined();
+      expect(job?.lastExecution).toBe(createdAt.toISOString());
+      expect(job?.lastSuccess).toBe(createdAt.toISOString());
+      expect(job?.lastFailure).toBeNull();
+      expect(job?.avgDurationMs).toBe(7);
+      expect(job?.successfulExecutions).toBe(1);
+    } finally {
+      await db
+        .delete(systemMetricsSnapshots)
+        .where(inArray(systemMetricsSnapshots.id, ids));
     }
   });
 

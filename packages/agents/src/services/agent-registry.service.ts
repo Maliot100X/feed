@@ -263,6 +263,47 @@ export class AgentRegistryService {
   }
 
   /**
+   * Update an already-registered NPC's prompt and capabilities from its
+   * current canonical configuration (used by bootstrap/refresh so config
+   * changes are not silently ignored for existing registrations).
+   */
+  async updateNpcAgentConfig(params: {
+    actorId: string;
+    systemPrompt: string;
+    capabilities: AgentCapabilities;
+  }): Promise<void> {
+    const { actorId, systemPrompt, capabilities } = params;
+    const now = new Date();
+    await db.transaction(async (tx) => {
+      const [registry] = await tx
+        .update(agentRegistries)
+        .set({ systemPrompt, updatedAt: now })
+        .where(eq(agentRegistries.actorId, actorId))
+        .returning({ id: agentRegistries.id });
+      if (!registry) {
+        throw new Error(`NPC agent not registered: ${actorId}`);
+      }
+      await tx
+        .update(agentCapabilities)
+        .set({
+          strategies: capabilities.strategies ?? [],
+          markets: capabilities.markets ?? [],
+          actions: capabilities.actions ?? [],
+          version: capabilities.version ?? '1.0.0',
+          x402Support: capabilities.x402Support ?? false,
+          platform: capabilities.platform,
+          userType: capabilities.userType,
+          skills: capabilities.skills ?? [],
+          domains: capabilities.domains ?? [],
+          a2aEndpoint: capabilities.a2aEndpoint,
+          mcpEndpoint: capabilities.mcpEndpoint,
+          updatedAt: now,
+        })
+        .where(eq(agentCapabilities.agentRegistryId, registry.id));
+    });
+  }
+
+  /**
    * Register an EXTERNAL agent (ElizaOS, MCP, Agent0, custom)
    *
    * @description Creates registry entry with connection parameters for external agents.

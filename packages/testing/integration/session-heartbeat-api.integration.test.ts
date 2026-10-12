@@ -368,7 +368,7 @@ describe('Session Heartbeat API', () => {
       expect(res.status).toBe(200);
     });
 
-    test('handles negative pageViews (treats as 0)', async () => {
+    test('rejects negative pageViews', async () => {
       requireServer();
 
       const res = await heartbeatRequest({
@@ -376,7 +376,25 @@ describe('Session Heartbeat API', () => {
         pageViews: -5,
       });
 
-      expect(res.status).toBe(200);
+      expect(res.status).toBe(400);
+    });
+
+    test('rejects null body and non-string lastPath', async () => {
+      requireServer();
+
+      const nullBody = await fetch(`${BASE_URL}/api/activity/heartbeat`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: 'null',
+        signal: AbortSignal.timeout(10000),
+      });
+      expect(nullBody.status).toBe(400);
+
+      const badPath = await heartbeatRequest({
+        sessionId: 'edge-bad-last-path',
+        lastPath: 42,
+      });
+      expect(badPath.status).toBe(400);
     });
 
     test('handles very large pageViews', async () => {

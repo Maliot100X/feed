@@ -20,6 +20,19 @@ import { cosineSimilarity, getEmbeddings } from '../llm/embedding-client';
 import { FeedLLMClient } from '../llm/openai-client';
 import { ContentQualityGate } from './content-quality-gate';
 
+/** Thrown inside the claim transaction when a source fact is no longer active. */
+class ConsolidationSourceConflict extends Error {
+  constructor(
+    readonly expected: number,
+    readonly claimed: number
+  ) {
+    super(
+      `Expected to archive ${expected} source facts but claimed ${claimed}`
+    );
+    this.name = 'ConsolidationSourceConflict';
+  }
+}
+
 interface ConsolidationResult {
   consolidated: number;
   archived: number;
@@ -78,7 +91,9 @@ export class WorldFactsConsolidator {
           eq(worldFacts.source, 'auto-generated')
         )
       )
-      .orderBy(desc(worldFacts.createdAt));
+      .orderBy(desc(worldFacts.createdAt), desc(worldFacts.id))
+      // Cap to most recent N facts in the database to bound O(n²) clustering
+      .limit(MAX_FACTS_TO_PROCESS);
 
     if (facts.length < MIN_FACTS_TO_CONSOLIDATE) {
       logger.info(
@@ -89,12 +104,18 @@ export class WorldFactsConsolidator {
       return result;
     }
 
-    // Cap to most recent N facts to bound O(n²) clustering
-    const factsToProcess = facts.slice(0, MAX_FACTS_TO_PROCESS);
+    const factsToProcess = facts;
 
     // 2. Embed all fact values
     const texts = factsToProcess.map((f) => f.value);
     const embeddings = await getEmbeddings(texts);
+    // Empty means embeddings are unavailable (handled below); any other count
+    // mismatch would silently misalign facts and vectors.
+    if (embeddings.length > 0 && embeddings.length !== texts.length) {
+      throw new Error(
+        `Embedding count mismatch: requested ${texts.length}, received ${embeddings.length}`
+      );
+    }
 
     // Build list of facts that got valid embeddings
     const factsWithEmbeddings: FactWithEmbedding[] = [];
@@ -172,26 +193,13 @@ export class WorldFactsConsolidator {
 
         const clusterIds = cluster.map((f) => f.id);
 
-        // Wrap insert + archive in transaction for data consistency
-        await db.transaction(async (tx) => {
-          await tx.insert(worldFacts).values({
-            id: await generateSnowflakeId(),
-            category: 'general',
-            key,
-            label,
-            value: consolidatedText,
-            source: 'consolidated',
-            priority: 1,
-            qualityScore: quality.score,
-            generationDepth: 1, // Quality-gated LLM synthesis — included in prompts to replace archived originals
-            isActive: true,
-            lastUpdated: new Date(),
-            updatedAt: new Date(),
-          });
-
-          // Archive originals within same transaction
-          if (clusterIds.length > 0) {
-            await tx
+        // Claim (archive) the exact source facts first and only insert the
+        // synthesized fact if every source was still active. A concurrent
+        // sweep that already archived any of them rolls this one back, so
+        // retries cannot insert duplicate synthesized copies.
+        const archivedCount = await db
+          .transaction(async (tx) => {
+            const archived = await tx
               .update(worldFacts)
               .set({ isActive: false, updatedAt: new Date() })
               .where(
@@ -199,12 +207,53 @@ export class WorldFactsConsolidator {
                   eq(worldFacts.isActive, true),
                   inArray(worldFacts.id, clusterIds)
                 )
+              )
+              .returning({ id: worldFacts.id });
+            if (archived.length !== clusterIds.length) {
+              throw new ConsolidationSourceConflict(
+                clusterIds.length,
+                archived.length
               );
-          }
-        });
+            }
+
+            await tx.insert(worldFacts).values({
+              id: await generateSnowflakeId(),
+              category: 'general',
+              key,
+              label,
+              value: consolidatedText,
+              source: 'consolidated',
+              priority: 1,
+              qualityScore: quality.score,
+              generationDepth: 1, // Quality-gated LLM synthesis — included in prompts to replace archived originals
+              isActive: true,
+              lastUpdated: new Date(),
+              updatedAt: new Date(),
+            });
+            return archived.length;
+          })
+          .catch((error: unknown) => {
+            if (error instanceof ConsolidationSourceConflict) {
+              logger.warn(
+                'Consolidation cluster sources changed concurrently — skipping',
+                {
+                  expected: error.expected,
+                  claimed: error.claimed,
+                },
+                'WorldFactsConsolidator'
+              );
+              return null;
+            }
+            throw error;
+          });
+
+        if (archivedCount === null) {
+          result.skipped += cluster.length;
+          continue;
+        }
 
         result.consolidated++;
-        result.archived += clusterIds.length;
+        result.archived += archivedCount;
       } else {
         // Keep originals active — better than no context at all.
         // Read-side qualityScore filter catches contaminated individuals.

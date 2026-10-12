@@ -28,14 +28,10 @@ import {
   type BroadcastFn,
   dispatchAgentChat,
 } from '../../../../services/AgentChatService';
+import { validateDispatches } from './dispatch-validation';
 
 /** Per-agent dispatch timeout — prevents one slow agent from blocking all others */
 const DISPATCH_TIMEOUT_MS = 15_000;
-
-interface AgentDispatch {
-  agentId: string;
-  command: string;
-}
 
 interface AgentDispatchResult {
   agentId: string;
@@ -45,6 +41,9 @@ interface AgentDispatchResult {
   actionsExecuted: number;
   error?: string;
 }
+
+/** Raised when the wait for an agent ends; the agent may still be acting. */
+class DispatchWaitTimeoutError extends Error {}
 
 export const dispatchToAgentsAction: Action = {
   name: 'DISPATCH_TO_AGENTS',
@@ -113,7 +112,7 @@ export const dispatchToAgentsAction: Action = {
     _callback?: HandlerCallback
   ): Promise<ActionResult> => {
     const actionParams = state?.data?.actionParams as
-      | { dispatches?: AgentDispatch[] }
+      | { dispatches?: unknown }
       | undefined;
 
     const broadcastFn = state?.data?.broadcastFn as BroadcastFn | undefined;
@@ -122,50 +121,33 @@ export const dispatchToAgentsAction: Action = {
     const ownerName = state?.values?.ownerName as string | undefined;
     const ownerUsername = state?.values?.ownerUsername as string | undefined;
 
-    const dispatches = actionParams?.dispatches;
-
-    if (
-      !dispatches ||
-      !Array.isArray(dispatches) ||
-      dispatches.length === 0 ||
-      !ownerId ||
-      !teamChatId ||
-      !broadcastFn
-    ) {
+    if (!ownerId || !teamChatId || !broadcastFn) {
       const failResult = {
         success: false,
         text: 'Missing required parameters for multi-agent dispatch. Provide an array of {agentId, command} objects.',
       };
-      _callback?.({ content: failResult as unknown as Content });
+      await _callback?.({ content: failResult as unknown as Content });
       return failResult as unknown as ActionResult;
     }
 
-    // Validate each dispatch entry
-    const validDispatches = dispatches.filter(
-      (d): d is AgentDispatch =>
-        typeof d.agentId === 'string' &&
-        d.agentId.length > 0 &&
-        typeof d.command === 'string' &&
-        d.command.length > 0
-    );
-
-    if (validDispatches.length === 0) {
-      return {
+    const validation = validateDispatches(actionParams?.dispatches);
+    if (!validation.ok) {
+      const failResult = {
         success: false,
-        text: 'No valid dispatch entries found. Each entry needs agentId and command.',
+        text: `Invalid dispatch request: ${validation.error}`,
       };
+      await _callback?.({ content: failResult as unknown as Content });
+      return failResult as unknown as ActionResult;
     }
-
-    // Cap at 5 concurrent dispatches to prevent resource exhaustion
-    const cappedDispatches = validDispatches.slice(0, 5);
+    const cappedDispatches = validation.dispatches;
 
     const raceWithTimeout = async <T>(promise: Promise<T>): Promise<T> => {
       let timer: ReturnType<typeof setTimeout> | undefined;
       const timeoutPromise = new Promise<never>((_, reject) => {
         timer = setTimeout(() => {
           reject(
-            new Error(
-              `Agent dispatch timed out after ${DISPATCH_TIMEOUT_MS / 1000}s`
+            new DispatchWaitTimeoutError(
+              `No response within ${DISPATCH_TIMEOUT_MS / 1000}s; the agent may still be acting (outcome unknown)`
             )
           );
         }, DISPATCH_TIMEOUT_MS);
@@ -224,6 +206,11 @@ export const dispatchToAgentsAction: Action = {
     );
 
     const successCount = agentResults.filter((r) => r.success).length;
+    const pendingCount = settledResults.filter(
+      (settled) =>
+        settled.status === 'rejected' &&
+        settled.reason instanceof DispatchWaitTimeoutError
+    ).length;
     const totalCount = agentResults.length;
 
     // Build summary text
@@ -232,19 +219,20 @@ export const dispatchToAgentsAction: Action = {
       if (r.success) {
         return `${label}: "${r.response.slice(0, 300)}"`;
       }
-      return `${label}: FAILED — ${r.error ?? 'Unknown error'}`;
+      return `${label}: NOT CONFIRMED — ${r.error ?? 'Unknown error'}`;
     });
 
     const finalResult = {
       success: successCount > 0,
-      text: `Dispatched to ${totalCount} agents (${successCount} succeeded):\n\n${summaryParts.join('\n\n')}`,
+      text: `Dispatched to ${totalCount} agents (${successCount} succeeded${pendingCount > 0 ? `, ${pendingCount} still running/unknown` : ''}):\n\n${summaryParts.join('\n\n')}`,
       values: {
         agentResults,
         successCount,
+        pendingCount,
         totalCount,
       },
     } as unknown as ActionResult;
-    _callback?.({ content: finalResult as unknown as Content });
+    await _callback?.({ content: finalResult as unknown as Content });
     return finalResult;
   },
 };

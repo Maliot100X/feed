@@ -8,22 +8,26 @@
 import { getSyntheticPerpQuoteState } from '@feed/core/markets/perps';
 import {
   actorState,
+  and,
   db,
   eq,
   games,
   generateSnowflakeId,
   inArray,
+  lt,
   organizationState,
   perpMarketSnapshots,
   pools,
   rssFeedSources,
   sql,
   users,
+  withTransaction,
 } from '@feed/db';
 import type { ActorTier } from '@feed/shared';
 import { logger } from '@feed/shared';
 import { DEFAULT_RSS_SOURCES } from '../config/rss-sources';
 import { CapitalAllocationService } from './capital-allocation-service';
+import { realPriceService } from './real-price-service';
 import { StaticDataRegistry } from './static-data-registry';
 
 // Minimum balance thresholds by tier
@@ -56,10 +60,47 @@ export interface GameBootstrapResult {
   totalTopUpAmount: number;
 }
 
+function createEmptyBootstrapResult(): GameBootstrapResult {
+  return {
+    actorsCreated: 0,
+    actorsUpdated: 0,
+    actorsToppedUp: 0,
+    npcUsersCreated: 0,
+    organizationsCreated: 0,
+    organizationsUpdated: 0,
+    poolsCreated: 0,
+    rssFeedsCreated: 0,
+    perpMarketsCreated: 0,
+    gameStateInitialized: false,
+    totalTopUpAmount: 0,
+  };
+}
+
 export class GameBootstrapService {
   private static lastBootstrapTime = 0;
   private static BOOTSTRAP_COOLDOWN_MS = 60000;
-  private static isBootstrapping = false;
+  /** The bootstrap/full sync currently running in this process, if any. */
+  private static inFlight: Promise<GameBootstrapResult> | null = null;
+
+  /**
+   * Run `run` after any in-flight bootstrap/sync finishes, and track it as
+   * the in-flight operation. Replaces a boolean guard that forceFullSync used
+   * to reset while another bootstrap was still running.
+   */
+  private static runExclusive(
+    run: () => Promise<GameBootstrapResult>
+  ): Promise<GameBootstrapResult> {
+    const previous = this.inFlight;
+    const tracked: Promise<GameBootstrapResult> = (async () => {
+      // The previous operation's own caller observes its failure.
+      if (previous) await previous.catch(() => undefined);
+      return run();
+    })().finally(() => {
+      if (this.inFlight === tracked) this.inFlight = null;
+    });
+    this.inFlight = tracked;
+    return tracked;
+  }
 
   private static getFirstPositivePrice(
     ...candidates: Array<number | null | undefined>
@@ -80,148 +121,130 @@ export class GameBootstrapService {
     id: string;
     initialPrice: number | null;
   }): Promise<number> {
-    let realPrice: number | null = null;
-    try {
-      const { realPriceService } = await import('./real-price-service');
-      const candidate = realPriceService.getBasePriceForOrg(org.id);
-      if (
-        typeof candidate === 'number' &&
-        Number.isFinite(candidate) &&
-        candidate > 0
-      ) {
-        realPrice = candidate;
-      }
-    } catch {
-      // Real price service not available — use static price fallback.
-    }
-
-    return this.getFirstPositivePrice(realPrice, org.initialPrice) ?? 100;
+    return (
+      this.getFirstPositivePrice(
+        realPriceService.getBasePriceForOrg(org.id),
+        org.initialPrice
+      ) ?? 100
+    );
   }
 
   static async bootstrapIfNeeded(): Promise<GameBootstrapResult | null> {
-    const now = Date.now();
-
-    // Check if we've bootstrapped recently
-    if (now - this.lastBootstrapTime < this.BOOTSTRAP_COOLDOWN_MS) {
+    // Check if we've bootstrapped (successfully) recently
+    if (Date.now() - this.lastBootstrapTime < this.BOOTSTRAP_COOLDOWN_MS) {
       return null;
     }
 
     // Prevent concurrent bootstrapping
-    if (this.isBootstrapping) {
+    if (this.inFlight) {
       return null;
     }
 
-    this.isBootstrapping = true;
-    this.lastBootstrapTime = now;
-
-    const result: GameBootstrapResult = {
-      actorsCreated: 0,
-      actorsUpdated: 0,
-      actorsToppedUp: 0,
-      npcUsersCreated: 0,
-      organizationsCreated: 0,
-      organizationsUpdated: 0,
-      poolsCreated: 0,
-      rssFeedsCreated: 0,
-      perpMarketsCreated: 0,
-      gameStateInitialized: false,
-      totalTopUpAmount: 0,
-    };
-
-    try {
-      // Get static data from registry (no file loading needed)
-      const staticActors = StaticDataRegistry.getAllActors();
-      const staticOrgs = StaticDataRegistry.getAllOrganizations();
-
-      // Get existing database state from state tables
-      const [existingActorStates, existingOrgStates] = await Promise.all([
-        db.select({ id: actorState.id }).from(actorState),
-        db.select({ id: organizationState.id }).from(organizationState),
-      ]);
-      const existingActorIds = new Set(existingActorStates.map((a) => a.id));
-      const existingOrgIds = new Set(existingOrgStates.map((o) => o.id));
-
-      // 1. Sync actor states (only dynamic data)
-      for (const actor of staticActors) {
-        if (!existingActorIds.has(actor.id)) {
-          await this.seedActorState(actor);
-          result.actorsCreated++;
-        }
+    const result = await this.runExclusive(() => this.runBootstrap()).catch(
+      (error: Error) => {
+        logger.error(
+          'Game bootstrap failed',
+          { error: error.message },
+          'GameBootstrapService'
+        );
+        throw error;
       }
+    );
+    // Start the cooldown only after success so a failed bootstrap can retry
+    // immediately.
+    this.lastBootstrapTime = Date.now();
+    return result;
+  }
 
-      // 2. Sync organization states (only dynamic data)
-      for (const org of staticOrgs) {
-        if (!existingOrgIds.has(org.id)) {
-          await this.seedOrganizationState(org);
-          result.organizationsCreated++;
-        }
+  private static async runBootstrap(): Promise<GameBootstrapResult> {
+    const result = createEmptyBootstrapResult();
+
+    // Get static data from registry (no file loading needed)
+    const staticActors = StaticDataRegistry.getAllActors();
+    const staticOrgs = StaticDataRegistry.getAllOrganizations();
+
+    // Get existing database state from state tables
+    const [existingActorStates, existingOrgStates] = await Promise.all([
+      db.select({ id: actorState.id }).from(actorState),
+      db.select({ id: organizationState.id }).from(organizationState),
+    ]);
+    const existingActorIds = new Set(existingActorStates.map((a) => a.id));
+    const existingOrgIds = new Set(existingOrgStates.map((o) => o.id));
+
+    // 1. Sync actor states (only dynamic data)
+    for (const actor of staticActors) {
+      if (
+        !existingActorIds.has(actor.id) &&
+        (await this.seedActorState(actor))
+      ) {
+        result.actorsCreated++;
       }
-
-      // 3. Ensure minimum balances
-      const topUpResult = await this.ensureMinimumBalances();
-      result.actorsToppedUp = topUpResult.count;
-      result.totalTopUpAmount = topUpResult.totalAmount;
-
-      // 4. Ensure pools exist
-      result.poolsCreated = await this.ensureActorPools();
-
-      // 4b. Ensure NPC User records exist (for wallet/payout operations)
-      result.npcUsersCreated = await this.ensureNpcUsers(staticActors);
-
-      // 5. Ensure game state exists
-      result.gameStateInitialized = await this.ensureGameState();
-
-      // 6. Ensure RSS feeds
-      result.rssFeedsCreated = await this.ensureRSSFeeds();
-
-      // 7. Ensure perp market snapshots exist for all tradeable organizations
-      result.perpMarketsCreated = await this.ensurePerpMarketSnapshots();
-
-      // Log summary if anything changed
-      const hasChanges =
-        result.actorsCreated > 0 ||
-        result.actorsToppedUp > 0 ||
-        result.npcUsersCreated > 0 ||
-        result.organizationsCreated > 0 ||
-        result.poolsCreated > 0 ||
-        result.rssFeedsCreated > 0 ||
-        result.perpMarketsCreated > 0 ||
-        result.gameStateInitialized;
-
-      if (hasChanges) {
-        logger.info('Game bootstrap complete', result, 'GameBootstrapService');
-      }
-
-      return result;
-    } catch (error) {
-      logger.error(
-        'Game bootstrap failed',
-        { error: String(error) },
-        'GameBootstrapService'
-      );
-      throw error;
-    } finally {
-      this.isBootstrapping = false;
     }
+
+    // 2. Sync organization states (only dynamic data)
+    for (const org of staticOrgs) {
+      if (
+        !existingOrgIds.has(org.id) &&
+        (await this.seedOrganizationState(org))
+      ) {
+        result.organizationsCreated++;
+      }
+    }
+
+    await this.runSharedBootstrapSteps(result, staticActors);
+
+    // Log summary if anything changed
+    const hasChanges =
+      result.actorsCreated > 0 ||
+      result.actorsToppedUp > 0 ||
+      result.npcUsersCreated > 0 ||
+      result.organizationsCreated > 0 ||
+      result.poolsCreated > 0 ||
+      result.rssFeedsCreated > 0 ||
+      result.perpMarketsCreated > 0 ||
+      result.gameStateInitialized;
+
+    if (hasChanges) {
+      logger.info('Game bootstrap complete', result, 'GameBootstrapService');
+    }
+
+    return result;
+  }
+
+  /** Steps shared by bootstrapIfNeeded and forceFullSync. */
+  private static async runSharedBootstrapSteps(
+    result: GameBootstrapResult,
+    staticActors: Array<{ id: string; name: string }>
+  ): Promise<void> {
+    // Ensure minimum balances
+    const topUpResult = await this.ensureMinimumBalances();
+    result.actorsToppedUp = topUpResult.count;
+    result.totalTopUpAmount = topUpResult.totalAmount;
+
+    // Ensure pools exist
+    result.poolsCreated = await this.ensureActorPools();
+
+    // Ensure NPC User records exist (for wallet/payout operations)
+    result.npcUsersCreated = await this.ensureNpcUsers(staticActors);
+
+    // Ensure game state exists
+    result.gameStateInitialized = await this.ensureGameState();
+
+    // Ensure RSS feeds
+    result.rssFeedsCreated = await this.ensureRSSFeeds();
+
+    // Ensure perp market snapshots exist for all tradeable organizations
+    result.perpMarketsCreated = await this.ensurePerpMarketSnapshots();
   }
 
   static async forceFullSync(): Promise<GameBootstrapResult> {
-    this.lastBootstrapTime = 0;
-    this.isBootstrapping = false;
+    const result = await this.runExclusive(() => this.runFullSync());
+    this.lastBootstrapTime = Date.now();
+    return result;
+  }
 
-    const result: GameBootstrapResult = {
-      actorsCreated: 0,
-      actorsUpdated: 0,
-      actorsToppedUp: 0,
-      npcUsersCreated: 0,
-      organizationsCreated: 0,
-      organizationsUpdated: 0,
-      poolsCreated: 0,
-      rssFeedsCreated: 0,
-      perpMarketsCreated: 0,
-      gameStateInitialized: false,
-      totalTopUpAmount: 0,
-    };
+  private static async runFullSync(): Promise<GameBootstrapResult> {
+    const result = createEmptyBootstrapResult();
 
     // Get static data from registry
     const staticActors = StaticDataRegistry.getAllActors();
@@ -241,19 +264,7 @@ export class GameBootstrapService {
       if (syncResult.updated) result.organizationsUpdated++;
     }
 
-    // Ensure minimum balances
-    const topUpResult = await this.ensureMinimumBalances();
-    result.actorsToppedUp = topUpResult.count;
-    result.totalTopUpAmount = topUpResult.totalAmount;
-
-    result.poolsCreated = await this.ensureActorPools();
-
-    // Ensure NPC User records exist (for wallet/payout operations)
-    result.npcUsersCreated = await this.ensureNpcUsers(staticActors);
-
-    result.gameStateInitialized = await this.ensureGameState();
-    result.rssFeedsCreated = await this.ensureRSSFeeds();
-    result.perpMarketsCreated = await this.ensurePerpMarketSnapshots();
+    await this.runSharedBootstrapSteps(result, staticActors);
 
     logger.info('Force full sync complete', result, 'GameBootstrapService');
     return result;
@@ -264,7 +275,7 @@ export class GameBootstrapService {
     name: string;
     tier: ActorTier | null;
     domain: string[];
-  }): Promise<void> {
+  }): Promise<boolean> {
     const capital = CapitalAllocationService.calculateCapital({
       id: actor.id,
       name: actor.name,
@@ -273,19 +284,27 @@ export class GameBootstrapService {
       tier: actor.tier ?? undefined,
     });
 
-    await db.insert(actorState).values({
-      id: actor.id,
-      tradingBalance: capital.tradingBalance.toString(),
-      reputationPoints: capital.reputationPoints,
-      hasPool: false,
-      updatedAt: new Date(),
-    });
+    // Conflict-safe: another process may seed the same actor concurrently.
+    const inserted = await db
+      .insert(actorState)
+      .values({
+        id: actor.id,
+        tradingBalance: capital.tradingBalance.toString(),
+        reputationPoints: capital.reputationPoints,
+        hasPool: false,
+        updatedAt: new Date(),
+      })
+      .onConflictDoNothing({ target: actorState.id })
+      .returning({ id: actorState.id });
 
-    logger.debug(
-      `Seeded actor state ${actor.name} with $${capital.tradingBalance}`,
-      { actorId: actor.id },
-      'GameBootstrapService'
-    );
+    if (inserted.length > 0) {
+      logger.debug(
+        `Seeded actor state ${actor.name} with $${capital.tradingBalance}`,
+        { actorId: actor.id },
+        'GameBootstrapService'
+      );
+    }
+    return inserted.length > 0;
   }
 
   private static async syncActorState(actor: {
@@ -304,8 +323,8 @@ export class GameBootstrapService {
       .limit(1);
 
     if (existing.length === 0) {
-      await this.seedActorState(actor);
-      return { created: true, updated: false };
+      const created = await this.seedActorState(actor);
+      return { created, updated: false };
     }
 
     const existingState = existing[0];
@@ -316,15 +335,21 @@ export class GameBootstrapService {
       MINIMUM_BALANCE_BY_TIER[tier] || DEFAULT_MINIMUM_BALANCE;
     const currentBalance = Number(existingState.tradingBalance) || 0;
 
-    // Only update balance if below minimum
+    // Only raise the balance if below minimum. Conditional + GREATEST so a
+    // concurrent trade that changed the balance is never overwritten.
     if (currentBalance < minimumBalance) {
       await db
         .update(actorState)
         .set({
-          tradingBalance: minimumBalance.toString(),
+          tradingBalance: sql`GREATEST(${actorState.tradingBalance}, ${minimumBalance})`,
           updatedAt: new Date(),
         })
-        .where(eq(actorState.id, actor.id));
+        .where(
+          and(
+            eq(actorState.id, actor.id),
+            lt(actorState.tradingBalance, minimumBalance.toString())
+          )
+        );
     }
 
     return { created: false, updated: true };
@@ -334,22 +359,30 @@ export class GameBootstrapService {
     id: string;
     name: string;
     initialPrice: number | null;
-  }): Promise<void> {
+  }): Promise<boolean> {
     const effectivePrice =
       await this.resolveCanonicalOrganizationSeedPrice(org);
 
-    await db.insert(organizationState).values({
-      id: org.id,
-      currentPrice: effectivePrice,
-      basePrice: effectivePrice,
-      updatedAt: new Date(),
-    });
+    // Conflict-safe: another process may seed the same org concurrently.
+    const inserted = await db
+      .insert(organizationState)
+      .values({
+        id: org.id,
+        currentPrice: effectivePrice,
+        basePrice: effectivePrice,
+        updatedAt: new Date(),
+      })
+      .onConflictDoNothing({ target: organizationState.id })
+      .returning({ id: organizationState.id });
 
-    logger.debug(
-      `Seeded organization state ${org.name}`,
-      { orgId: org.id, price: effectivePrice },
-      'GameBootstrapService'
-    );
+    if (inserted.length > 0) {
+      logger.debug(
+        `Seeded organization state ${org.name}`,
+        { orgId: org.id, price: effectivePrice },
+        'GameBootstrapService'
+      );
+    }
+    return inserted.length > 0;
   }
 
   private static async syncOrganizationState(org: {
@@ -368,8 +401,8 @@ export class GameBootstrapService {
       .limit(1);
 
     if (existing.length === 0) {
-      await this.seedOrganizationState(org);
-      return { created: true, updated: false };
+      const created = await this.seedOrganizationState(org);
+      return { created, updated: false };
     }
 
     const existingState = existing[0];
@@ -435,29 +468,45 @@ export class GameBootstrapService {
     for (const state of allActorStates) {
       // Get static actor data for tier info
       const staticActor = StaticDataRegistry.getActor(state.id);
-      const currentBalance = Number(state.tradingBalance) || 0;
       const tier = staticActor?.tier || 'C_TIER';
       const minimumBalance =
         MINIMUM_BALANCE_BY_TIER[tier] || DEFAULT_MINIMUM_BALANCE;
 
-      if (currentBalance < minimumBalance) {
-        const deficit = minimumBalance - currentBalance;
-        const topUpAmount = Math.min(deficit, MAX_TOP_UP_AMOUNT);
+      // Cheap pre-filter on the snapshot; the deficit itself is recomputed
+      // from the row-locked balance so concurrent bootstraps cannot both
+      // top up the same actor.
+      if ((Number(state.tradingBalance) || 0) >= minimumBalance) continue;
 
-        await db
+      const topUp = await withTransaction(async (tx) => {
+        const [locked] = await tx
+          .select({ tradingBalance: actorState.tradingBalance })
+          .from(actorState)
+          .where(eq(actorState.id, state.id))
+          .for('update');
+        const currentBalance = Number(locked?.tradingBalance);
+        if (!locked || !(currentBalance < minimumBalance)) return null;
+
+        const topUpAmount = Math.min(
+          minimumBalance - currentBalance,
+          MAX_TOP_UP_AMOUNT
+        );
+        await tx
           .update(actorState)
           .set({
             tradingBalance: sql`${actorState.tradingBalance} + ${topUpAmount}`,
             updatedAt: new Date(),
           })
           .where(eq(actorState.id, state.id));
+        return { currentBalance, topUpAmount };
+      });
 
+      if (topUp) {
         toppedUpCount++;
-        totalTopUp += topUpAmount;
+        totalTopUp += topUp.topUpAmount;
 
         logger.debug(
-          `Topped up ${staticActor?.name ?? state.id}: $${currentBalance} → +$${topUpAmount}`,
-          { actorId: state.id, topUpAmount },
+          `Topped up ${staticActor?.name ?? state.id}: $${topUp.currentBalance} → +$${topUp.topUpAmount}`,
+          { actorId: state.id, topUpAmount: topUp.topUpAmount },
           'GameBootstrapService'
         );
       }
@@ -490,28 +539,33 @@ export class GameBootstrapService {
         .limit(1);
 
       if (existingPool.length === 0) {
-        await db.insert(pools).values({
-          id: poolId,
-          name: `${staticActor?.name ?? state.id}'s Pool`,
-          npcActorId: state.id,
-          totalValue: balance.toString(),
-          totalDeposits: balance.toString(),
-          availableBalance: balance.toString(),
-          lifetimePnL: '0',
-          performanceFeeRate: 0.05,
-          totalFeesCollected: '0',
-          isActive: true,
-          status: 'ACTIVE',
-          updatedAt: new Date(),
-        });
-
-        await db
-          .update(actorState)
-          .set({ hasPool: true, updatedAt: new Date() })
-          .where(eq(actorState.id, state.id));
-
-        created++;
+        const inserted = await db
+          .insert(pools)
+          .values({
+            id: poolId,
+            name: `${staticActor?.name ?? state.id}'s Pool`,
+            npcActorId: state.id,
+            totalValue: balance.toString(),
+            totalDeposits: balance.toString(),
+            availableBalance: balance.toString(),
+            lifetimePnL: '0',
+            performanceFeeRate: 0.05,
+            totalFeesCollected: '0',
+            isActive: true,
+            status: 'ACTIVE',
+            updatedAt: new Date(),
+          })
+          .onConflictDoNothing({ target: pools.id })
+          .returning({ id: pools.id });
+        if (inserted.length > 0) created++;
       }
+
+      // The pool exists now (created here, concurrently, or earlier with the
+      // flag left false), so reconcile the flag either way.
+      await db
+        .update(actorState)
+        .set({ hasPool: true, updatedAt: new Date() })
+        .where(eq(actorState.id, state.id));
     }
 
     return created;

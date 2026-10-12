@@ -47,7 +47,7 @@
  */
 
 import { requireAdmin, successResponse, withErrorHandling } from '@feed/api';
-import { db } from '@feed/db';
+import { chats, count, db, eq, messages } from '@feed/db';
 import { logger, toISO, toISOOrNull } from '@feed/shared';
 import type { NextRequest } from 'next/server';
 
@@ -74,6 +74,7 @@ export const GET = withErrorHandling(async (request: NextRequest) => {
     totalArticles,
     totalGroupChats,
     totalChatMessages,
+    totalGroupChatMessages,
     totalLLMCalls,
 
     // Recent counts (last 24 hours)
@@ -131,6 +132,13 @@ export const GET = withErrorHandling(async (request: NextRequest) => {
       where: { isGroup: true },
     }),
     db.message.count(),
+    // Messages in group chats only (avgMessagesPerChat must not include DMs)
+    db
+      .select({ count: count() })
+      .from(messages)
+      .innerJoin(chats, eq(messages.chatId, chats.id))
+      .where(eq(chats.isGroup, true))
+      .then((rows) => rows[0]?.count ?? 0),
     db.llmCallLog.count(),
 
     // Last 24 hours
@@ -267,14 +275,11 @@ export const GET = withErrorHandling(async (request: NextRequest) => {
     ? now.getTime() - gameState.lastTickAt.getTime()
     : null;
 
-  // Estimate total ticks (based on game speed and uptime)
   const tickIntervalMs = gameState.speed || 60000;
-  const estimatedTotalTicks =
-    gameState.isRunning && gameState.startedAt
-      ? Math.floor(uptimeMs / tickIntervalMs)
-      : 0;
 
-  // Calculate per-minute rates
+  // Rates over fixed rolling windows (events in the window / window minutes).
+  // Previously the hourly average was forced to 0 until uptime exceeded an
+  // hour and the daily average divided 24h of events by a shorter uptime.
   const rates = {
     // Per minute (instantaneous rate from last minute)
     postsPerMinute: postsLastMinute,
@@ -282,26 +287,22 @@ export const GET = withErrorHandling(async (request: NextRequest) => {
     messagesPerMinute: messagesLastMinute,
     llmCallsPerMinute: llmCallsLastMinute,
 
-    // Average per minute over last hour
-    postsPerMinuteAvgHour: uptimeMinutes > 60 ? postsLastHour / 60 : 0,
-    articlesPerMinuteAvgHour: uptimeMinutes > 60 ? articlesLastHour / 60 : 0,
-    messagesPerMinuteAvgHour: uptimeMinutes > 60 ? messagesLastHour / 60 : 0,
-    llmCallsPerMinuteAvgHour: uptimeMinutes > 60 ? llmCallsLastHour / 60 : 0,
+    // Average per minute over the last hour
+    postsPerMinuteAvgHour: postsLastHour / 60,
+    articlesPerMinuteAvgHour: articlesLastHour / 60,
+    messagesPerMinuteAvgHour: messagesLastHour / 60,
+    llmCallsPerMinuteAvgHour: llmCallsLastHour / 60,
 
-    // Average per minute over last 24 hours
-    postsPerMinuteAvgDay:
-      uptimeMinutes > 0 ? postsLast24h / Math.min(uptimeMinutes, 1440) : 0,
-    articlesPerMinuteAvgDay:
-      uptimeMinutes > 0 ? articlesLast24h / Math.min(uptimeMinutes, 1440) : 0,
-    messagesPerMinuteAvgDay:
-      uptimeMinutes > 0 ? messagesLast24h / Math.min(uptimeMinutes, 1440) : 0,
-    llmCallsPerMinuteAvgDay:
-      uptimeMinutes > 0 ? llmCallsLast24h / Math.min(uptimeMinutes, 1440) : 0,
+    // Average per minute over the last 24 hours
+    postsPerMinuteAvgDay: postsLast24h / 1440,
+    articlesPerMinuteAvgDay: articlesLast24h / 1440,
+    messagesPerMinuteAvgDay: messagesLast24h / 1440,
+    llmCallsPerMinuteAvgDay: llmCallsLast24h / 1440,
   };
 
   // Calculate messages per group chat
   const avgMessagesPerChat =
-    totalGroupChats > 0 ? totalChatMessages / totalGroupChats : 0;
+    totalGroupChats > 0 ? Number(totalGroupChatMessages) / totalGroupChats : 0;
 
   return successResponse({
     gameState: {
@@ -317,7 +318,6 @@ export const GET = withErrorHandling(async (request: NextRequest) => {
       uptimeMs,
       uptimeMinutes: Math.round(uptimeMinutes * 10) / 10,
       uptimeHours: Math.round(uptimeHours * 10) / 10,
-      estimatedTotalTicks,
     },
     totals: {
       posts: totalPosts,
@@ -380,9 +380,12 @@ export const GET = withErrorHandling(async (request: NextRequest) => {
       totalPromptTokens24h: llmTokenStats._sum?.promptTokens || 0,
       totalCompletionTokens24h: llmTokenStats._sum?.completionTokens || 0,
       totalTokens24h: llmTokenStats._sum?.totalTokens || 0,
-      avgLatencyMs24h: llmTokenStats._avg?.latencyMs
-        ? Math.round(llmTokenStats._avg.latencyMs * 10) / 10
-        : null,
+      // null only when there were no observations (0 ms is a real value)
+      avgLatencyMs24h:
+        llmTokenStats._avg?.latencyMs === null ||
+        llmTokenStats._avg?.latencyMs === undefined
+          ? null
+          : Math.round(llmTokenStats._avg.latencyMs * 10) / 10,
     },
   });
 });

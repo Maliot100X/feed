@@ -139,14 +139,20 @@ export async function buildPositionsPromptContextByActorId(
     const lines: string[] = [];
 
     if (maxPred > 0 && pred.length > 0) {
+      // Rank by exposure (amount at risk), tie-broken by |PnL|. Positions
+      // with no remaining shares are not current holdings and are skipped.
       const scored = pred
+        .filter((p) => (parseNullableNumber(p.shares) ?? 0) > 0)
         .map((p) => {
           const pnl = parseNullableNumber(p.pnl);
-          const amount = parseNullableNumber(p.amount);
-          const score = Math.abs(pnl ?? amount ?? 0);
-          return { p, pnl, score };
+          const exposure = Math.abs(parseNullableNumber(p.amount) ?? 0);
+          return { p, pnl, exposure };
         })
-        .sort((a, b) => b.score - a.score)
+        .sort(
+          (a, b) =>
+            b.exposure - a.exposure ||
+            Math.abs(b.pnl ?? 0) - Math.abs(a.pnl ?? 0)
+        )
         .slice(0, maxPred);
 
       for (const { p, pnl } of scored) {

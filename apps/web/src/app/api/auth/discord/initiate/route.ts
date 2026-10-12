@@ -24,8 +24,18 @@ export const GET = withErrorHandling(async function GET(request: NextRequest) {
   const authUser = await authenticate(request);
   const userId = authUser.userId;
 
+  const clientId = process.env.DISCORD_CLIENT_ID;
+  if (!clientId) {
+    return NextResponse.json(
+      { error: 'Discord OAuth is not configured' },
+      { status: 503 }
+    );
+  }
+
   // Use | as separator instead of : to avoid conflicts with Privy DIDs (did:privy:...)
-  const state = `${userId}|${Date.now()}|${Math.random().toString(36).substring(7)}`;
+  // The trailing nonce is cryptographically random; the DB record is the
+  // authority for user/provider/expiry.
+  const state = `${userId}|${Date.now()}|${crypto.randomUUID()}`;
 
   // Store state temporarily (expires in 10 minutes)
   // Discord doesn't use PKCE, but we need a placeholder for the DB schema
@@ -44,7 +54,6 @@ export const GET = withErrorHandling(async function GET(request: NextRequest) {
     'Created OAuth state record',
     {
       userId,
-      state,
       oauthRecordId: oauthRecord.id,
       expiresAt: toISO(oauthRecord.expiresAt),
     },
@@ -53,7 +62,7 @@ export const GET = withErrorHandling(async function GET(request: NextRequest) {
 
   const authUrl = new URL('https://discord.com/api/oauth2/authorize');
   authUrl.searchParams.set('response_type', 'code');
-  authUrl.searchParams.set('client_id', process.env.DISCORD_CLIENT_ID!);
+  authUrl.searchParams.set('client_id', clientId);
   authUrl.searchParams.set(
     'redirect_uri',
     `${getWaitlistBaseUrl()}/api/auth/discord/callback`
@@ -61,11 +70,7 @@ export const GET = withErrorHandling(async function GET(request: NextRequest) {
   authUrl.searchParams.set('scope', 'identify guilds');
   authUrl.searchParams.set('state', state);
 
-  logger.info(
-    'Initiating Discord OAuth',
-    { userId, state: state.substring(0, 20) + '...' },
-    'DiscordInitiate'
-  );
+  logger.info('Initiating Discord OAuth', { userId }, 'DiscordInitiate');
 
   return NextResponse.redirect(authUrl.toString());
 });

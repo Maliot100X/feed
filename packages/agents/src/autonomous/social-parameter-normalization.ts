@@ -47,12 +47,16 @@ function normalizeIdInput(value: unknown): string | undefined {
 }
 
 function extractOrdinal(value: string): number | undefined {
-  const direct = value.match(/^#?(\d+)$/)?.[1];
+  // Rendered context lists are short; long digit strings are IDs (snowflakes),
+  // not ordinals.
+  const direct = value.match(/^#?(\d{1,3})$/)?.[1];
   if (direct) {
     return Number.parseInt(direct, 10);
   }
 
-  const indexed = value.match(/(?:post|comment|chat|user)\s*#?\s*(\d+)/i)?.[1];
+  const indexed = value.match(
+    /^(?:post|comment|chat|user)\s*#?\s*(\d{1,3})$/i
+  )?.[1];
   if (indexed) {
     return Number.parseInt(indexed, 10);
   }
@@ -96,18 +100,17 @@ function resolveCandidateId<T extends { id: string }>(
   }
 
   const ordinal = extractOrdinal(normalizedInput);
-  if (ordinal !== undefined && ordinal >= 1 && ordinal <= candidates.length) {
-    return candidates[ordinal - 1]?.id;
+  if (ordinal !== undefined) {
+    return ordinal >= 1 && ordinal <= candidates.length
+      ? candidates[ordinal - 1]?.id
+      : undefined;
   }
 
-  const numericPrefix = normalizedInput.match(/^(\d+)/)?.[1];
-  if (numericPrefix) {
-    const prefixed = candidates.find(
-      (candidate) => candidate.id === numericPrefix
-    );
-    if (prefixed) {
-      return prefixed.id;
-    }
+  // An explicit, well-formed ID that is simply not in the rendered context is
+  // passed through unchanged; the executing service authorizes the real
+  // target. Free text is never repaired into an executable target.
+  if (/^[A-Za-z0-9_-]+$/.test(normalizedInput) && /\d/.test(normalizedInput)) {
+    return normalizedInput;
   }
 
   return undefined;
@@ -161,9 +164,24 @@ export function normalizeSocialDecisionParameters(
       const parentTarget = resolvedParentCommentId
         ? pendingReplies.find((reply) => reply.id === resolvedParentCommentId)
         : undefined;
-      const resolvedPostId =
-        resolveCandidateId(nextParameters.postId, recentPosts) ??
-        parentTarget?.postId;
+      const explicitPostId = resolveCandidateId(
+        nextParameters.postId,
+        recentPosts
+      );
+
+      // A parent comment must belong to the post being commented on; a
+      // mismatched pair is rejected rather than posting under the wrong thread.
+      if (
+        explicitPostId &&
+        parentTarget &&
+        parentTarget.postId !== explicitPostId
+      ) {
+        delete nextParameters.postId;
+        delete nextParameters.parentCommentId;
+        return nextParameters;
+      }
+
+      const resolvedPostId = explicitPostId ?? parentTarget?.postId;
 
       if (resolvedPostId) {
         nextParameters.postId = resolvedPostId;

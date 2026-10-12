@@ -128,7 +128,7 @@ export class PredictionMarketService {
 
   async buy(input: PredictionBuyInput): Promise<PredictionTradeResult> {
     const { marketId, userId, amount, side } = input;
-    if (amount < MIN_TRADE_AMOUNT) {
+    if (!Number.isFinite(amount) || amount < MIN_TRADE_AMOUNT) {
       throw new BadRequestError(
         `Trade amount must be at least ${MIN_TRADE_AMOUNT}`
       );
@@ -285,7 +285,7 @@ export class PredictionMarketService {
 
   async sell(input: PredictionSellInput): Promise<PredictionTradeResult> {
     const { marketId, userId, shares } = input;
-    if (shares < MIN_SHARES) {
+    if (!Number.isFinite(shares) || shares < MIN_SHARES) {
       throw new BadRequestError(
         `Shares to sell must be at least ${MIN_SHARES}`
       );
@@ -304,7 +304,7 @@ export class PredictionMarketService {
       // Only allow selling active positions (whitelist approach for security)
       // This prevents selling cancelled/voided/resolved positions that have already been settled
       .filter(
-        (p) => (!p.status || p.status === 'active') && p.shares > MIN_SHARES
+        (p) => (!p.status || p.status === 'active') && p.shares >= MIN_SHARES
       );
 
     let pos: NonNullable<typeof yesPos> | NonNullable<typeof noPos> | null =
@@ -713,7 +713,7 @@ export class PredictionMarketService {
     if (market.resolved) {
       throw new BadRequestError('Market has resolved');
     }
-    if (new Date() > market.endDate) {
+    if (this.now() > market.endDate) {
       throw new BadRequestError('Market expired');
     }
     if (market.liquidity <= 0) {

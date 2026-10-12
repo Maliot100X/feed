@@ -20,7 +20,7 @@ describe('Token Stats Types', () => {
     expect(TOKEN_COST_PER_MILLION['openai/gpt-oss-120b']).toBeDefined();
     expect(TOKEN_COST_PER_MILLION['claude-sonnet-4-5']).toBeDefined();
     expect(TOKEN_COST_PER_MILLION['gpt-5.1']).toBeDefined();
-    expect(TOKEN_COST_PER_MILLION.default).toBeDefined();
+    expect(TOKEN_COST_PER_MILLION.default).toBeUndefined();
   });
 
   test('calculateEstimatedCost calculates correctly', () => {
@@ -35,16 +35,24 @@ describe('Token Stats Types', () => {
     expect(result.totalCostUSD).toBeCloseTo(0.45, 2);
   });
 
-  test('calculateEstimatedCost uses default for unknown models', () => {
+  test('calculateEstimatedCost reports unknown models as unpriced', () => {
     const result = calculateEstimatedCost(
       'unknown-model',
       1_000_000,
       1_000_000
     );
 
-    expect(result.inputCostUSD).toBeCloseTo(1.0, 2); // default $1.00 per 1M
-    expect(result.outputCostUSD).toBeCloseTo(3.0, 2); // default $3.00 per 1M
-    expect(result.totalCostUSD).toBeCloseTo(4.0, 2);
+    expect(result.pricingKnown).toBe(false);
+    expect(result.totalCostUSD).toBe(0);
+    expect(calculateEstimatedCost('constructor', 1, 1).pricingKnown).toBe(
+      false
+    );
+  });
+
+  test('calculateEstimatedCost marks known models as priced', () => {
+    expect(
+      calculateEstimatedCost('openai/gpt-oss-120b', 1, 1).pricingKnown
+    ).toBe(true);
   });
 });
 
@@ -237,6 +245,68 @@ describe('tokenStatsService', () => {
 
     expect(stats?.totalCalls).toBe(1);
     expect(stats?.byPromptType[0]?.successRate).toBe(0);
+  });
+
+  test('keeps model names containing colons intact (e.g. Ollama tags)', () => {
+    tokenStatsService.startTick('tick-colon');
+    getTokenUsageCallback()?.({
+      provider: 'ollama',
+      model: 'qwen3:4b',
+      inputTokens: 10,
+      outputTokens: 5,
+      totalTokens: 15,
+      promptType: 'test',
+      durationMs: 10,
+      success: true,
+    });
+    const stats = tokenStatsService.endTick();
+    expect(stats?.byModel[0]?.model).toBe('qwen3:4b');
+    expect(tokenStatsService.getSummary(1)?.byModel[0]?.model).toBe('qwen3:4b');
+  });
+
+  test('getSummary weights success rate and duration by call count', () => {
+    const call = (success: boolean, durationMs: number) => ({
+      provider: 'groq' as const,
+      model: 'openai/gpt-oss-120b',
+      inputTokens: 1,
+      outputTokens: 1,
+      totalTokens: 2,
+      promptType: 'mixed',
+      durationMs,
+      success,
+    });
+    // Tick 1: 3 calls, all succeed, 100ms each
+    tokenStatsService.startTick('w-1');
+    for (let i = 0; i < 3; i++) getTokenUsageCallback()?.(call(true, 100));
+    tokenStatsService.endTick();
+    // Tick 2: 1 call, fails, 500ms
+    tokenStatsService.startTick('w-2');
+    getTokenUsageCallback()?.(call(false, 500));
+    tokenStatsService.endTick();
+
+    const summary = tokenStatsService.getSummary(10);
+    const pt = summary?.byPromptType.find((p) => p.promptType === 'mixed');
+    expect(pt?.callCount).toBe(4);
+    expect(pt?.successRate).toBeCloseTo(0.75);
+    expect(pt?.avgDurationMs).toBe(200);
+    expect(summary?.byModel[0]?.successRate).toBeCloseTo(0.75);
+  });
+
+  test('tick stats expose a copy of recorded calls', () => {
+    tokenStatsService.startTick('copy');
+    getTokenUsageCallback()?.({
+      provider: 'groq',
+      model: 'm',
+      inputTokens: 1,
+      outputTokens: 1,
+      totalTokens: 2,
+      promptType: 'p',
+      durationMs: 1,
+      success: true,
+    });
+    const current = tokenStatsService.getCurrentStats();
+    current?.calls.pop();
+    expect(tokenStatsService.endTick()?.totalCalls).toBe(1);
   });
 
   test('recentTicks stores history', () => {

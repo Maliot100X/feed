@@ -14,7 +14,17 @@
  * @module engine/services/market-momentum-service
  */
 
-import { db, desc, gte, perpMarketSnapshots } from '@feed/db';
+import {
+  and,
+  db,
+  desc,
+  eq,
+  gte,
+  inArray,
+  lte,
+  perpMarketSnapshots,
+  stockPrices,
+} from '@feed/db';
 import { logger } from '@feed/shared';
 
 /**
@@ -63,12 +73,6 @@ export const MOMENTUM_CONFIG = {
   SEVERE_FOMO_MULTIPLIER: 3.5,
 
   /**
-   * Contrarian NPCs react opposite to momentum
-   * They buy when others panic, sell when others FOMO
-   */
-  CONTRARIAN_INVERSION: true,
-
-  /**
    * Time window for momentum calculation (1 hour in ms)
    */
   MOMENTUM_WINDOW_MS: 60 * 60 * 1000,
@@ -109,8 +113,8 @@ export const MOMENTUM_CONFIG = {
 export interface MarketMomentum {
   ticker: string;
   organizationId: string;
-  priceChange1h: number; // Percentage change in last hour
-  priceChangePercent: number; // Same as above, for clarity
+  priceChange1h: number; // Fractional change over the momentum window (0.1 = +10%)
+  priceChangePercent: number; // priceChange1h expressed in percent
   currentPrice: number;
   previousPrice: number;
   signal: 'panic' | 'severe_panic' | 'fomo' | 'severe_fomo' | 'neutral';
@@ -143,75 +147,97 @@ export class MarketMomentumService {
   /**
    * Get momentum signals for all markets
    */
-  static async getAllMarketMomentum(): Promise<MarketMomentum[]> {
-    const oneHourAgo = new Date(
-      Date.now() - MOMENTUM_CONFIG.MOMENTUM_WINDOW_MS
-    );
-
-    // Get latest snapshots for each market
-    const latestSnapshots = await db
+  static async getAllMarketMomentum(
+    now: Date = new Date()
+  ): Promise<MarketMomentum[]> {
+    // PerpMarketSnapshot holds one current row per ticker (ticker is the PK),
+    // so it cannot provide history. Compare against StockPrice history.
+    const currentSnapshots = await db
       .select({
         ticker: perpMarketSnapshots.ticker,
         organizationId: perpMarketSnapshots.organizationId,
         currentPrice: perpMarketSnapshots.currentPrice,
-        createdAt: perpMarketSnapshots.createdAt,
       })
-      .from(perpMarketSnapshots)
-      .orderBy(desc(perpMarketSnapshots.createdAt))
-      .limit(100);
+      .from(perpMarketSnapshots);
+    return MarketMomentumService.buildMomentum(currentSnapshots, now);
+  }
 
-    // Group by ticker and get latest
-    const latestByTicker = new Map<string, (typeof latestSnapshots)[0]>();
-    for (const snap of latestSnapshots) {
-      if (!latestByTicker.has(snap.ticker)) {
-        latestByTicker.set(snap.ticker, snap);
-      }
-    }
-
-    // Get older snapshots for comparison (1 hour ago)
-    const olderSnapshots = await db
+  /**
+   * Get momentum for a specific market
+   */
+  static async getMarketMomentum(
+    ticker: string,
+    now: Date = new Date()
+  ): Promise<MarketMomentum | null> {
+    const snapshots = await db
       .select({
         ticker: perpMarketSnapshots.ticker,
+        organizationId: perpMarketSnapshots.organizationId,
         currentPrice: perpMarketSnapshots.currentPrice,
-        createdAt: perpMarketSnapshots.createdAt,
       })
       .from(perpMarketSnapshots)
-      .where(gte(perpMarketSnapshots.createdAt, oneHourAgo))
-      .orderBy(perpMarketSnapshots.createdAt)
-      .limit(100);
+      .where(eq(perpMarketSnapshots.ticker, ticker))
+      .limit(1);
+    const [momentum] = await MarketMomentumService.buildMomentum(
+      snapshots,
+      now
+    );
+    return momentum ?? null;
+  }
 
-    // Group by ticker and get oldest in window
-    const oldestByTicker = new Map<string, (typeof olderSnapshots)[0]>();
-    for (const snap of olderSnapshots) {
-      if (!oldestByTicker.has(snap.ticker)) {
-        oldestByTicker.set(snap.ticker, snap);
-      }
-    }
+  /**
+   * Compare current prices against the last recorded price at or before the
+   * window boundary (now - MOMENTUM_WINDOW_MS) for each organization. Markets
+   * without a boundary observation within two windows have insufficient
+   * history and are omitted.
+   */
+  private static async buildMomentum(
+    currentSnapshots: Array<{
+      ticker: string;
+      organizationId: string;
+      currentPrice: number;
+    }>,
+    now: Date
+  ): Promise<MarketMomentum[]> {
+    if (currentSnapshots.length === 0) return [];
+
+    const windowMs = MOMENTUM_CONFIG.MOMENTUM_WINDOW_MS;
+    const boundary = new Date(now.getTime() - windowMs);
+    const oldestAcceptable = new Date(now.getTime() - 2 * windowMs);
+    const orgIds = [...new Set(currentSnapshots.map((s) => s.organizationId))];
+
+    const boundaryPrices = await db
+      .selectDistinctOn([stockPrices.organizationId], {
+        organizationId: stockPrices.organizationId,
+        price: stockPrices.price,
+      })
+      .from(stockPrices)
+      .where(
+        and(
+          inArray(stockPrices.organizationId, orgIds),
+          lte(stockPrices.timestamp, boundary),
+          gte(stockPrices.timestamp, oldestAcceptable)
+        )
+      )
+      .orderBy(stockPrices.organizationId, desc(stockPrices.timestamp));
+
+    const previousByOrg = new Map(
+      boundaryPrices.map((p) => [p.organizationId, Number(p.price)])
+    );
 
     const momentum: MarketMomentum[] = [];
-
-    for (const [ticker, latest] of latestByTicker) {
-      const older = oldestByTicker.get(ticker);
-      if (!older) continue;
-
-      const currentPrice = Number(latest.currentPrice);
-      const previousPrice = Number(older.currentPrice);
-
-      if (previousPrice <= 0) continue;
-
-      const priceChange = (currentPrice - previousPrice) / previousPrice;
-      const signal = MarketMomentumService.calculateSignal(priceChange);
-      const strength = MarketMomentumService.calculateStrength(priceChange);
-
+    for (const snap of currentSnapshots) {
+      const previousPrice = previousByOrg.get(snap.organizationId);
+      const currentPrice = Number(snap.currentPrice);
+      if (previousPrice === undefined) continue;
+      const signal = classifyMomentum(currentPrice, previousPrice);
+      if (!signal) continue;
       momentum.push({
-        ticker,
-        organizationId: latest.organizationId,
-        priceChange1h: priceChange,
-        priceChangePercent: priceChange * 100,
+        ticker: snap.ticker,
+        organizationId: snap.organizationId,
         currentPrice,
         previousPrice,
-        signal,
-        strength,
+        ...signal,
       });
     }
 
@@ -219,21 +245,9 @@ export class MarketMomentumService {
   }
 
   /**
-   * Get momentum for a specific market
-   */
-  static async getMarketMomentum(
-    ticker: string
-  ): Promise<MarketMomentum | null> {
-    const allMomentum = await MarketMomentumService.getAllMarketMomentum();
-    return allMomentum.find((m) => m.ticker === ticker) || null;
-  }
-
-  /**
    * Calculate the signal type based on price change
    */
-  private static calculateSignal(
-    priceChange: number
-  ): MarketMomentum['signal'] {
+  static calculateSignal(priceChange: number): MarketMomentum['signal'] {
     if (priceChange <= MOMENTUM_CONFIG.SEVERE_PANIC_THRESHOLD) {
       return 'severe_panic';
     }
@@ -252,7 +266,7 @@ export class MarketMomentumService {
   /**
    * Calculate signal strength (0-1)
    */
-  private static calculateStrength(priceChange: number): number {
+  static calculateStrength(priceChange: number): number {
     const absChange = Math.abs(priceChange);
     // Strength scales from 0 at threshold to 1 at severe threshold
     if (priceChange < 0) {
@@ -494,4 +508,32 @@ export class MarketMomentumService {
       'MarketMomentumService'
     );
   }
+}
+
+/**
+ * Classify momentum between two prices. Returns null when either price is not
+ * a finite positive number (no signal can be derived).
+ */
+export function classifyMomentum(
+  currentPrice: number,
+  previousPrice: number
+): Pick<
+  MarketMomentum,
+  'priceChange1h' | 'priceChangePercent' | 'signal' | 'strength'
+> | null {
+  if (
+    !Number.isFinite(currentPrice) ||
+    !Number.isFinite(previousPrice) ||
+    currentPrice <= 0 ||
+    previousPrice <= 0
+  ) {
+    return null;
+  }
+  const priceChange = (currentPrice - previousPrice) / previousPrice;
+  return {
+    priceChange1h: priceChange,
+    priceChangePercent: priceChange * 100,
+    signal: MarketMomentumService.calculateSignal(priceChange),
+    strength: MarketMomentumService.calculateStrength(priceChange),
+  };
 }

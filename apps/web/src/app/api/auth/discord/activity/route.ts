@@ -22,6 +22,11 @@ import { NextResponse } from 'next/server';
 import { z } from 'zod';
 import { verifySignedState } from './state/state-utils';
 
+const TokenResponseSchema = z.object({
+  access_token: z.string().min(1),
+  scope: z.string().optional(),
+});
+
 const RequestSchema = z.object({
   code: z.string().min(1),
   state: z.string().min(1, 'OAuth state parameter is required'),
@@ -104,33 +109,40 @@ export const POST = withErrorHandling(async (request: NextRequest) => {
   );
 
   if (!tokenResponse.ok) {
-    // SECURITY: Discord's error response may contain diagnostic info but
-    // never echoes back the client_secret. We log the error text for
-    // debugging but do not return it to the client.
-    const errorText = await tokenResponse.text();
+    // Upstream error bodies are not logged or returned: they are not under
+    // our control and could echo request material.
     logger.error(
       'Discord Activity token exchange failed',
-      { status: tokenResponse.status, error: errorText },
+      { status: tokenResponse.status },
       'DiscordActivity'
     );
     return NextResponse.json(
       { error: 'Token exchange failed' },
-      { status: tokenResponse.status }
+      { status: 502, headers: { 'Cache-Control': 'no-store' } }
     );
   }
 
-  const tokenData = (await tokenResponse.json()) as {
-    access_token: string;
-    token_type: string;
-    expires_in: number;
-    scope: string;
-  };
+  const tokenData = TokenResponseSchema.safeParse(await tokenResponse.json());
+  if (!tokenData.success) {
+    logger.error(
+      'Discord Activity token exchange returned an unexpected payload',
+      {},
+      'DiscordActivity'
+    );
+    return NextResponse.json(
+      { error: 'Token exchange failed' },
+      { status: 502, headers: { 'Cache-Control': 'no-store' } }
+    );
+  }
 
   logger.info(
     'Discord Activity token exchange successful',
-    { scope: tokenData.scope },
+    { scope: tokenData.data.scope },
     'DiscordActivity'
   );
 
-  return NextResponse.json({ access_token: tokenData.access_token });
+  return NextResponse.json(
+    { access_token: tokenData.data.access_token },
+    { headers: { 'Cache-Control': 'no-store' } }
+  );
 });

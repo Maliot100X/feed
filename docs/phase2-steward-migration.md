@@ -937,10 +937,10 @@ export async function POST(req: NextRequest) {
 
 Remove `useLinkAccount` from `@privy-io/react-auth`. Replace per platform:
 
-- **Google/Discord/Twitter**: Redirect to Steward OAuth with extra `mode=link&feedUserId=${userId}` query params (Steward stores these in state; after OAuth completes, Feed callback calls `POST /api/users/[userId]/link-social`)
-- **Telegram**: Telegram Login Widget (script embed) with callback → `/api/auth/telegram-miniapp` → `/api/users/[userId]/link-social`
+- **Google/Discord/Twitter**: Redirect to Steward OAuth with extra `mode=link&feedUserId=${userId}` query params (Steward stores these in state); the server-side OAuth callback persists the verified provider identity (Twitter: `/api/auth/twitter/callback`)
+- **Telegram**: Telegram Login Widget (script embed) with callback → `/api/auth/telegram-miniapp`
 
-The existing `POST /api/users/[userId]/link-social` route already supports non-wallet platforms. No changes needed to the route itself.
+The former `POST /api/users/[userId]/link-social` route was removed: it accepted a client-asserted handle without provider proof and awarded link reputation. Linking must go through a server-verified OAuth/login callback.
 
 ---
 

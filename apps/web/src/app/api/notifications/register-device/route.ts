@@ -18,6 +18,12 @@
 import { authenticate, withErrorHandling } from '@feed/api';
 import type { NextRequest } from 'next/server';
 import { NextResponse } from 'next/server';
+import { z } from 'zod';
+
+const RegisterDeviceSchema = z.object({
+  platform: z.enum(['ios', 'android']),
+  token: z.string().min(1).max(4096),
+});
 
 // Redis key prefix for device tokens
 const DEVICE_TOKEN_PREFIX = 'push:device:';
@@ -33,25 +39,17 @@ export const POST = withErrorHandling(async (request: NextRequest) => {
   const authUser = await authenticate(request);
   const userId = authUser.dbUserId ?? authUser.userId;
 
-  const body = await request.json();
-  const { platform, token } = body as {
-    platform?: string;
-    token?: string;
-  };
-
-  if (!platform || !token) {
+  const parsed = RegisterDeviceSchema.safeParse(await request.json());
+  if (!parsed.success) {
     return NextResponse.json(
-      { error: 'Missing required fields: platform, token' },
+      {
+        error:
+          'Invalid body: platform must be "ios" or "android" and token a non-empty string',
+      },
       { status: 400 }
     );
   }
-
-  if (platform !== 'ios' && platform !== 'android') {
-    return NextResponse.json(
-      { error: 'Invalid platform. Must be "ios" or "android".' },
-      { status: 400 }
-    );
-  }
+  const { platform, token } = parsed.data;
 
   const redis = await getRedis();
   if (!redis) {

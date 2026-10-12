@@ -21,9 +21,10 @@ import {
   userSessions,
 } from '@feed/db';
 import { logger, PATH_TO_ACTIVITY_TYPE } from '@feed/shared';
-import { and, eq, inArray, isNull, lt, sql } from 'drizzle-orm';
+import { and, eq, isNull, lt, sql } from 'drizzle-orm';
 import type { NextRequest } from 'next/server';
 import { NextResponse } from 'next/server';
+import { z } from 'zod';
 
 // Session timeout: 30 minutes of inactivity
 const SESSION_TIMEOUT_MS = 30 * 60 * 1000;
@@ -53,11 +54,16 @@ function cleanupRateLimitCache(): void {
   }
 }
 
-interface HeartbeatRequest {
-  sessionId: string;
-  pageViews?: number;
-  lastPath?: string;
-}
+const HeartbeatRequestSchema = z.object({
+  sessionId: z.string().min(1).max(100),
+  pageViews: z
+    .number()
+    .int()
+    .min(0)
+    .optional()
+    .transform((value) => Math.min(value ?? 0, MAX_PAGE_VIEWS_PER_HEARTBEAT)),
+  lastPath: z.string().max(2048).optional(),
+});
 
 function parseDeviceType(userAgent: string | null): string {
   if (!userAgent) return 'unknown';
@@ -69,10 +75,16 @@ function parseDeviceType(userAgent: string | null): string {
   return 'desktop';
 }
 
+/**
+ * Pseudonymize the client IP. Without a configured secret salt the hash would
+ * be trivially reversible (the IPv4 space is small), so no IP-derived value is
+ * stored at all in that case.
+ */
 async function hashIp(ip: string | null): Promise<string | null> {
-  if (!ip) return null;
+  const salt = process.env.IP_HASH_SALT;
+  if (!ip || !salt) return null;
   const encoder = new TextEncoder();
-  const data = encoder.encode(ip + (process.env.IP_HASH_SALT || 'feed'));
+  const data = encoder.encode(ip + salt);
   const hashBuffer = await crypto.subtle.digest('SHA-256', data);
   const hashArray = Array.from(new Uint8Array(hashBuffer));
   return hashArray.map((b) => b.toString(16).padStart(2, '0')).join('');
@@ -81,15 +93,8 @@ async function hashIp(ip: string | null): Promise<string | null> {
 export const POST = withErrorHandling(async (request: NextRequest) => {
   // Parse request body before auth handling so malformed/invalid payloads are
   // rejected consistently for all callers.
-  const body = (await request.json()) as HeartbeatRequest;
-  const { sessionId } = body;
-
-  if (!sessionId || typeof sessionId !== 'string' || sessionId.length > 100) {
-    return NextResponse.json(
-      { success: false, error: 'Invalid sessionId' },
-      { status: 400 }
-    );
-  }
+  const body = HeartbeatRequestSchema.parse(await request.json());
+  const { sessionId, pageViews } = body;
 
   // Verify auth via Privy JWT — returns null for unauthenticated/invalid tokens
   const authUser = await optionalAuth(request);
@@ -101,13 +106,6 @@ export const POST = withErrorHandling(async (request: NextRequest) => {
   }
 
   const validUserId: string = authUser.dbUserId;
-
-  // Validate and normalize pageViews (prevent abuse with large/negative values)
-  const rawPageViews = body.pageViews ?? 0;
-  const pageViews = Math.min(
-    Math.max(0, Math.floor(Number(rawPageViews) || 0)),
-    MAX_PAGE_VIEWS_PER_HEARTBEAT
-  );
 
   // Clean up stale rate limit cache entries (replaces module-scope setInterval)
   cleanupRateLimitCache();
@@ -121,8 +119,6 @@ export const POST = withErrorHandling(async (request: NextRequest) => {
     return NextResponse.json({ success: true, reason: 'rate_limited' });
   }
 
-  heartbeatCache.set(cacheKey, now);
-
   // Get device info
   const userAgentHeader = request.headers.get('user-agent');
   const deviceType = parseDeviceType(userAgentHeader);
@@ -135,8 +131,9 @@ export const POST = withErrorHandling(async (request: NextRequest) => {
     nowDate.getTime() - SESSION_TIMEOUT_MS
   );
 
-  // DB work (best-effort): if the session tables are missing/mis-migrated in a
-  // given environment, we don't want to hard-fail the user flow.
+  // DB work: if the session tables are missing/mis-migrated in a given
+  // environment, report a retryable telemetry failure (the client heartbeat is
+  // fire-and-forget, so browsing is not blocked) and log it loudly.
   try {
     // Helper to create a new session record
     async function createSession(): Promise<void> {
@@ -195,11 +192,13 @@ export const POST = withErrorHandling(async (request: NextRequest) => {
       await createSession();
     }
 
-    // Log activity for retention tracking (one row per user per day)
+    // Log activity for retention tracking (one row per user per UTC day)
     const activityDate = new Date(
-      nowDate.getFullYear(),
-      nowDate.getMonth(),
-      nowDate.getDate()
+      Date.UTC(
+        nowDate.getUTCFullYear(),
+        nowDate.getUTCMonth(),
+        nowDate.getUTCDate()
+      )
     );
 
     const activityLogId = await generateSnowflakeId();
@@ -238,9 +237,15 @@ export const POST = withErrorHandling(async (request: NextRequest) => {
           })
           .onConflictDoNothing();
 
-        void checkProgress(validUserId, {
+        checkProgress(validUserId, {
           type: 'page_visited',
           activityType: pageActivityType,
+        }).catch((error: Error) => {
+          logger.warn(
+            'Achievement progress check failed',
+            { userId: validUserId, errorMessage: error.message },
+            'POST /api/activity/heartbeat'
+          );
         });
       }
     }
@@ -253,16 +258,22 @@ export const POST = withErrorHandling(async (request: NextRequest) => {
     if (code === '42P01' || code === '42703') {
       const errorMessage =
         error instanceof Error ? error.message : String(error);
-      logger.warn(
-        'Heartbeat DB unavailable (degraded)',
+      logger.error(
+        'Heartbeat DB schema unavailable (session tables missing or not migrated)',
         { code, errorMessage },
         'POST /api/activity/heartbeat'
       );
-      return NextResponse.json({ success: true, reason: 'db_unavailable' });
+      return NextResponse.json(
+        { success: false, reason: 'db_unavailable' },
+        { status: 503 }
+      );
     }
 
     throw error;
   }
+
+  // Only rate-limit after a successful write so a failed write can be retried.
+  heartbeatCache.set(cacheKey, now);
 
   // Opportunistically close stale sessions (non-blocking, ~25% of requests)
   // Higher probability ensures timely cleanup during low-traffic periods
@@ -286,30 +297,12 @@ export const POST = withErrorHandling(async (request: NextRequest) => {
 
 /**
  * Cleanup job to close stale sessions.
- * Called opportunistically during heartbeat requests.
- *
- * Returns the sessions that were closed (for logging purposes)
+ * Called opportunistically during heartbeat requests. A single conditional
+ * update; the lastActiveAt predicate keeps it safe against concurrent
+ * heartbeats that refresh a session between scheduling and execution.
  */
-async function closeStaleSessionsInternal(): Promise<{ id: string }[]> {
+async function closeStaleSessionsInternal(): Promise<void> {
   const threshold = new Date(Date.now() - SESSION_TIMEOUT_MS);
-
-  // Find stale sessions first
-  const staleSessions = await db.query.userSessions.findMany({
-    where: and(
-      isNull(userSessions.endedAt),
-      lt(userSessions.lastActiveAt, threshold)
-    ),
-    columns: {
-      id: true,
-      lastActiveAt: true,
-    },
-  });
-
-  if (staleSessions.length === 0) {
-    return [];
-  }
-
-  const staleSessionIds = staleSessions.map((s) => s.id);
 
   await db
     .update(userSessions)
@@ -319,10 +312,7 @@ async function closeStaleSessionsInternal(): Promise<{ id: string }[]> {
     .where(
       and(
         isNull(userSessions.endedAt),
-        lt(userSessions.lastActiveAt, threshold),
-        inArray(userSessions.id, staleSessionIds)
+        lt(userSessions.lastActiveAt, threshold)
       )
     );
-
-  return staleSessions.map((s) => ({ id: s.id }));
 }

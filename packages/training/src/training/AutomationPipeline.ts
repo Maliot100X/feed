@@ -55,6 +55,9 @@ function hasLocalStorage(): boolean {
   return process.env.DEPLOYMENT_PLATFORM !== 'cloudflare';
 }
 
+/** Minimum number of distinct scenario groups required for training diversity. */
+const MIN_SCENARIO_GROUPS = 10;
+
 export class AutomationPipeline {
   private config: AutomationConfig;
   private currentTrainingJob: string | null = null;
@@ -162,6 +165,11 @@ export class AutomationPipeline {
       scenarioGroups: validGroups.length,
       dataQuality: quality,
     };
+    const thresholds = {
+      minTrajectories: this.config.minTrajectoriesForTraining,
+      minScenarioGroups: MIN_SCENARIO_GROUPS,
+      minDataQuality: this.config.dataQualityThreshold,
+    };
 
     // Check if ready using SCORED trajectories
     if (scoredAndReady < this.config.minTrajectoriesForTraining) {
@@ -169,15 +177,17 @@ export class AutomationPipeline {
         ready: false,
         reason: `Need ${this.config.minTrajectoriesForTraining - scoredAndReady} more trajectories`,
         stats,
+        thresholds,
       };
     }
 
     // Check minimum scenario groups for diversity
-    if (validGroups.length < 10) {
+    if (validGroups.length < MIN_SCENARIO_GROUPS) {
       return {
         ready: false,
-        reason: `Need more scenario groups (${validGroups.length}/10 minimum)`,
+        reason: `Need more scenario groups (${validGroups.length}/${MIN_SCENARIO_GROUPS} minimum)`,
         stats,
+        thresholds,
       };
     }
 
@@ -187,6 +197,7 @@ export class AutomationPipeline {
         ready: false,
         reason: `Data quality too low (${(quality * 100).toFixed(1)}% < ${this.config.dataQualityThreshold * 100}%)`,
         stats,
+        thresholds,
       };
     }
 
@@ -194,6 +205,7 @@ export class AutomationPipeline {
       ready: true,
       reason: 'Ready to train!',
       stats,
+      thresholds,
     };
   }
 

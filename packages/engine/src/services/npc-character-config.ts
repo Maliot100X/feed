@@ -44,8 +44,6 @@ export interface CharacterConfig {
   rivals: string[];
   /** Voice patterns to check for consistency (derived from postStyle) */
   voicePatterns: RegExp[];
-  /** Anti-patterns - things this character would NEVER say */
-  antiPatterns: RegExp[];
   /** Example posts from actor data (actor.postExample) */
   templatePosts: string[];
   /** Probability of posting about off-domain topics (0-1) */
@@ -147,27 +145,38 @@ const OFFDOMAIN_PROBABILITIES: Record<PersonalityType, number> = {
  * Loads rivalries dynamically from StaticDataRegistry (pack data)
  * instead of a hardcoded array.
  */
-function buildRivalryMap(): Map<string, string[]> {
-  const map = new Map<string, string[]>();
-  const rivalries = StaticDataRegistry.getRivalries();
+function buildRivalryMap(
+  rivalries: readonly [string, string][]
+): Map<string, string[]> {
+  const sets = new Map<string, Set<string>>();
+  const add = (from: string, to: string) => {
+    const set = sets.get(from) ?? new Set<string>();
+    set.add(to);
+    sets.set(from, set);
+  };
 
+  // Symmetric edges are deduplicated (a-b and b-a listed once each side)
   for (const [a, b] of rivalries) {
-    map.set(a, [...(map.get(a) || []), b]);
-    map.set(b, [...(map.get(b) || []), a]);
+    if (a === b) continue;
+    add(a, b);
+    add(b, a);
   }
 
-  return map;
+  return new Map([...sets].map(([id, set]) => [id, [...set]]));
 }
 
-/** Lazily-built rivalry map — rebuilt each time it's accessed to reflect current pack data */
+/**
+ * Rivalry map cache keyed by the manifest's rivalries array identity, so a
+ * reload of the same pack ID (new manifest object) rebuilds the map.
+ */
 let _rivalryMapCache: Map<string, string[]> | null = null;
-let _rivalryMapPackId: string | null = null;
+let _rivalrySource: readonly [string, string][] | null = null;
 
 function getRivalryMap(): Map<string, string[]> {
-  const currentPackId = StaticDataRegistry.getPackId();
-  if (_rivalryMapCache === null || _rivalryMapPackId !== currentPackId) {
-    _rivalryMapCache = buildRivalryMap();
-    _rivalryMapPackId = currentPackId;
+  const rivalries = StaticDataRegistry.getRivalries();
+  if (_rivalryMapCache === null || _rivalrySource !== rivalries) {
+    _rivalryMapCache = buildRivalryMap(rivalries);
+    _rivalrySource = rivalries;
   }
   return _rivalryMapCache;
 }
@@ -176,7 +185,7 @@ function getRivalryMap(): Map<string, string[]> {
  * Domain keywords for topic matching
  * Maps broad domain categories to specific keywords
  */
-const DOMAIN_KEYWORDS: Record<string, string[]> = {
+const DOMAIN_KEYWORDS_TABLE: Record<string, string[]> = {
   ai: [
     'artificial intelligence',
     'machine learning',
@@ -222,11 +231,21 @@ const DOMAIN_KEYWORDS: Record<string, string[]> = {
   research: ['study', 'paper', 'science', 'academic'],
 };
 
+/** Own-property, case-insensitive lookup (avoids inherited keys like 'constructor') */
+const DOMAIN_KEYWORDS = new Map<string, string[]>(
+  Object.entries(DOMAIN_KEYWORDS_TABLE)
+);
+
+function getDomainKeywords(domain: string): string[] | undefined {
+  return DOMAIN_KEYWORDS.get(domain.toLowerCase().trim());
+}
+
 /**
- * Memoization cache for compiled voice patterns
- * Prevents recompiling regex on every getCharacterConfig() call
+ * Memoization cache for compiled voice patterns, keyed by the postStyle text
+ * itself so pack reloads / style changes never serve stale patterns.
  */
 const voicePatternsCache = new Map<string, RegExp[]>();
+const MAX_VOICE_PATTERN_CACHE = 1000;
 
 /**
  * Determine personality type from actor's personality field
@@ -255,21 +274,23 @@ function derivePersonalityType(
  * Creates regex patterns to check for characteristic voice elements
  * Uses memoization to avoid recompiling regex on every call
  */
-function deriveVoicePatterns(
-  actorId: string,
-  postStyle: string | undefined
-): RegExp[] {
+export function deriveVoicePatterns(postStyle: string | undefined): RegExp[] {
   if (!postStyle) return [];
 
   // Check cache first
-  const cached = voicePatternsCache.get(actorId);
-  if (cached) return cached;
+  const cached = voicePatternsCache.get(postStyle);
+  if (cached) return [...cached];
 
   const patterns: RegExp[] = [];
   const styleLower = postStyle.toLowerCase();
 
-  // Check for ALL CAPS style
-  if (styleLower.includes('all caps') || styleLower.includes('caps')) {
+  // Check for ALL CAPS style ("no caps" / "avoid all caps" are not requirements)
+  const capsRequested = /\ball[\s-]?caps\b/.test(styleLower);
+  const capsNegated =
+    /\b(no|never|avoid|without|not)\s+(?:in\s+)?(?:all[\s-]?)?caps\b/.test(
+      styleLower
+    );
+  if (capsRequested && !capsNegated) {
     patterns.push(/^[A-Z\s\d.,!?'"()-]+$/);
   }
 
@@ -282,25 +303,59 @@ function deriveVoicePatterns(
     patterns.push(/\.\.\.|—|–/);
   }
 
-  // Cache the compiled patterns
-  voicePatternsCache.set(actorId, patterns);
-  return patterns;
+  // Cache the compiled patterns (bounded)
+  if (voicePatternsCache.size >= MAX_VOICE_PATTERN_CACHE) {
+    voicePatternsCache.clear();
+  }
+  voicePatternsCache.set(postStyle, patterns);
+  return [...patterns];
 }
 
 /**
  * Default configuration for characters without specific config
  */
-const DEFAULT_CONFIG: CharacterConfig = {
+const DEFAULT_CONFIG: Readonly<CharacterConfig> = Object.freeze({
   temperature: 0.8,
   personalityType: 'default',
   domains: [],
   rivals: [],
   voicePatterns: [],
-  antiPatterns: [],
   templatePosts: [],
   offDomainProbability: 0.3,
   organicPostProbability: 0.15,
-};
+});
+
+function defaultConfig(): CharacterConfig {
+  return {
+    ...DEFAULT_CONFIG,
+    domains: [],
+    rivals: [],
+    voicePatterns: [],
+    templatePosts: [],
+  };
+}
+
+type RegistryActor = NonNullable<
+  ReturnType<typeof StaticDataRegistry.getActor>
+>;
+
+/**
+ * Derive a character configuration from registry actor data. Arrays are
+ * copied so callers cannot mutate registry/cache state.
+ */
+function buildCharacterConfig(actor: RegistryActor): CharacterConfig {
+  const personalityType = derivePersonalityType(actor.personality);
+  return {
+    temperature: PERSONALITY_TEMPERATURES[personalityType],
+    personalityType,
+    domains: [...(actor.domain || [])],
+    rivals: [...(getRivalryMap().get(actor.id) || [])],
+    voicePatterns: deriveVoicePatterns(actor.postStyle),
+    templatePosts: [...(actor.postExample || [])],
+    offDomainProbability: OFFDOMAIN_PROBABILITIES[personalityType],
+    organicPostProbability: ORGANIC_PROBABILITIES[personalityType],
+  };
+}
 
 /**
  * Get configuration for a specific character
@@ -308,6 +363,7 @@ const DEFAULT_CONFIG: CharacterConfig = {
  *
  * @param actorId - The actor's ID
  * @returns Full character configuration
+ * @throws when the actor is not in the registry
  */
 export function getCharacterConfig(actorId: string): CharacterConfig {
   const actor = StaticDataRegistry.getActor(actorId);
@@ -316,23 +372,7 @@ export function getCharacterConfig(actorId: string): CharacterConfig {
     throw new Error(`Actor '${actorId}' not found in StaticDataRegistry`);
   }
 
-  const personalityType = derivePersonalityType(actor.personality);
-  const domains = actor.domain || [];
-  const rivals = getRivalryMap().get(actorId) || [];
-  const voicePatterns = deriveVoicePatterns(actorId, actor.postStyle);
-  const templatePosts = actor.postExample || [];
-
-  return {
-    temperature: PERSONALITY_TEMPERATURES[personalityType],
-    personalityType,
-    domains,
-    rivals,
-    voicePatterns,
-    antiPatterns: [], // Could be derived from personality if needed
-    templatePosts,
-    offDomainProbability: OFFDOMAIN_PROBABILITIES[personalityType],
-    organicPostProbability: ORGANIC_PROBABILITIES[personalityType],
-  };
+  return buildCharacterConfig(actor);
 }
 
 /**
@@ -340,32 +380,11 @@ export function getCharacterConfig(actorId: string): CharacterConfig {
  * Use this variant when caller can handle missing actors gracefully.
  *
  * @param actorId - The actor's ID
- * @returns Full character configuration or default config
+ * @returns Full character configuration or a fresh copy of the default config
  */
 export function getCharacterConfigOrDefault(actorId: string): CharacterConfig {
   const actor = StaticDataRegistry.getActor(actorId);
-
-  if (!actor) {
-    return DEFAULT_CONFIG;
-  }
-
-  const personalityType = derivePersonalityType(actor.personality);
-  const domains = actor.domain || [];
-  const rivals = getRivalryMap().get(actorId) || [];
-  const voicePatterns = deriveVoicePatterns(actorId, actor.postStyle);
-  const templatePosts = actor.postExample || [];
-
-  return {
-    temperature: PERSONALITY_TEMPERATURES[personalityType],
-    personalityType,
-    domains,
-    rivals,
-    voicePatterns,
-    antiPatterns: [],
-    templatePosts,
-    offDomainProbability: OFFDOMAIN_PROBABILITIES[personalityType],
-    organicPostProbability: ORGANIC_PROBABILITIES[personalityType],
-  };
+  return actor ? buildCharacterConfig(actor) : defaultConfig();
 }
 
 /**
@@ -390,43 +409,27 @@ export function checkVoiceConsistency(
 ): {
   matchesVoice: boolean;
   matchedPatterns: string[];
-  violatedAntiPatterns: string[];
-  voiceScore: number;
+  /** Fraction of voice patterns matched; null when voice is unmeasured
+   * (no patterns configured, or empty content). */
+  voiceScore: number | null;
 } {
   const config = getCharacterConfigOrDefault(actorId);
 
-  const matchedPatterns: string[] = [];
-  const violatedAntiPatterns: string[] = [];
+  if (config.voicePatterns.length === 0 || !postContent.trim()) {
+    return { matchesVoice: true, matchedPatterns: [], voiceScore: null };
+  }
 
-  // Check voice patterns (positive)
+  const matchedPatterns: string[] = [];
   for (const pattern of config.voicePatterns) {
     if (pattern.test(postContent)) {
       matchedPatterns.push(pattern.source);
     }
   }
 
-  // Check anti-patterns (negative)
-  for (const pattern of config.antiPatterns) {
-    if (pattern.test(postContent)) {
-      violatedAntiPatterns.push(pattern.source);
-    }
-  }
-
-  // Calculate voice score
-  const voiceScore =
-    config.voicePatterns.length > 0
-      ? matchedPatterns.length / config.voicePatterns.length
-      : 1;
-
-  const matchesVoice =
-    violatedAntiPatterns.length === 0 &&
-    (config.voicePatterns.length === 0 || matchedPatterns.length > 0);
-
   return {
-    matchesVoice,
+    matchesVoice: matchedPatterns.length > 0,
     matchedPatterns,
-    violatedAntiPatterns,
-    voiceScore,
+    voiceScore: matchedPatterns.length / config.voicePatterns.length,
   };
 }
 
@@ -465,7 +468,7 @@ export function shouldPostAboutTopic(
   // Check ignoreTopics first - if actor explicitly ignores this topic, skip
   if (actor?.ignoreTopics && actor.ignoreTopics.length > 0) {
     const isIgnored = actor.ignoreTopics.some((ignoredTopic) => {
-      const keywords = DOMAIN_KEYWORDS[ignoredTopic] || [ignoredTopic];
+      const keywords = getDomainKeywords(ignoredTopic) || [ignoredTopic];
       return keywords.some((kw) =>
         matchesWholeWord(topicNormalized, normalizeText(kw))
       );
@@ -491,7 +494,7 @@ export function shouldPostAboutTopic(
     if (matchesWholeWord(topicNormalized, normalizeText(domain))) return true;
 
     // Domain keyword expansions
-    const keywords = DOMAIN_KEYWORDS[domain] || [];
+    const keywords = getDomainKeywords(domain) || [];
     return keywords.some((kw) =>
       matchesWholeWord(topicNormalized, normalizeText(kw))
     );
@@ -550,9 +553,14 @@ export function getTemplatePosts(
   count: number = 3,
   rng: RngFunction = Math.random
 ): string[] {
+  if (!Number.isInteger(count) || count < 0) {
+    throw new RangeError(
+      `Template count must be a non-negative integer: ${count}`
+    );
+  }
   const config = getCharacterConfigOrDefault(actorId);
 
-  if (config.templatePosts.length === 0) {
+  if (config.templatePosts.length === 0 || count === 0) {
     return [];
   }
 
@@ -568,7 +576,7 @@ export function getTemplatePosts(
  * @returns Array of rival actor IDs
  */
 export function getActorRivals(actorId: string): string[] {
-  return getRivalryMap().get(actorId) || [];
+  return [...(getRivalryMap().get(actorId) || [])];
 }
 
 /**
@@ -587,17 +595,6 @@ export function logVoiceMetrics(actorId: string, postContent: string): void {
         actorId,
         voiceScore: result.voiceScore,
         matchedPatterns: result.matchedPatterns.length,
-        violatedAntiPatterns: result.violatedAntiPatterns,
-        postPreview: postContent.slice(0, 100),
-      },
-      'VoiceMetrics'
-    );
-  } else if (result.voiceScore < 0.3 && result.matchedPatterns.length === 0) {
-    logger.debug(
-      'Low voice score (no distinctive patterns matched)',
-      {
-        actorId,
-        voiceScore: result.voiceScore,
         postPreview: postContent.slice(0, 100),
       },
       'VoiceMetrics'

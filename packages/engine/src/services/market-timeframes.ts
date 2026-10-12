@@ -57,7 +57,6 @@ import type {
   MarketCategory,
   MarketTimeframe,
 } from '@feed/db';
-import { logger } from '@feed/shared';
 import { clamp01 } from '../utils/math-utils';
 
 // Re-export types from DB schema for consumers of this module
@@ -103,24 +102,6 @@ export interface TimeframeConfig {
   postingMultiplier: number;
   /** Event generation probability multiplier */
   eventMultiplier: number;
-}
-
-/**
- * Sub-market spawn trigger
- */
-export interface SubMarketTrigger {
-  /** Event type that triggers spawn */
-  eventType: string;
-  /** Probability of spawning (0-1) */
-  spawnProbability: number;
-  /** Timeframe for spawned market */
-  childTimeframe: MarketTimeframe;
-  /** Template for generating question */
-  questionTemplate: string;
-  /** Duration modifier (multiplier on default) */
-  durationModifier?: number;
-  /** Template var key to use as the topic label (e.g., 'org', 'ticker', 'team') */
-  topicSourceVar?: string;
 }
 
 /**
@@ -310,216 +291,8 @@ export const TIMEFRAME_CONFIGS: Record<MarketTimeframe, TimeframeConfig> = {
 };
 
 // =============================================================================
-// SUB-MARKET TRIGGERS BY CATEGORY
-// =============================================================================
-
-/**
- * Trigger configurations for spawning sub-markets from events
- */
-export const SUB_MARKET_TRIGGERS: Record<MarketCategory, SubMarketTrigger[]> = {
-  tech: [
-    {
-      eventType: 'announcement',
-      spawnProbability: 0.8,
-      childTimeframe: 'intraday',
-      questionTemplate:
-        'Will {org} stock move more than {threshold}% following the announcement?',
-      topicSourceVar: 'org',
-    },
-    {
-      eventType: 'keynote_start',
-      spawnProbability: 0.9,
-      childTimeframe: 'flash',
-      questionTemplate:
-        'Will {actor} announce a new product in the first 30 minutes?',
-      topicSourceVar: 'actor',
-    },
-    {
-      eventType: 'product_leak',
-      spawnProbability: 0.6,
-      childTimeframe: 'daily',
-      questionTemplate: 'Will {org} confirm or deny the leak within 24 hours?',
-      topicSourceVar: 'org',
-    },
-    {
-      eventType: 'earnings_scheduled',
-      spawnProbability: 0.95,
-      childTimeframe: 'daily',
-      questionTemplate: 'Will {org} beat earnings estimates?',
-      topicSourceVar: 'org',
-    },
-  ],
-
-  crypto: [
-    {
-      eventType: 'price_breakout',
-      spawnProbability: 0.7,
-      childTimeframe: 'flash',
-      questionTemplate:
-        'Will {ticker} hold above {price} for the next 15 minutes?',
-      topicSourceVar: 'ticker',
-    },
-    {
-      eventType: 'whale_movement',
-      spawnProbability: 0.5,
-      childTimeframe: 'intraday',
-      questionTemplate: 'Will {ticker} move more than 5% in the next 4 hours?',
-      topicSourceVar: 'ticker',
-    },
-    {
-      eventType: 'protocol_upgrade',
-      spawnProbability: 0.8,
-      childTimeframe: 'daily',
-      questionTemplate: 'Will the {protocol} upgrade complete without issues?',
-      topicSourceVar: 'protocol',
-    },
-  ],
-
-  politics: [
-    {
-      eventType: 'vote_scheduled',
-      spawnProbability: 0.9,
-      childTimeframe: 'intraday',
-      questionTemplate: 'Will the bill pass the {chamber} vote?',
-      topicSourceVar: 'chamber',
-    },
-    {
-      eventType: 'debate',
-      spawnProbability: 0.8,
-      childTimeframe: 'flash',
-      questionTemplate:
-        'Will {candidate} mention {topic} in the first 30 minutes?',
-      topicSourceVar: 'candidate',
-    },
-    {
-      eventType: 'poll_release',
-      spawnProbability: 0.6,
-      childTimeframe: 'daily',
-      questionTemplate:
-        'Will {candidate} lead in the next major poll released?',
-      topicSourceVar: 'candidate',
-    },
-  ],
-
-  sports: [
-    {
-      eventType: 'game_start',
-      spawnProbability: 1.0,
-      childTimeframe: 'flash',
-      questionTemplate: 'Will {team} score first?',
-      topicSourceVar: 'team',
-    },
-    {
-      eventType: 'halftime',
-      spawnProbability: 0.9,
-      childTimeframe: 'flash',
-      questionTemplate: 'Will {team} win the second half?',
-      topicSourceVar: 'team',
-    },
-    {
-      eventType: 'injury_report',
-      spawnProbability: 0.7,
-      childTimeframe: 'daily',
-      questionTemplate: 'Will {player} play in the next game?',
-      topicSourceVar: 'player',
-    },
-  ],
-
-  business: [
-    {
-      eventType: 'merger_rumor',
-      spawnProbability: 0.7,
-      childTimeframe: 'weekly',
-      questionTemplate:
-        'Will {org1} and {org2} confirm merger talks this week?',
-      topicSourceVar: 'org1',
-    },
-    {
-      eventType: 'ipo_filing',
-      spawnProbability: 0.8,
-      childTimeframe: 'monthly',
-      questionTemplate: 'Will {company} price above ${price} per share?',
-      topicSourceVar: 'company',
-    },
-    {
-      eventType: 'ceo_resignation',
-      spawnProbability: 0.6,
-      childTimeframe: 'daily',
-      questionTemplate: 'Will {org} announce a replacement within 48 hours?',
-      topicSourceVar: 'org',
-    },
-  ],
-
-  entertainment: [
-    {
-      eventType: 'awards_ceremony',
-      spawnProbability: 0.9,
-      childTimeframe: 'flash',
-      questionTemplate: 'Will {nominee} win {award}?',
-      topicSourceVar: 'nominee',
-    },
-    {
-      eventType: 'release_weekend',
-      spawnProbability: 0.8,
-      childTimeframe: 'intraday',
-      questionTemplate:
-        'Will {movie} gross over ${amount}M in opening weekend?',
-      topicSourceVar: 'movie',
-    },
-  ],
-
-  science: [
-    {
-      eventType: 'launch_window',
-      spawnProbability: 0.9,
-      childTimeframe: 'flash',
-      questionTemplate: 'Will the {mission} launch successfully?',
-      topicSourceVar: 'mission',
-    },
-    {
-      eventType: 'fda_decision',
-      spawnProbability: 0.85,
-      childTimeframe: 'daily',
-      questionTemplate: 'Will {drug} receive FDA approval?',
-      topicSourceVar: 'drug',
-    },
-  ],
-
-  general: [
-    {
-      eventType: 'breaking_news',
-      spawnProbability: 0.5,
-      childTimeframe: 'intraday',
-      questionTemplate: 'Will this story develop further in the next 6 hours?',
-    },
-  ],
-};
-
-// =============================================================================
 // UTILITY FUNCTIONS
 // =============================================================================
-
-/**
- * Get timeframe from duration in minutes
- */
-export function getTimeframeFromDuration(
-  durationMinutes: number
-): MarketTimeframe {
-  // Use maxDurationMinutes from config to avoid gaps between timeframes
-  if (durationMinutes <= TIMEFRAME_CONFIGS.flash.maxDurationMinutes)
-    return 'flash';
-  if (durationMinutes <= TIMEFRAME_CONFIGS.intraday.maxDurationMinutes)
-    return 'intraday';
-  if (durationMinutes <= TIMEFRAME_CONFIGS.daily.maxDurationMinutes)
-    return 'daily';
-  if (durationMinutes <= TIMEFRAME_CONFIGS.weekly.maxDurationMinutes)
-    return 'weekly';
-  if (durationMinutes <= TIMEFRAME_CONFIGS.monthly.maxDurationMinutes)
-    return 'monthly';
-  if (durationMinutes <= TIMEFRAME_CONFIGS.quarterly.maxDurationMinutes)
-    return 'quarterly';
-  return 'longterm';
-}
 
 /**
  * Calculate end time from start and timeframe
@@ -542,7 +315,9 @@ export function calculateEndTime(
 }
 
 /**
- * Get current arc state based on elapsed time
+ * Get current arc state based on elapsed time.
+ *
+ * @throws Error if either date is invalid or endTime is not after startTime
  */
 export function getCurrentArcState(
   startTime: Date,
@@ -550,47 +325,46 @@ export function getCurrentArcState(
   timeframe: MarketTimeframe,
   now: Date = new Date()
 ): ArcStateType {
-  const config = TIMEFRAME_CONFIGS[timeframe];
-  const states = config.arcStates;
-
-  // Handle empty states array
-  if (states.length === 0) {
-    return 'setup';
+  const states = TIMEFRAME_CONFIGS[timeframe].arcStates;
+  const firstState = states[0];
+  const lastState = states[states.length - 1];
+  if (firstState === undefined || lastState === undefined) {
+    throw new Error(
+      `getCurrentArcState: no arcStates defined for timeframe '${timeframe}'`
+    );
   }
 
-  // Edge case: if before start time, return first state
-  if (now.getTime() <= startTime.getTime()) {
-    return (states[0] ?? 'setup') as ArcStateType;
+  const start = startTime.getTime();
+  const end = endTime.getTime();
+  const current = now.getTime();
+  if (!Number.isFinite(start) || !Number.isFinite(end)) {
+    throw new Error(
+      `getCurrentArcState: invalid start/end time for timeframe '${timeframe}'`
+    );
+  }
+  if (!Number.isFinite(current)) {
+    throw new Error('getCurrentArcState: invalid current time');
+  }
+  if (end <= start) {
+    throw new Error(
+      `getCurrentArcState: endTime must be after startTime for timeframe '${timeframe}'. ` +
+        `startTime: ${startTime.toISOString()}, endTime: ${endTime.toISOString()}`
+    );
   }
 
-  // Edge case: if at or after end time, return last state
-  if (now.getTime() >= endTime.getTime()) {
-    return (states[states.length - 1] ?? 'setup') as ArcStateType;
+  if (current <= start) {
+    return firstState as ArcStateType;
+  }
+  if (current >= end) {
+    return lastState as ArcStateType;
   }
 
-  const totalDuration = endTime.getTime() - startTime.getTime();
-
-  // Edge case: if duration is zero or negative, return last state
-  if (totalDuration <= 0) {
-    return (states[states.length - 1] ?? 'setup') as ArcStateType;
-  }
-
-  const elapsed = now.getTime() - startTime.getTime();
-  const progress = clamp01(elapsed / totalDuration);
-
-  // Map progress to state index
+  const progress = clamp01((current - start) / (end - start));
   const stateIndex = Math.min(
     states.length - 1,
     Math.floor(progress * states.length)
   );
-
-  // Safe access with guaranteed fallback
-  const state = states[stateIndex];
-  if (state !== undefined) {
-    return state as ArcStateType;
-  }
-  // Fallback should never happen given the Math.min above, but TypeScript requires it
-  return (states[0] ?? 'setup') as ArcStateType;
+  return (states[stateIndex] ?? lastState) as ArcStateType;
 }
 
 /**
@@ -613,6 +387,12 @@ export function getStateBoundaries(
 
   const totalDuration = endTime.getTime() - startTime.getTime();
 
+  if (!Number.isFinite(totalDuration)) {
+    throw new Error(
+      `getStateBoundaries: invalid start/end time for timeframe '${timeframe}'`
+    );
+  }
+
   // Guard against invalid time range (endTime must be after startTime)
   if (totalDuration <= 0) {
     throw new Error(
@@ -631,56 +411,6 @@ export function getStateBoundaries(
 }
 
 /**
- * Check if an event should spawn a sub-market
- *
- * @param eventType - The type of event that occurred
- * @param category - The market category
- * @param parentTimeframe - The parent market's timeframe
- * @param randomValue - Optional random value (0-1) for deterministic testing. Defaults to Math.random().
- */
-export function shouldSpawnSubMarket(
-  eventType: string,
-  category: MarketCategory,
-  parentTimeframe: MarketTimeframe,
-  randomValue?: number
-): SubMarketTrigger | null {
-  const config = TIMEFRAME_CONFIGS[parentTimeframe];
-
-  if (!config.canSpawnChildren) {
-    return null;
-  }
-
-  const triggers = SUB_MARKET_TRIGGERS[category] ?? [];
-  const matchingTrigger = triggers.find((t) => t.eventType === eventType);
-
-  if (!matchingTrigger) {
-    return null;
-  }
-
-  // Check if child timeframe is allowed
-  if (!config.childTimeframes.includes(matchingTrigger.childTimeframe)) {
-    return null;
-  }
-
-  // Check probability
-  const rand = randomValue ?? Math.random();
-  if (rand > matchingTrigger.spawnProbability) {
-    logger.debug(
-      `Sub-market spawn skipped (probability check failed)`,
-      {
-        eventType,
-        category,
-        probability: matchingTrigger.spawnProbability,
-      },
-      'MarketTimeframes'
-    );
-    return null;
-  }
-
-  return matchingTrigger;
-}
-
-/**
  * Get event cooldown for a timeframe
  */
 export function getEventCooldownMs(timeframe: MarketTimeframe): number {
@@ -689,101 +419,8 @@ export function getEventCooldownMs(timeframe: MarketTimeframe): number {
 }
 
 /**
- * Get posting multiplier for a timeframe
- */
-export function getPostingMultiplier(timeframe: MarketTimeframe): number {
-  return TIMEFRAME_CONFIGS[timeframe].postingMultiplier;
-}
-
-/**
  * Get event multiplier for a timeframe
  */
 export function getEventMultiplier(timeframe: MarketTimeframe): number {
   return TIMEFRAME_CONFIGS[timeframe].eventMultiplier;
 }
-
-/**
- * Validate market duration against timeframe constraints
- */
-export function validateDuration(
-  durationMinutes: number,
-  timeframe: MarketTimeframe
-): { valid: boolean; message?: string } {
-  const config = TIMEFRAME_CONFIGS[timeframe];
-
-  if (durationMinutes < config.minDurationMinutes) {
-    return {
-      valid: false,
-      message: `Duration ${durationMinutes}min is below minimum ${config.minDurationMinutes}min for ${timeframe}`,
-    };
-  }
-
-  if (durationMinutes > config.maxDurationMinutes) {
-    return {
-      valid: false,
-      message: `Duration ${durationMinutes}min exceeds maximum ${config.maxDurationMinutes}min for ${timeframe}`,
-    };
-  }
-
-  return { valid: true };
-}
-
-// =============================================================================
-// SERVICE CLASS
-// =============================================================================
-
-export class MarketTimeframeService {
-  getConfig(timeframe: MarketTimeframe): TimeframeConfig {
-    return TIMEFRAME_CONFIGS[timeframe];
-  }
-
-  getTimeframeFromDuration(durationMinutes: number): MarketTimeframe {
-    return getTimeframeFromDuration(durationMinutes);
-  }
-
-  calculateEndTime(
-    startTime: Date,
-    timeframe: MarketTimeframe,
-    durationModifier?: number
-  ): Date {
-    return calculateEndTime(startTime, timeframe, durationModifier);
-  }
-
-  getCurrentArcState(
-    startTime: Date,
-    endTime: Date,
-    timeframe: MarketTimeframe,
-    now?: Date
-  ): ArcStateType {
-    return getCurrentArcState(startTime, endTime, timeframe, now);
-  }
-
-  getStateBoundaries(
-    startTime: Date,
-    endTime: Date,
-    timeframe: MarketTimeframe
-  ): Array<{ state: string; start: Date; end: Date }> {
-    return getStateBoundaries(startTime, endTime, timeframe);
-  }
-
-  shouldSpawnSubMarket(
-    eventType: string,
-    category: MarketCategory,
-    parentTimeframe: MarketTimeframe,
-    randomValue?: number
-  ): SubMarketTrigger | null {
-    return shouldSpawnSubMarket(
-      eventType,
-      category,
-      parentTimeframe,
-      randomValue
-    );
-  }
-
-  getTriggers(category: MarketCategory): SubMarketTrigger[] {
-    return SUB_MARKET_TRIGGERS[category] ?? [];
-  }
-}
-
-// Singleton instance
-export const marketTimeframeService = new MarketTimeframeService();

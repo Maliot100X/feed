@@ -4,8 +4,7 @@ import { getSurplusConfig } from '@feed/shared';
  *
  * @description Uses LLM to intelligently group related trending tags together.
  * For example, "OpenAGI", "Sam AIltman", and "SMH-9000" become a single grouped trend.
- * Generates summaries for grouped trends and handles fallback logic when LLM
- * is unavailable.
+ * Generates summaries for grouped trends. Without an LLM, tags stay ungrouped.
  */
 
 import { logger } from '@feed/shared';
@@ -63,7 +62,7 @@ if (hasApiKey) {
   });
 } else if (!suppressOptionalLlmWarnings) {
   logger.warn(
-    'No LLM API key configured (GROQ_API_KEY or OPENAI_API_KEY) - trending grouping will use fallback logic',
+    'No LLM API key configured (GROQ_API_KEY or OPENAI_API_KEY) - trending tags will not be grouped',
     undefined,
     'TrendingGroupingService'
   );
@@ -100,36 +99,6 @@ export interface GroupedTrend {
   totalPostCount: number;
   summary: string;
   rank: number;
-}
-
-/**
- * Calculate estimated cost for LLM call (rough estimates)
- *
- * @description Estimates the cost of an LLM API call based on model and token count.
- * Uses approximate pricing for Groq (free) and OpenAI models.
- *
- * @param {string} model - Model identifier
- * @param {number} tokens - Number of tokens
- * @returns {number} Estimated cost in USD
- * @private
- */
-function calculateCost(model: string, tokens: number): number {
-  // Groq pricing (as of 2024): free tier, so $0
-  if (model.includes('llama')) {
-    return 0;
-  }
-
-  // OpenAI-compatible pricing (approximate, per 1M tokens)
-  // Standard models: $2.50 input, $10 output (average ~$6/1M)
-  // Mini models: $0.15 input, $0.60 output (average ~$0.375/1M)
-  if (model.includes('gpt-5-nano')) {
-    return (tokens / 1000000) * 0.375;
-  }
-  if (model.includes('gpt-5.1')) {
-    return (tokens / 1000000) * 6;
-  }
-
-  return 0;
 }
 
 /**
@@ -173,60 +142,58 @@ async function withRetry<T>(
 }
 
 /**
- * Fallback grouping logic based on category and post count similarity
- */
-function fallbackGrouping(tags: TrendingTag[]): Map<string, number> {
-  logger.info(
-    'Using fallback grouping logic (no LLM available)',
-    undefined,
-    'TrendingGroupingService'
-  );
-
-  // Simple heuristic: group tags in same category if they have similar post counts
-  const categoryGroups = new Map<string, TrendingTag[]>();
-
-  for (const tag of tags) {
-    const _category = tag.category || 'general';
-    if (!categoryGroups.has(_category)) {
-      categoryGroups.set(_category, []);
-    }
-    categoryGroups.get(_category)!.push(tag);
-  }
-
-  const tagToGroup = new Map<string, number>();
-  let groupId = 1;
-
-  for (const [_category, categoryTags] of categoryGroups.entries()) {
-    if (categoryTags.length >= 2) {
-      // Only group if tags have similar post counts (within 50%)
-      categoryTags.sort((a, b) => b.postCount - a.postCount);
-      for (let i = 0; i < categoryTags.length - 1; i++) {
-        const tag1 = categoryTags[i]!;
-        const tag2 = categoryTags[i + 1]!;
-        const ratio = tag2.postCount / tag1.postCount;
-
-        if (
-          ratio >= 0.5 &&
-          !tagToGroup.has(tag1.tag) &&
-          !tagToGroup.has(tag2.tag)
-        ) {
-          tagToGroup.set(tag1.tag, groupId);
-          tagToGroup.set(tag2.tag, groupId);
-          groupId++;
-        }
-      }
-    }
-  }
-
-  return tagToGroup;
-}
-
-/**
  * Result from combined grouping and summary analysis
  */
 interface GroupingWithSummary {
   tagToGroup: Map<string, number>;
   groupSummaries: Map<number, string>;
+}
+
+/**
+ * Parse the LLM grouping XML. Group IDs are assigned per <group> element (the
+ * model's own <id> values may repeat), only known input tags are accepted,
+ * each tag joins at most one group, and groups need 2+ distinct known tags.
+ */
+export function parseGroupingResponse(
+  content: string,
+  knownTagNames: readonly string[]
+): GroupingWithSummary {
+  const known = new Set(knownTagNames);
+  const xmlContent = content
+    .replace(/```xml\n?/g, '')
+    .replace(/```\n?/g, '')
+    .trim();
+
+  const tagToGroup = new Map<string, number>();
+  const groupSummaries = new Map<number, string>();
+  let nextGroupId = 1;
+
+  for (const groupMatch of xmlContent.matchAll(/<group>([\s\S]*?)<\/group>/g)) {
+    const groupContent = groupMatch[1];
+    if (!groupContent) continue;
+
+    const members = [
+      ...new Set(
+        [...groupContent.matchAll(/<tag>([\s\S]*?)<\/tag>/g)]
+          .map((m) => m[1]?.trim() ?? '')
+          .filter((name) => known.has(name) && !tagToGroup.has(name))
+      ),
+    ];
+    if (members.length < 2) continue;
+
+    const groupId = nextGroupId++;
+    for (const name of members) {
+      tagToGroup.set(name, groupId);
+    }
+    const summary = groupContent
+      .match(/<summary>([\s\S]*?)<\/summary>/)?.[1]
+      ?.trim();
+    if (summary) {
+      groupSummaries.set(groupId, summary);
+    }
+  }
+
+  return { tagToGroup, groupSummaries };
 }
 
 /**
@@ -244,9 +211,15 @@ async function analyzeAndSummarizeTags(
     return emptyResult;
   }
 
-  // If no LLM available, use fallback logic
+  // Without an LLM there is no evidence that tags share a story; leave them
+  // ungrouped rather than inventing groups from category/post-count similarity.
   if (!openai) {
-    return { tagToGroup: fallbackGrouping(tags), groupSummaries: new Map() };
+    logger.info(
+      'No LLM available - trending tags left ungrouped',
+      undefined,
+      'TrendingGroupingService'
+    );
+    return emptyResult;
   }
   // Store in local const after null check to help TypeScript narrow the type
   const client = openai;
@@ -358,16 +331,14 @@ Return ONLY valid XML. No markdown, no explanations.`;
   );
 
   const duration = Date.now() - startTime;
-  const tokensUsed = response.usage?.total_tokens || 0;
-  const estimatedCost = calculateCost(GROUPING_MODEL, tokensUsed);
 
   logger.debug(
     'LLM grouping call completed',
     {
       durationMs: duration,
       model: GROUPING_MODEL,
-      tokensUsed,
-      estimatedCostUSD: estimatedCost,
+      // undefined when the provider did not report usage (not "0 tokens")
+      tokensUsed: response.usage?.total_tokens,
     },
     'TrendingGroupingService'
   );
@@ -391,48 +362,10 @@ Return ONLY valid XML. No markdown, no explanations.`;
     throw new Error('Trending grouping returned empty content');
   }
 
-  // Parse XML response
-  const xmlContent = content
-    .replace(/```xml\n?/g, '')
-    .replace(/```\n?/g, '')
-    .trim();
-
-  const tagToGroup = new Map<string, number>();
-  const groupSummaries = new Map<number, string>();
-
-  // Extract groups from XML
-  const groupMatches = xmlContent.matchAll(/<group>([\s\S]*?)<\/group>/g);
-
-  for (const groupMatch of groupMatches) {
-    const groupContent = groupMatch[1];
-    if (!groupContent) continue;
-
-    const idMatch = groupContent.match(/<id>(\d+)<\/id>/);
-    const summaryMatch = groupContent.match(/<summary>(.*?)<\/summary>/);
-    const tagMatches = groupContent.matchAll(/<tag>(.*?)<\/tag>/g);
-
-    if (!idMatch || !idMatch[1]) continue;
-
-    const groupId = Number.parseInt(idMatch[1], 10);
-    const tagNames: string[] = [];
-
-    for (const tagMatch of tagMatches) {
-      if (tagMatch[1]) {
-        tagNames.push(tagMatch[1].trim());
-      }
-    }
-
-    // Only process groups with 2+ tags
-    if (tagNames.length < 2) continue;
-
-    for (const tagName of tagNames) {
-      tagToGroup.set(tagName, groupId);
-    }
-
-    if (summaryMatch && summaryMatch[1]) {
-      groupSummaries.set(groupId, summaryMatch[1].trim());
-    }
-  }
+  const { tagToGroup, groupSummaries } = parseGroupingResponse(
+    content,
+    tags.map((t) => t.tag)
+  );
 
   logger.info(
     'LLM grouping analysis complete',
@@ -513,16 +446,13 @@ One sentence summary:`;
     'Single trend summary generation'
   );
   const duration = Date.now() - startTime;
-  const tokensUsed = response.usage?.total_tokens || 0;
-  const estimatedCost = calculateCost(SUMMARY_MODEL, tokensUsed);
 
   logger.debug(
     'LLM single summary call completed',
     {
       durationMs: duration,
       model: SUMMARY_MODEL,
-      tokensUsed,
-      estimatedCostUSD: estimatedCost,
+      tokensUsed: response.usage?.total_tokens,
     },
     'TrendingGroupingService'
   );

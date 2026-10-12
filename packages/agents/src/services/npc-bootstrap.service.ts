@@ -172,34 +172,38 @@ export class NPCBootstrapService {
     let registered = false;
     let initialized = false;
 
-    // Check if already registered
+    // Load ActorData from JSON files for rich configuration
+    const actorData: ActorData | null = loadActorById(actor.id);
+    if (!actorData) {
+      throw new Error(`ActorData not found for actor ${actor.id}`);
+    }
+
+    // Try to get full PackActor for richer Eliza character fields
+    const packActor = StaticDataRegistry.getPackActor(actor.id);
+
+    // Build NPC system prompt — prefer PackActor system prompt if available
+    const systemPrompt = packActor?.system
+      ? packActor.system
+      : this.buildNpcSystemPrompt(actorData);
+
+    // Build NPC capabilities from ActorData
+    const capabilities = this.buildNpcCapabilities(actorData);
+
     const existing = await agentRegistry.getAgentById(actor.id);
     if (existing) {
+      // Keep the registration in sync with the current canonical config so a
+      // refresh actually applies prompt/capability changes.
+      await agentRegistry.updateNpcAgentConfig({
+        actorId: actor.id,
+        systemPrompt,
+        capabilities,
+      });
       logger.debug(
-        `NPC ${actor.id} already registered, initializing runtime only`,
+        `NPC ${actor.id} already registered, configuration updated`,
         undefined,
         'NPCBootstrapService'
       );
-      // Skip registration but still initialize runtime
     } else {
-      // Load ActorData from JSON files for rich configuration
-      const actorData: ActorData | null = loadActorById(actor.id);
-      if (!actorData) {
-        throw new Error(`ActorData not found for actor ${actor.id}`);
-      }
-
-      // Try to get full PackActor for richer Eliza character fields
-      const packActor = StaticDataRegistry.getPackActor(actor.id);
-
-      // Build NPC system prompt — prefer PackActor system prompt if available
-      const systemPrompt = packActor?.system
-        ? packActor.system
-        : this.buildNpcSystemPrompt(actorData);
-
-      // Build NPC capabilities from ActorData
-      const capabilities = this.buildNpcCapabilities(actorData);
-
-      // Register NPC in AgentRegistry
       await agentRegistry.registerNpcAgent({
         actorId: actor.id,
         systemPrompt,

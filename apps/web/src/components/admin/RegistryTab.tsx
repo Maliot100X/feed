@@ -15,10 +15,9 @@ import {
   Users,
 } from 'lucide-react';
 import Link from 'next/link';
-import { useCallback, useEffect, useState } from 'react';
+import { useEffect, useState } from 'react';
 import { toast } from 'sonner';
 import { z } from 'zod';
-import { FeedbackForm } from '@/components/feedback/FeedbackForm';
 import { Avatar } from '@/components/shared/Avatar';
 import { SearchBar } from '@/components/shared/SearchBar';
 import { Skeleton } from '@/components/shared/Skeleton';
@@ -128,61 +127,64 @@ export function RegistryTab() {
   const [selectedEntity, setSelectedEntity] = useState<RegistryEntity | null>(
     null
   );
-  const [showFeedbackModal, setShowFeedbackModal] = useState(false);
+  // Bumped to force a refetch with the current search (retry/after ban).
+  const [refreshKey, setRefreshKey] = useState(0);
   const [showBanModal, setShowBanModal] = useState(false);
   const [banReason, setBanReason] = useState('');
   const [isScammer, setIsScammer] = useState(false);
   const [isCSAM, setIsCSAM] = useState(false);
   const [isBanning, setIsBanning] = useState(false);
 
-  const fetchRegistry = useCallback(() => {
-    setLoading(true);
-    setError(null);
+  const fetchRegistry = () => setRefreshKey((key) => key + 1);
 
-    const params = new URLSearchParams();
-    if (search) params.set('search', search);
+  // Single fetch path: debounced while typing, immediate otherwise. The
+  // abort on cleanup guarantees an older search cannot overwrite a newer one.
+  // biome-ignore lint/correctness/useExhaustiveDependencies: refreshKey is an intentional refetch trigger
+  useEffect(() => {
+    const controller = new AbortController();
+    const timer = setTimeout(
+      () => {
+        setLoading(true);
+        setError(null);
 
-    fetch(apiUrl(`/api/registry/all?${params}`))
-      .then((response) => {
-        if (!response.ok) {
-          return response.json().then((errorData) => {
-            throw new Error(errorData.error || 'Failed to fetch registry data');
+        const params = new URLSearchParams();
+        if (search) params.set('search', search);
+
+        fetch(apiUrl(`/api/registry/all?${params}`), {
+          signal: controller.signal,
+        })
+          .then(async (response) => {
+            const body: unknown = await response.json();
+            if (!response.ok) {
+              const message =
+                body &&
+                typeof body === 'object' &&
+                'error' in body &&
+                typeof body.error === 'string'
+                  ? body.error
+                  : `Failed to fetch registry data (HTTP ${response.status})`;
+              throw new Error(message);
+            }
+            // The API returns data directly, not wrapped in { success, data }
+            setData(RegistryDataSchema.parse(body));
+          })
+          .catch((err: Error) => {
+            if (controller.signal.aborted) return;
+            setError(err.message || 'Failed to fetch registry data');
+          })
+          .finally(() => {
+            if (!controller.signal.aborted) setLoading(false);
           });
-        }
-        return response.json();
-      })
-      .then((result) => {
-        // The API returns data directly, not wrapped in { success, data }
-        const validated = RegistryDataSchema.parse(result);
-        setData(validated);
-      })
-      .catch((err: Error) => {
-        setError(err.message || 'Failed to fetch registry data');
-      })
-      .finally(() => {
-        setLoading(false);
-      });
-  }, [search]);
+      },
+      search ? 300 : 0
+    );
+    return () => {
+      clearTimeout(timer);
+      controller.abort();
+    };
+  }, [search, refreshKey]);
 
-  useEffect(() => {
-    fetchRegistry();
-  }, [fetchRegistry]);
-
-  // Debounced re-fetch when search changes (with 300ms delay)
-  useEffect(() => {
-    if (!search) return; // Skip if no filters applied
-    const timer = setTimeout(() => {
-      fetchRegistry();
-    }, 300);
-    return () => clearTimeout(timer);
-  }, [search, fetchRegistry]);
-
-  const renderBadge = (
-    _type: string,
-    label: string,
-    icon: React.ReactNode,
-    color: string
-  ) => {
+  const renderBadge = (label: string, icon: React.ReactNode, color: string) => {
     return (
       <span
         className={cn(
@@ -238,7 +240,13 @@ export function RegistryTab() {
               <div className="flex items-start justify-between gap-2">
                 <div className="min-w-0 flex-1">
                   <h3 className="truncate font-bold text-foreground text-lg">
-                    {entity.name}
+                    {profileUrl ? (
+                      <Link href={profileUrl} className="hover:underline">
+                        {entity.name}
+                      </Link>
+                    ) : (
+                      entity.name
+                    )}
                   </h3>
                   {entity.username && (
                     <p className="text-muted-foreground text-sm">
@@ -249,28 +257,24 @@ export function RegistryTab() {
                 <div className="shrink-0">
                   {entity.type === 'user' &&
                     renderBadge(
-                      'user',
                       'User',
                       <UserCircle className="h-3 w-3" />,
                       getBadgeColor()
                     )}
                   {entity.type === 'actor' &&
                     renderBadge(
-                      'actor',
                       'Actor',
                       <Users className="h-3 w-3" />,
                       getBadgeColor()
                     )}
                   {entity.type === 'agent' &&
                     renderBadge(
-                      'agent',
                       'Agent',
                       <Bot className="h-3 w-3" />,
                       getBadgeColor()
                     )}
                   {entity.type === 'app' &&
                     renderBadge(
-                      'app',
                       'App',
                       <Building2 className="h-3 w-3" />,
                       getBadgeColor()
@@ -547,24 +551,9 @@ export function RegistryTab() {
       </>
     );
 
-    if (profileUrl) {
-      return (
-        <Link
-          key={entity.id}
-          href={profileUrl}
-          className={cn(
-            'block overflow-hidden rounded-2xl border border-border bg-card transition-all duration-200',
-            'cursor-pointer hover:border-primary/50 hover:shadow-lg'
-          )}
-        >
-          {cardContent}
-        </Link>
-      );
-    }
-
     return (
       <div
-        key={entity.id}
+        key={`${entity.type}:${entity.id}`}
         className="block overflow-hidden rounded-2xl border border-border bg-card transition-all duration-200 hover:border-primary/50 hover:shadow-lg"
       >
         {cardContent}
@@ -582,40 +571,57 @@ export function RegistryTab() {
     }
 
     setIsBanning(true);
-    const token = getAuthToken();
-    const response = await fetch(apiUrl(`/api/admin/users/${entity.id}/ban`), {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        ...(token ? { Authorization: `Bearer ${token}` } : {}),
-      },
-      body: JSON.stringify({
-        action,
-        reason: action === 'ban' ? banReason : undefined,
-        isScammer: action === 'ban' ? isScammer : false,
-        isCSAM: action === 'ban' ? isCSAM : false,
-      }),
-    });
+    try {
+      const token = getAuthToken();
+      const response = await fetch(
+        apiUrl(`/api/admin/users/${encodeURIComponent(entity.id)}/ban`),
+        {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            ...(token ? { Authorization: `Bearer ${token}` } : {}),
+          },
+          body: JSON.stringify({
+            action,
+            reason: action === 'ban' ? banReason : undefined,
+            isScammer: action === 'ban' ? isScammer : false,
+            isCSAM: action === 'ban' ? isCSAM : false,
+          }),
+        }
+      );
 
-    if (!response.ok) {
-      const error = await response.json();
+      if (!response.ok) {
+        const body: unknown = await response.json().catch(() => null);
+        const message =
+          body && typeof body === 'object'
+            ? 'error' in body && typeof body.error === 'string'
+              ? body.error
+              : 'message' in body && typeof body.message === 'string'
+                ? body.message
+                : null
+            : null;
+        toast.error(
+          message ?? `Failed to update user (HTTP ${response.status})`
+        );
+        return;
+      }
+
+      toast.success(
+        action === 'ban'
+          ? 'User banned successfully'
+          : 'User unbanned successfully'
+      );
+      setShowBanModal(false);
+      setBanReason('');
+      setIsScammer(false);
+      setIsCSAM(false);
+      setSelectedEntity(null);
+      fetchRegistry();
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : 'Failed to update user');
+    } finally {
       setIsBanning(false);
-      toast.error(error.message || 'Failed to update user');
-      return;
     }
-
-    toast.success(
-      action === 'ban'
-        ? 'User banned successfully'
-        : 'User unbanned successfully'
-    );
-    setShowBanModal(false);
-    setBanReason('');
-    setIsScammer(false);
-    setIsCSAM(false);
-    setSelectedEntity(null);
-    fetchRegistry();
-    setIsBanning(false);
   };
 
   const allEntities = data
@@ -821,33 +827,6 @@ export function RegistryTab() {
         </>
       )}
 
-      {/* Feedback Modal */}
-      {showFeedbackModal && selectedEntity && (
-        <div className="fixed inset-0 z-[110] flex items-center justify-center bg-black/50 p-4">
-          <div className="w-full max-w-md rounded-2xl border border-border bg-card p-6">
-            <h2 className="mb-4 font-bold text-xl">Give Feedback</h2>
-            <p className="mb-4 text-muted-foreground">
-              Rate <strong>{selectedEntity.name}</strong>
-            </p>
-
-            <FeedbackForm
-              toUserId={selectedEntity.id}
-              toUserName={selectedEntity.name}
-              category="general"
-              onSuccess={() => {
-                setShowFeedbackModal(false);
-                setSelectedEntity(null);
-                fetchRegistry();
-              }}
-              onCancel={() => {
-                setShowFeedbackModal(false);
-                setSelectedEntity(null);
-              }}
-            />
-          </div>
-        </div>
-      )}
-
       {/* Ban Modal */}
       {showBanModal && selectedEntity && (
         <div className="fixed inset-0 z-[110] flex items-center justify-center bg-black/50 p-4">
@@ -922,6 +901,8 @@ export function RegistryTab() {
 
             <div className="flex gap-3">
               <button
+                type="button"
+                disabled={isBanning}
                 onClick={() => {
                   setShowBanModal(false);
                   setBanReason('');

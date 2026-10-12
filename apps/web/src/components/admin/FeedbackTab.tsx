@@ -145,8 +145,14 @@ export function FeedbackTab() {
     offset: 0,
     hasMore: false,
   });
-  const [syncing, setSyncing] = useState(false);
-  const [syncError, setSyncError] = useState<string | null>(null);
+  // Bumped by Refresh/Try again to force a refetch with unchanged filters.
+  const [refreshKey, setRefreshKey] = useState(0);
+  // Sync state is keyed to the feedback item so A's failure never shows on B.
+  const [syncingId, setSyncingId] = useState<string | null>(null);
+  const [syncError, setSyncError] = useState<{
+    id: string;
+    message: string;
+  } | null>(null);
 
   // Debounce search query
   useEffect(() => {
@@ -156,8 +162,12 @@ export function FeedbackTab() {
     return () => clearTimeout(timer);
   }, [searchQuery]);
 
-  // Fetch feedback when filters change (single consolidated effect)
+  // Fetch feedback when filters change or a refresh is requested.
+  // Aborting on cleanup ensures a late response for an old filter/search
+  // can never overwrite the current results.
+  // biome-ignore lint/correctness/useExhaustiveDependencies: refreshKey is an intentional refetch trigger
   useEffect(() => {
+    const controller = new AbortController();
     const fetchFeedback = async () => {
       setLoading(true);
       setError(null);
@@ -175,27 +185,37 @@ export function FeedbackTab() {
         params.set('search', debouncedSearch.trim());
       }
 
-      const response = await fetch(apiUrl(`/api/admin/feedback?${params}`));
-      if (!response.ok) {
-        logger.error(
-          'Failed to fetch feedback',
-          { status: response.status },
-          'FeedbackTab'
-        );
-        setError(`Failed to load feedback (${response.status})`);
-        setLoading(false);
-        return;
-      }
+      try {
+        const response = await fetch(apiUrl(`/api/admin/feedback?${params}`), {
+          signal: controller.signal,
+        });
+        if (!response.ok) {
+          logger.error(
+            'Failed to fetch feedback',
+            { status: response.status },
+            'FeedbackTab'
+          );
+          setError(`Failed to load feedback (${response.status})`);
+          return;
+        }
 
-      const data: FeedbackResponse = await response.json();
-      setFeedback(data.feedback);
-      setStats(data.stats);
-      setPagination(data.pagination);
-      setLoading(false);
+        const data: FeedbackResponse = await response.json();
+        setFeedback(data.feedback);
+        setStats(data.stats);
+        setPagination(data.pagination);
+      } catch (err) {
+        if (controller.signal.aborted) return;
+        setError(
+          err instanceof Error ? err.message : 'Failed to load feedback'
+        );
+      } finally {
+        if (!controller.signal.aborted) setLoading(false);
+      }
     };
 
-    fetchFeedback();
-  }, [typeFilter, linearFilter, debouncedSearch]);
+    void fetchFeedback();
+    return () => controller.abort();
+  }, [typeFilter, linearFilter, debouncedSearch, refreshKey]);
 
   // Escape key to close modal
   useEffect(() => {
@@ -209,47 +229,60 @@ export function FeedbackTab() {
 
   // Manual refresh function for button
   const handleRefresh = () => {
-    setDebouncedSearch(searchQuery); // Trigger refetch
+    setDebouncedSearch(searchQuery);
+    setRefreshKey((key) => key + 1);
   };
 
   // Retry Linear sync for a feedback item
-  const handleRetrySync = useCallback(async (feedbackId: string) => {
-    setSyncing(true);
-    setSyncError(null);
+  const handleRetrySync = useCallback(
+    async (feedbackId: string) => {
+      setSyncingId(feedbackId);
+      setSyncError(null);
 
-    const response = await fetch(
-      `/api/admin/feedback/${feedbackId}/retry-sync`,
-      { method: 'POST' }
-    );
+      try {
+        const response = await fetch(
+          apiUrl(
+            `/api/admin/feedback/${encodeURIComponent(feedbackId)}/retry-sync`
+          ),
+          { method: 'POST' }
+        );
 
-    if (!response.ok) {
-      const errorText = await response.text();
-      setSyncError(`Sync failed: ${errorText}`);
-      setSyncing(false);
-      return;
-    }
+        if (!response.ok) {
+          const errorText = await response.text();
+          setSyncError({
+            id: feedbackId,
+            message: `Sync failed (HTTP ${response.status}): ${errorText}`,
+          });
+          return;
+        }
 
-    const data = await response.json();
+        const data: { linearIssue?: FeedbackItem['linearIssue'] } =
+          await response.json();
+        const linearIssue = data.linearIssue;
+        if (!linearIssue) return;
 
-    // Update the feedback item in the list with the new Linear issue
-    if (data.linearIssue) {
-      setFeedback((prev) =>
-        prev.map((item) =>
-          item.id === feedbackId
-            ? { ...item, linearIssue: data.linearIssue }
-            : item
-        )
-      );
-      // Also update selected feedback if it's the same item
-      setSelectedFeedback((prev) =>
-        prev?.id === feedbackId
-          ? { ...prev, linearIssue: data.linearIssue }
-          : prev
-      );
-    }
-
-    setSyncing(false);
-  }, []);
+        // A synced item no longer belongs in the "not synced" view.
+        setFeedback((prev) =>
+          linearFilter === 'not_synced'
+            ? prev.filter((item) => item.id !== feedbackId)
+            : prev.map((item) =>
+                item.id === feedbackId ? { ...item, linearIssue } : item
+              )
+        );
+        setSelectedFeedback((prev) =>
+          prev?.id === feedbackId ? { ...prev, linearIssue } : prev
+        );
+      } catch (err) {
+        setSyncError({
+          id: feedbackId,
+          message: err instanceof Error ? err.message : 'Sync failed',
+        });
+      } finally {
+        setSyncingId((current) => (current === feedbackId ? null : current));
+      }
+    },
+    [linearFilter]
+  );
 
   const getTypeConfig = (type: string): FeedbackTypeUIConfig => {
     return (
@@ -600,15 +633,23 @@ export function FeedbackTab() {
             <div className="mb-4">
               <h4 className="mb-2 font-medium text-sm">Linear Issue</h4>
               {selectedFeedback.linearIssue ? (
-                <a
-                  href={selectedFeedback.linearIssue.url ?? '#'}
-                  target="_blank"
-                  rel="noopener noreferrer"
-                  className="inline-flex items-center gap-2 rounded-lg bg-primary/10 px-3 py-2 text-primary text-sm hover:bg-primary/20"
-                >
-                  <ExternalLink className="h-4 w-4" />
-                  {selectedFeedback.linearIssue.identifier}
-                </a>
+                selectedFeedback.linearIssue.url?.startsWith('https://') ? (
+                  <a
+                    href={selectedFeedback.linearIssue.url}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="inline-flex items-center gap-2 rounded-lg bg-primary/10 px-3 py-2 text-primary text-sm hover:bg-primary/20"
+                  >
+                    <ExternalLink className="h-4 w-4" />
+                    {selectedFeedback.linearIssue.identifier ??
+                      selectedFeedback.linearIssue.id}
+                  </a>
+                ) : (
+                  <span className="text-sm">
+                    {selectedFeedback.linearIssue.identifier ??
+                      selectedFeedback.linearIssue.id}
+                  </span>
+                )
               ) : (
                 <div className="space-y-2">
                   <p className="text-muted-foreground text-sm">
@@ -617,18 +658,20 @@ export function FeedbackTab() {
                   <button
                     type="button"
                     onClick={() => handleRetrySync(selectedFeedback.id)}
-                    disabled={syncing}
+                    disabled={syncingId === selectedFeedback.id}
                     className="inline-flex items-center gap-2 rounded-lg bg-primary px-3 py-2 text-primary-foreground text-sm hover:bg-primary/90 disabled:opacity-50"
                   >
-                    {syncing ? (
+                    {syncingId === selectedFeedback.id ? (
                       <Loader2 className="h-4 w-4 animate-spin" />
                     ) : (
                       <RefreshCw className="h-4 w-4" />
                     )}
-                    {syncing ? 'Syncing...' : 'Retry Sync to Linear'}
+                    {syncingId === selectedFeedback.id
+                      ? 'Syncing...'
+                      : 'Retry Sync to Linear'}
                   </button>
-                  {syncError && (
-                    <p className="text-red-500 text-sm">{syncError}</p>
+                  {syncError?.id === selectedFeedback.id && (
+                    <p className="text-red-500 text-sm">{syncError.message}</p>
                   )}
                 </div>
               )}

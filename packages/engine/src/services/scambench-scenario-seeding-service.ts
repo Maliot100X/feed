@@ -126,7 +126,6 @@ function uniqueStrings(values: Array<string | null | undefined>): string[] {
 }
 
 function selectStageMessages(
-  scenario: ScamBenchSeedScenario,
   stage: ScamBenchSeedStage
 ): ScamBenchSeedMessage[] {
   const incoming = stage.incoming?.filter(
@@ -149,18 +148,9 @@ function selectStageMessages(
     return fallbackIncoming;
   }
 
-  if (stage.liveAttackBrief) {
-    return [
-      {
-        role: 'attacker',
-        speaker: scenario.liveAttacker?.name || 'ScamBench Attacker',
-        content: stage.liveAttackBrief,
-        channel: stage.channel,
-        tags: ['live-attack-brief'],
-      },
-    ];
-  }
-
+  // A liveAttackBrief is attacker-only instructions: it must never be posted
+  // as victim-visible content. Stages without real messages seed nothing;
+  // the live attacker's generated message must be supplied explicitly.
   return [];
 }
 
@@ -383,10 +373,27 @@ export async function seedScamBenchScenario(
   const stageSegments = options.scenario.stages.map((stage) => ({
     stageId: stage.id,
     stage,
-    messages: selectStageMessages(options.scenario, stage),
+    messages: selectStageMessages(stage),
   }));
 
-  for (const segment of [...preambleSegments, ...stageSegments]) {
+  // Split every segment by channel (and DM counterparty) so mixed channels or
+  // DM speakers are never merged into one private chat.
+  const channelSegments = [...preambleSegments, ...stageSegments].flatMap(
+    (segment) => {
+      const groups = new Map<string, ScamBenchSeedMessage[]>();
+      for (const message of segment.messages) {
+        const key = GROUP_LIKE_CHANNELS.has(message.channel)
+          ? message.channel
+          : `${message.channel}:${message.speaker.trim()}`;
+        const list = groups.get(key) ?? [];
+        list.push(message);
+        groups.set(key, list);
+      }
+      return [...groups.values()].map((messages) => ({ ...segment, messages }));
+    }
+  );
+
+  for (const segment of channelSegments) {
     const resolved = await resolveSegment(
       options,
       resolvedSpeakerIds,
@@ -432,8 +439,11 @@ export async function seedScamBenchScenario(
     }
 
     for (const message of resolved.messages) {
-      const senderId = resolvedSpeakerIds.get(message.speaker);
-      if (!senderId) continue;
+      // Speaker names are resolved trimmed; look them up the same way.
+      const senderId = resolvedSpeakerIds.get(message.speaker.trim());
+      if (!senderId) {
+        throw new Error(`Unresolved ScamBench speaker "${message.speaker}"`);
+      }
       const messageId = await sendMessageToChat(
         chatState.chatId,
         senderId,

@@ -109,6 +109,28 @@ import { authenticateUser, withErrorHandling } from '@feed/api';
 import { toISO } from '@feed/shared';
 import type { NextRequest } from 'next/server';
 import { NextResponse } from 'next/server';
+import { z } from 'zod';
+
+const LogsQuerySchema = z.object({
+  type: z
+    .enum([
+      'chat',
+      'tick',
+      'trade',
+      'error',
+      'system',
+      'post',
+      'comment',
+      'dm',
+      'like',
+      'repost',
+      'follow',
+      'transfer',
+    ])
+    .optional(),
+  level: z.enum(['info', 'warn', 'error', 'debug']).optional(),
+  limit: z.coerce.number().int().min(1).max(500).default(100),
+});
 
 export const GET = withErrorHandling(async function GET(
   req: NextRequest,
@@ -117,12 +139,22 @@ export const GET = withErrorHandling(async function GET(
   const user = await authenticateUser(req);
   const { agentId } = await params;
 
-  await agentService.getAgent(agentId, user.id);
+  const agent = await agentService.getAgent(agentId, user.id);
+  if (!agent) {
+    return NextResponse.json(
+      { success: false, error: 'Agent not found' },
+      { status: 404 }
+    );
+  }
 
   const { searchParams } = new URL(req.url);
-  const type = searchParams.get('type') || undefined;
-  const level = searchParams.get('level') || undefined;
-  const limit = Number.parseInt(searchParams.get('limit')!);
+  // URLSearchParams.get returns null for absent params; zod defaults only
+  // apply to undefined. Empty strings are treated as absent as before.
+  const { type, level, limit } = LogsQuerySchema.parse({
+    type: searchParams.get('type') || undefined,
+    level: searchParams.get('level') || undefined,
+    limit: searchParams.get('limit') || undefined,
+  });
 
   const logs = await agentService.getLogs(agentId, {
     type,

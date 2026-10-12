@@ -16,8 +16,8 @@ import { PerpDbAdapter, PerpMarketService } from '@feed/core/markets/perps';
 import { and, db, eq, isNull, perpPositions } from '@feed/db';
 import {
   createPerpPriceImpactPort,
+  createUserWalletAdapter,
   FEE_CONFIG,
-  WalletService,
 } from '@feed/engine';
 import { AgentPnLService } from '../../../../services/AgentPnLService';
 import { logger } from '../../../../shared/logger';
@@ -95,6 +95,22 @@ export const closePerpAction: Action = {
       };
     }
 
+    // Only an omitted amount means "close everything". An explicit amount
+    // must be a positive finite number; never let 0/NaN/negative silently
+    // become a full close.
+    if (
+      closeAmount !== undefined &&
+      (typeof closeAmount !== 'number' ||
+        !Number.isFinite(closeAmount) ||
+        closeAmount <= 0)
+    ) {
+      return {
+        success: false,
+        text: 'Close amount must be a positive number, or omitted to close the entire position.',
+        error: 'Invalid amount',
+      };
+    }
+
     try {
       // Get position
       const [position] = await db
@@ -117,69 +133,9 @@ export const closePerpAction: Action = {
         };
       }
 
-      // Create perp service with wallet adapter
-      const walletAdapter = {
-        debit: async ({
-          userId,
-          amount,
-          reason,
-          description,
-          relatedId,
-        }: {
-          userId: string;
-          amount: number;
-          reason: string;
-          description?: string;
-          relatedId?: string;
-        }) => {
-          await WalletService.debit(
-            userId,
-            amount,
-            reason,
-            description ?? '',
-            relatedId
-          );
-        },
-        credit: async ({
-          userId,
-          amount,
-          reason,
-          description,
-          relatedId,
-        }: {
-          userId: string;
-          amount: number;
-          reason: string;
-          description?: string;
-          relatedId?: string;
-        }) => {
-          await WalletService.credit(
-            userId,
-            amount,
-            reason,
-            description ?? '',
-            relatedId
-          );
-        },
-        recordPnL: async ({
-          userId,
-          pnl,
-          reason,
-          relatedId,
-        }: {
-          userId: string;
-          pnl: number;
-          reason: string;
-          relatedId?: string;
-        }) => {
-          await WalletService.recordPnL(userId, pnl, reason, relatedId);
-        },
-        getBalance: WalletService.getBalance,
-      };
-
       const service = new PerpMarketService({
         db: new PerpDbAdapter(),
-        wallet: walletAdapter,
+        wallet: createUserWalletAdapter(),
         fees: {
           tradingFeeRate: FEE_CONFIG.TRADING_FEE_RATE,
           platformShare: FEE_CONFIG.PLATFORM_SHARE,
@@ -190,10 +146,21 @@ export const closePerpAction: Action = {
       });
 
       const positionSize = Number(position.size);
+      // Tolerate float noise when the agent asks for exactly the full size.
+      const FULL_CLOSE_TOLERANCE = 0.01;
+      if (
+        closeAmount !== undefined &&
+        closeAmount > positionSize + FULL_CLOSE_TOLERANCE
+      ) {
+        return {
+          success: false,
+          text: `Close amount $${closeAmount} exceeds position size $${positionSize.toFixed(2)}. Omit amount to close the entire position.`,
+          error: 'Close amount exceeds position size',
+        };
+      }
       const isPartialClose =
         closeAmount !== undefined &&
-        closeAmount > 0 &&
-        closeAmount < positionSize;
+        closeAmount < positionSize - FULL_CLOSE_TOLERANCE;
 
       const result = await service.closePosition({
         positionId,
@@ -209,20 +176,29 @@ export const closePerpAction: Action = {
       const pnlStr =
         pnl >= 0 ? `+$${pnl.toFixed(2)}` : `-$${Math.abs(pnl).toFixed(2)}`;
 
-      // Record trade for UI/performance tracking
-      await agentPnLService.recordTrade({
-        agentId: agentUserId,
-        userId: agentUserId,
-        marketType: 'perp',
-        ticker: position.ticker,
-        action: 'close',
-        side: position.side as 'long' | 'short',
-        amount: closedAmount,
-        price: exitPrice,
-        pnl,
-        reasoning:
-          (state?.data?.thought as string) || 'Chat-initiated perp close',
-      });
+      // Record trade for UI/performance tracking. The close is committed, so
+      // an analytics failure must not report it as failed.
+      await agentPnLService
+        .recordTrade({
+          agentId: agentUserId,
+          userId: agentUserId,
+          marketType: 'perp',
+          ticker: position.ticker,
+          action: 'close',
+          side: position.side as 'long' | 'short',
+          amount: closedAmount,
+          price: exitPrice,
+          pnl,
+          reasoning:
+            (state?.data?.thought as string) || 'Chat-initiated perp close',
+        })
+        .catch((error: Error) => {
+          logger.error('[CLOSE_PERP] Failed to record trade analytics', {
+            agentUserId,
+            positionId,
+            error: error.message,
+          });
+        });
 
       logger.info('[CLOSE_PERP] Position closed', {
         agentUserId,

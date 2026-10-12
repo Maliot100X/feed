@@ -88,7 +88,6 @@ export const ChatIdParamSchema = z.object({
  */
 export const ChatQuerySchema = z.object({
   all: z.enum(['true', 'false']).optional(),
-  debug: z.enum(['true', 'false']).optional(),
 });
 
 /**

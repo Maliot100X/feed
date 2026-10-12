@@ -49,12 +49,15 @@ let unreadCountError: unknown;
 let actorSelectError: unknown;
 let digestSelectError: unknown;
 
-const mockNotificationLimit = mock(async () => {
+const mockNotificationOffset = mock(async () => {
   if (notificationSelectError) {
     throw notificationSelectError;
   }
   return notificationRows;
 });
+const mockNotificationLimit = mock(() => ({
+  offset: mockNotificationOffset,
+}));
 const mockNotificationOrderBy = mock(() => ({ limit: mockNotificationLimit }));
 const mockNotificationWhere = mock(() => ({
   orderBy: mockNotificationOrderBy,
@@ -180,6 +183,7 @@ mock.module('@feed/shared', () => ({
   NotificationsQuerySchema: {
     parse: (input: Record<string, string>) => ({
       limit: Number(input.limit ?? '50'),
+      page: Number(input.page ?? '1'),
       unreadOnly: input.unreadOnly === 'true',
       type: input.type ?? undefined,
     }),

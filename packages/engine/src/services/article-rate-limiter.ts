@@ -8,7 +8,7 @@
  * @module services/article-rate-limiter
  */
 
-import { and, db, eq, gte, isNull, posts, sql } from '@feed/db';
+import { and, db, eq, gte, isNull, lte, posts, sql } from '@feed/db';
 import { logger } from '@feed/shared';
 
 /**
@@ -28,59 +28,80 @@ export interface ArticleRateLimitConfig {
 const DEFAULT_MAX_ARTICLES_PER_HOUR = 2;
 
 /**
- * Parse and validate a positive integer environment variable.
- * Returns the default value if the env var is missing, NaN, or <= 0.
- *
- * @param envVarName - Name of the environment variable to parse
- * @param defaultValue - Default value to use if parsing fails
- * @param logContext - Context string for logging (e.g., 'ArticleRateLimiter')
- * @returns A valid positive integer
+ * Parse a positive integer environment variable.
+ * A missing/empty value uses the default; a malformed value (non-integer,
+ * trailing junk, zero or negative) is a configuration error and throws.
  */
 function parsePositiveIntEnvVar(
   envVarName: string,
-  defaultValue: number,
-  logContext: string
+  defaultValue: number
 ): number {
-  const envValue = process.env[envVarName];
+  const envValue = process.env[envVarName]?.trim();
 
   if (!envValue) {
     return defaultValue;
   }
 
-  const parsed = parseInt(envValue, 10);
-
-  if (Number.isNaN(parsed)) {
-    logger.warn(
-      `Invalid ${envVarName} value: "${envValue}" is not a number. Using default: ${defaultValue}`,
-      { envValue, default: defaultValue },
-      logContext
+  if (!/^\d+$/.test(envValue) || Number(envValue) <= 0) {
+    throw new Error(
+      `Invalid ${envVarName}: "${envValue}" must be a positive integer`
     );
-    return defaultValue;
   }
 
-  if (parsed <= 0) {
-    logger.warn(
-      `Invalid ${envVarName} value: ${parsed} must be > 0. Using default: ${defaultValue}`,
-      { envValue, parsed, default: defaultValue },
-      logContext
-    );
-    return defaultValue;
-  }
-
-  return parsed;
+  return Number(envValue);
 }
 
 /**
- * Parse and validate the ARTICLE_RATE_LIMIT_PER_HOUR environment variable.
- * Returns the default value if the env var is missing, NaN, or <= 0.
- *
- * @returns A valid positive integer for max articles per hour
+ * Validate limiter configuration at construction time.
+ */
+function validateLimiterConfig(config: {
+  maxArticlesPerHour: number;
+  windowMs: number;
+}): void {
+  if (!Number.isInteger(config.maxArticlesPerHour)) {
+    throw new Error('maxArticlesPerHour must be a finite integer');
+  }
+  if (config.maxArticlesPerHour <= 0) {
+    throw new Error('maxArticlesPerHour must be a positive number');
+  }
+  if (!Number.isFinite(config.windowMs)) {
+    throw new Error('windowMs must be finite');
+  }
+  if (config.windowMs <= 0) {
+    throw new Error('windowMs must be a positive number');
+  }
+}
+
+/**
+ * Count non-deleted articles published within [now - windowMs, now].
+ * Future-dated rows are excluded.
+ */
+async function countRecentArticles(windowMs: number): Promise<number> {
+  const now = new Date();
+  const windowStart = new Date(now.getTime() - windowMs);
+
+  const [result] = await db
+    .select({ count: sql<number>`count(*)::int` })
+    .from(posts)
+    .where(
+      and(
+        eq(posts.type, 'article'),
+        gte(posts.timestamp, windowStart),
+        lte(posts.timestamp, now),
+        isNull(posts.deletedAt)
+      )
+    );
+
+  return result?.count ?? 0;
+}
+
+/**
+ * Parse the ARTICLE_RATE_LIMIT_PER_HOUR environment variable.
  */
 function parseMaxArticlesPerHour(): number {
   return parsePositiveIntEnvVar(
     'ARTICLE_RATE_LIMIT_PER_HOUR',
-    DEFAULT_MAX_ARTICLES_PER_HOUR,
-    'ArticleRateLimiter'
+    DEFAULT_MAX_ARTICLES_PER_HOUR
   );
 }
 
@@ -118,26 +139,14 @@ export class ArticleRateLimiterService {
         config.maxArticlesPerHour ?? DEFAULT_CONFIG.maxArticlesPerHour,
       windowMs: config.windowMs ?? DEFAULT_CONFIG.windowMs,
     } satisfies Required<ArticleRateLimitConfig>;
+    validateLimiterConfig(this.config);
   }
 
   /**
    * Get the count of articles created in the current time window
    */
   async getRecentArticleCount(): Promise<number> {
-    const windowStart = new Date(Date.now() - this.config.windowMs);
-
-    const [result] = await db
-      .select({ count: sql<number>`count(*)::int` })
-      .from(posts)
-      .where(
-        and(
-          eq(posts.type, 'article'),
-          gte(posts.timestamp, windowStart),
-          isNull(posts.deletedAt)
-        )
-      );
-
-    return result?.count ?? 0;
+    return countRecentArticles(this.config.windowMs);
   }
 
   /**
@@ -234,31 +243,16 @@ export class ArticleRateLimiterService {
  *
  * @remarks
  * **Concurrency Note**: The check-then-act pattern (`canGenerateArticle()` followed
- * by article creation) is NOT atomic. In concurrent environments (e.g., multiple
- * cron jobs, parallel article generation), race conditions may cause the configured
- * limit to be exceeded by 1-2 articles occasionally.
- *
- * This is acceptable for our use case because:
- * 1. The limit is for feed quality, not billing or hard caps
- * 2. Cron jobs run sequentially within their own process
- * 3. Occasional over-by-one has minimal user impact
- *
- * For stricter enforcement, consider:
- * - Distributed locks (Redis SETNX)
- * - Database row-level locking with SELECT FOR UPDATE
- * - Optimistic locking with version counters
+ * by article creation) is NOT atomic. Concurrent generators can each pass the
+ * check and exceed the configured limit; the overrun is not bounded. This is a
+ * feed-quality budget, not a hard cap. Strict enforcement would need a durable
+ * claim (e.g. row lock or distributed lock) shared by all generators.
  */
 export const articleRateLimiter = new ArticleRateLimiterService();
 
 /**
  * Create a custom rate limiter with different limits.
- *
- * @remarks
- * **TOCTOU Note**: The check-then-act pattern (`canGenerateArticle()` followed
- * by article creation) is not atomic. Concurrent processes may occasionally
- * exceed the limit by one. This is acceptable for typical in-memory/cron usage
- * with low rate limits. For strict enforcement, use external coordination
- * (e.g., distributed lock or centralized counter).
+ * Configuration is validated by the constructor.
  *
  * @example
  * ```typescript
@@ -272,67 +266,38 @@ export const articleRateLimiter = new ArticleRateLimiterService();
 export function createArticleRateLimiter(
   config: Partial<ArticleRateLimitConfig>
 ): ArticleRateLimiterService {
-  if (config.maxArticlesPerHour !== undefined) {
-    if (Number.isNaN(config.maxArticlesPerHour)) {
-      throw new Error('maxArticlesPerHour cannot be NaN');
-    }
-    if (config.maxArticlesPerHour <= 0) {
-      throw new Error('maxArticlesPerHour must be a positive number');
-    }
-  }
-  if (config.windowMs !== undefined) {
-    if (Number.isNaN(config.windowMs)) {
-      throw new Error('windowMs cannot be NaN');
-    }
-    if (config.windowMs <= 0) {
-      throw new Error('windowMs must be a positive number');
-    }
-  }
   return new ArticleRateLimiterService(config);
 }
 
 /**
- * Default breaking article rate limit per hour.
- *
- * Because the DB-backed `BreakingArticleRateLimiterService` counts ALL articles
- * (regular + breaking) in the posts table, this threshold must be set to
- * REGULAR_MAX + BREAKING_BUDGET to preserve the original intent:
- *
- *   DEFAULT_MAX_ARTICLES_PER_HOUR (2) + 1 extra breaking slot = 3
- *
- * Breaking articles bypass the regular rate limiter via `skipRateLimit: true`,
- * so the breaking limiter is the only guard that prevents overflow beyond 3/hr.
- */
-const DEFAULT_BREAKING_RATE_LIMIT_PER_HOUR = DEFAULT_MAX_ARTICLES_PER_HOUR + 1;
-
-/**
  * Parse the BREAKING_RATE_LIMIT_PER_HOUR environment variable.
+ *
+ * Posts have no breaking/regular distinction, so the breaking limiter counts
+ * ALL articles. Its default threshold is therefore the configured regular
+ * limit plus one extra slot (one breaking article on top of the regular
+ * budget). Breaking articles bypass the regular limiter (`skipRateLimit`).
  */
 function parseBreakingRateLimit(): number {
   return parsePositiveIntEnvVar(
     'BREAKING_RATE_LIMIT_PER_HOUR',
-    DEFAULT_BREAKING_RATE_LIMIT_PER_HOUR,
-    'ArticleRateLimiter'
+    DEFAULT_CONFIG.maxArticlesPerHour + 1
   );
 }
 
 /**
  * Breaking Article Rate Limiter Service
  *
- * Tracks breaking article count via a DB query against the posts table.
- * DB-backed — survives restarts and serverless cold starts, so redeployment
- * no longer causes breaking-article bursts.
+ * Counts ALL non-deleted articles in the window (posts have no breaking flag)
+ * plus in-flight reservations held by this process. The threshold defaults to
+ * the regular limit + 1 (see parseBreakingRateLimit).
  *
- * Breaking articles are event-triggered (scandals, leaks, revelations) and have
- * their own rate limit (default 1/hr) separate from regular scheduled articles.
- *
- * The in-flight `reservations` map prevents TOCTOU races within a single process
- * run (short-lived; cleared when the process exits, which is fine).
+ * Callers reserve a slot before generation and must release it once the
+ * article is persisted (the post row then counts) or generation fails.
  *
  * @remarks
- * **Concurrency Note**: Same TOCTOU considerations as ArticleRateLimiterService apply.
- * The check-then-act pattern may allow one extra article in concurrent environments,
- * which is acceptable for feed quality purposes.
+ * **Concurrency Note**: reservations only serialize callers within one process
+ * (and the count is awaited before the reservation is recorded). Concurrent
+ * processes can exceed the limit.
  */
 export class BreakingArticleRateLimiterService {
   private readonly maxArticlesPerHour: number;
@@ -344,6 +309,10 @@ export class BreakingArticleRateLimiterService {
     this.maxArticlesPerHour =
       config.maxArticlesPerHour ?? parseBreakingRateLimit();
     this.windowMs = config.windowMs ?? 60 * 60 * 1000; // 1 hour
+    validateLimiterConfig({
+      maxArticlesPerHour: this.maxArticlesPerHour,
+      windowMs: this.windowMs,
+    });
   }
 
   /** Clean up stale in-flight reservations (older than windowMs) */
@@ -362,20 +331,7 @@ export class BreakingArticleRateLimiterService {
    */
   async getRecentArticleCount(): Promise<number> {
     this.cleanupReservations();
-    const windowStart = new Date(Date.now() - this.windowMs);
-
-    const [result] = await db
-      .select({ count: sql<number>`count(*)::int` })
-      .from(posts)
-      .where(
-        and(
-          eq(posts.type, 'article'),
-          gte(posts.timestamp, windowStart),
-          isNull(posts.deletedAt)
-        )
-      );
-
-    const dbCount = result?.count ?? 0;
+    const dbCount = await countRecentArticles(this.windowMs);
     return dbCount + this.reservations.size;
   }
 
@@ -451,7 +407,8 @@ export class BreakingArticleRateLimiterService {
 
   /**
    * Release a previously reserved slot.
-   * Call this if article generation fails after reserving a slot.
+   * Call this once the article is persisted (the post row now counts) or if
+   * generation fails.
    *
    * @param reservationId - The unique ID returned by tryReserveSlot()
    * @returns true if the slot was released, false if the reservationId was not found
@@ -468,18 +425,6 @@ export class BreakingArticleRateLimiterService {
     );
 
     return existed;
-  }
-
-  /**
-   * No-op: DB-backed counting means we don't need to manually record articles.
-   * Kept for API compatibility.
-   *
-   * @deprecated This method is a no-op since the service was migrated to
-   * DB-backed counting. The post row itself is the source of truth.
-   * Safe to call but has no effect.
-   */
-  recordBreakingArticle(_timestamp?: number): void {
-    // DB-backed — the post row is already counted on next query
   }
 
   /**
@@ -511,22 +456,9 @@ export class BreakingArticleRateLimiterService {
 /**
  * Rate limiter for breaking articles (event-triggered).
  *
- * Breaking articles are generated when significant world events occur
- * (scandals, leaks, revelations) and have their own rate limit separate
- * from regular scheduled articles.
- *
- * This uses in-memory tracking instead of database queries because
- * the posts table doesn't have a field to distinguish breaking articles
- * from regular articles.
- *
- * This allows for up to 3 articles/hour total:
- * - 2 regular articles via article-tick cron
- * - 1 breaking article triggered by events
- *
+ * Counts all articles in the DB window plus this process's in-flight
+ * reservations; by default allows the regular limit + 1 articles/hour total.
  * Configure via BREAKING_RATE_LIMIT_PER_HOUR environment variable.
- *
- * **IMPORTANT**: After successfully persisting a breaking article,
- * call `breakingArticleRateLimiter.recordBreakingArticle()` to track it.
  */
 export const breakingArticleRateLimiter =
   new BreakingArticleRateLimiterService();

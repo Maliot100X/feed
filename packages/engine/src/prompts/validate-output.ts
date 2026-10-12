@@ -52,20 +52,18 @@ const FORBIDDEN_PATTERNS = [
   /\banthropic\s*ai/i,
   /\bnvidia\s*corp/i,
 
-  // Cryptocurrencies and blockchain (use parody names instead)
+  // Cryptocurrencies and blockchain (use parody names instead).
+  // Brands that are also ordinary English words (avalanche, compound,
+  // polygon, optimism) are intentionally not banned outright.
   /\bethereum\b/i,
   /\bbitcoin\b/i,
   /\bsolana\b/i,
   /\bcardano\b/i,
   /\bpolkadot\b/i,
-  /\bavalanche\b/i,
   /\bchainlink\b/i,
   /\buniswap\b/i,
   /\baave\b/i,
-  /\bcompound\b/i,
-  /\bpolygon\b/i,
   /\barbitrum\b/i,
-  /\boptimism\b/i,
   /\bbase\s*chain\b/i,
   /\bcoinbase\b/i,
   /\bbinance\b/i,
@@ -90,26 +88,29 @@ const FORBIDDEN_PATTERNS = [
  */
 export function validateNoRealNames(text: string): string[] {
   const violations: string[] = [];
+  const reported = new Set<string>();
 
   // Pattern-based detection (catches variations and common misspellings)
-  FORBIDDEN_PATTERNS.forEach((pattern) => {
+  for (const pattern of FORBIDDEN_PATTERNS) {
     const match = pattern.exec(text);
     if (match) {
+      reported.add(match[0].toLowerCase());
       violations.push(
         `FORBIDDEN: Contains real-name pattern "${match[0]}" (matched by ${pattern})`
       );
     }
-  });
+  }
 
-  // Original exact-match detection from database
-  const forbiddenNames = getForbiddenRealNames();
-  forbiddenNames.forEach((realName: string) => {
-    // Case insensitive check to catch variations
+  // Exact-match detection from the actor registry; skip names already
+  // reported by a pattern so one occurrence yields one violation.
+  for (const realName of getForbiddenRealNames()) {
+    if (reported.has(realName.toLowerCase())) continue;
     const regex = new RegExp(`\\b${escapeRegex(realName)}\\b`, 'i');
     if (regex.test(text)) {
+      reported.add(realName.toLowerCase());
       violations.push(`FORBIDDEN: Contains real name "${realName}"`);
     }
-  });
+  }
 
   return violations;
 }
@@ -165,6 +166,11 @@ export function validateCharacterLimit(
   maxLength: number,
   postType: string
 ): string[] {
+  if (!Number.isInteger(maxLength) || maxLength <= 0) {
+    throw new Error(
+      `validateCharacterLimit: maxLength must be a positive integer, got ${maxLength}`
+    );
+  }
   const violations: string[] = [];
 
   if (text.length > maxLength) {
@@ -190,6 +196,9 @@ export function validateFeedPost(
   const warnings: string[] = [];
 
   // Critical validations (must pass)
+  if (!text.trim()) {
+    violations.push(`EMPTY: ${options.postType} has no content`);
+  }
   violations.push(...validateNoRealNames(text));
   violations.push(...validateHashtags(text, 0));
   violations.push(...validateNoEmojis(text));

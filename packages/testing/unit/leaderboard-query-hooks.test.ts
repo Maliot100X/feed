@@ -55,7 +55,6 @@ describe('fetchLeaderboardData — generatedAt support', () => {
       pageSize: 100,
       selectedMetric: 'reputation',
       selectedScope: 'wallet',
-      retries: 0,
     });
 
     expect(result.generatedAt).toBe('2026-04-01T12:00:00.000Z');
@@ -82,7 +81,6 @@ describe('fetchLeaderboardData — generatedAt support', () => {
       pageSize: 100,
       selectedMetric: 'reputation',
       selectedScope: 'wallet',
-      retries: 0,
     });
 
     expect(result.generatedAt).toBeUndefined();
@@ -111,7 +109,6 @@ describe('fetchLeaderboardData — generatedAt support', () => {
       pageSize: 50,
       selectedMetric: 'trading',
       selectedScope: 'team',
-      retries: 0,
     });
 
     const calledUrl = (fetchMock.mock.calls[0] as [string])[0];
@@ -145,7 +142,6 @@ describe('fetchLeaderboardData — generatedAt support', () => {
       selectedMetric: 'reputation',
       selectedScope: 'wallet',
       userId: 'user-123',
-      retries: 0,
     });
 
     const calledUrl = (fetchMock.mock.calls[0] as [string])[0];
@@ -175,7 +171,6 @@ describe('fetchLeaderboardData — generatedAt support', () => {
       selectedMetric: 'reputation',
       selectedScope: 'wallet',
       authToken: 'my-token',
-      retries: 0,
     });
 
     const calledOptions = (fetchMock.mock.calls[0] as [string, RequestInit])[1];

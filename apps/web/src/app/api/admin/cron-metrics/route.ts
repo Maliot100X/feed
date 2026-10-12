@@ -13,7 +13,7 @@
 
 import {
   cronMetrics,
-  requireAdmin,
+  requirePermission,
   successResponse,
   withErrorHandling,
 } from '@feed/api';
@@ -28,16 +28,21 @@ export const dynamic = 'force-dynamic';
  * - Individual job statistics
  * - Summary metrics
  * - Active alerts
+ *
+ * Metrics are recorded in memory by the process that ran each cron job, so
+ * this view only covers executions observed by the serving process
+ * (`scope: 'process'`). An empty or quiet dashboard does not prove that
+ * cron jobs are healthy platform-wide.
  */
 export const GET = withErrorHandling(async (request: NextRequest) => {
-  // Verify admin authorization
-  await requireAdmin(request);
+  // Same capability as the canonical system status endpoint
+  await requirePermission(request, 'view_system');
 
   const dashboard = cronMetrics.getDashboardMetrics();
 
   return successResponse({
-    success: true,
     timestamp: new Date().toISOString(),
+    scope: 'process',
     ...dashboard,
   });
 });

@@ -81,6 +81,7 @@ import {
 import { logger } from '@feed/shared';
 import type { NextRequest } from 'next/server';
 import { NextResponse } from 'next/server';
+import { z } from 'zod';
 import { trackServerEvent } from '@/lib/posthog/server';
 import {
   calculatePointsFromUSD,
@@ -90,9 +91,9 @@ import {
   validatePurchaseAmount,
 } from '@/lib/stripe/server';
 
-interface CreateCheckoutSessionBody {
-  amountUSD: number;
-}
+const CreateCheckoutSessionBodySchema = z.object({
+  amountUSD: z.number().finite(),
+});
 
 const STRIPE_CHECKOUT_UNAVAILABLE_MESSAGE =
   'Card payments are temporarily unavailable. Please try again later.';
@@ -116,16 +117,23 @@ export const POST = withErrorHandling(async function POST(req: NextRequest) {
   const userEmail = authUser.email;
 
   // Parse request body with error handling for malformed JSON
-  let body: CreateCheckoutSessionBody;
+  let rawBody: unknown;
   try {
-    body = await req.json();
+    rawBody = await req.json();
   } catch {
     return NextResponse.json(
       { success: false, error: 'Invalid JSON body' },
       { status: 400 }
     );
   }
-  const { amountUSD } = body;
+  const parsedBody = CreateCheckoutSessionBodySchema.safeParse(rawBody);
+  if (!parsedBody.success) {
+    return NextResponse.json(
+      { success: false, error: 'amountUSD must be a number' },
+      { status: 400 }
+    );
+  }
+  const { amountUSD } = parsedBody.data;
 
   // Validate amount
   const validation = validatePurchaseAmount(amountUSD);
@@ -192,6 +200,14 @@ export const POST = withErrorHandling(async function POST(req: NextRequest) {
         operation: 'checkout.sessions.create',
         reason: error instanceof Error ? error.message : String(error),
       }
+    );
+  }
+
+  if (!session.url) {
+    throw new ServiceUnavailableError(
+      STRIPE_CHECKOUT_UNAVAILABLE_MESSAGE,
+      'STRIPE_CHECKOUT_UNAVAILABLE',
+      { provider: 'stripe', operation: 'checkout.sessions.create' }
     );
   }
 

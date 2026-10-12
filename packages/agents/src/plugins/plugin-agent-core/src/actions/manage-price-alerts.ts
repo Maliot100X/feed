@@ -18,10 +18,53 @@ import type {
   Memory,
   State,
 } from '@elizaos/core';
-import { db, eq, userAgentConfigs } from '@feed/db';
+import { and, chatParticipants, db, eq, sql, userAgentConfigs } from '@feed/db';
 import type { PriceAlert } from '@feed/db/schema';
 import { logger } from '../../../../shared/logger';
 import { generateSnowflakeId } from '../../../../shared/snowflake';
+
+// ─── Shared helpers ─────────────────────────────────────────────────────
+
+const MIN_COOLDOWN_MINUTES = 1;
+const MAX_COOLDOWN_MINUTES = 7 * 24 * 60;
+const TOKEN_SYMBOL_PATTERN = /^[A-Z0-9]{1,32}$/;
+
+function normalizeSymbol(symbol: unknown): string | null {
+  if (typeof symbol !== 'string') return null;
+  const upper = symbol.trim().toUpperCase();
+  return TOKEN_SYMBOL_PATTERN.test(upper) ? upper : null;
+}
+
+/**
+ * Compare-and-set the alerts array: only writes if the stored JSONB still
+ * equals what we read, so concurrent alert mutations (or PriceAlertService
+ * trigger timestamp updates) are not silently overwritten.
+ * @returns false when the row changed since it was read
+ */
+async function writeAlertsIfUnchanged(
+  configId: string,
+  previous: PriceAlert[] | null,
+  next: PriceAlert[]
+): Promise<boolean> {
+  const previousJson = previous === null ? null : JSON.stringify(previous);
+  const updated = await db
+    .update(userAgentConfigs)
+    .set({ priceAlerts: next, updatedAt: new Date() })
+    .where(
+      and(
+        eq(userAgentConfigs.id, configId),
+        sql`${userAgentConfigs.priceAlerts} IS NOT DISTINCT FROM ${previousJson}::jsonb`
+      )
+    )
+    .returning({ id: userAgentConfigs.id });
+  return updated.length > 0;
+}
+
+const CONCURRENT_UPDATE_RESULT: ActionResult = {
+  success: false,
+  text: 'Price alerts changed while updating. Please retry.',
+  error: 'Concurrent update',
+};
 
 // ─── SET_PRICE_ALERT ────────────────────────────────────────────────────
 
@@ -145,6 +188,15 @@ export const setPriceAlertAction: Action = {
       };
     }
 
+    const symbol = normalizeSymbol(tokenSymbol);
+    if (!symbol) {
+      return {
+        success: false,
+        text: 'tokenSymbol must be an alphanumeric market ticker (e.g. "OPENAGI").',
+        error: 'Invalid tokenSymbol',
+      };
+    }
+
     if (condition !== 'above' && condition !== 'below') {
       return {
         success: false,
@@ -153,11 +205,41 @@ export const setPriceAlertAction: Action = {
       };
     }
 
-    if (typeof threshold !== 'number' || threshold <= 0) {
+    if (
+      typeof threshold !== 'number' ||
+      !Number.isFinite(threshold) ||
+      threshold <= 0
+    ) {
       return {
         success: false,
         text: 'Threshold must be a positive number.',
         error: 'Invalid threshold',
+      };
+    }
+
+    if (
+      cooldownMinutes !== undefined &&
+      (typeof cooldownMinutes !== 'number' ||
+        !Number.isInteger(cooldownMinutes) ||
+        cooldownMinutes < MIN_COOLDOWN_MINUTES ||
+        cooldownMinutes > MAX_COOLDOWN_MINUTES)
+    ) {
+      return {
+        success: false,
+        text: `cooldownMinutes must be an integer between ${MIN_COOLDOWN_MINUTES} and ${MAX_COOLDOWN_MINUTES}.`,
+        error: 'Invalid cooldownMinutes',
+      };
+    }
+
+    if (
+      deliveryChannel !== undefined &&
+      deliveryChannel !== 'team_chat' &&
+      deliveryChannel !== 'group'
+    ) {
+      return {
+        success: false,
+        text: 'deliveryChannel must be "team_chat" or "group".',
+        error: 'Invalid deliveryChannel',
       };
     }
 
@@ -167,6 +249,28 @@ export const setPriceAlertAction: Action = {
         text: 'deliveryChatId is required when deliveryChannel is "group".',
         error: 'Missing deliveryChatId',
       };
+    }
+
+    // Group delivery is only allowed to chats the agent actively belongs to.
+    if (deliveryChannel === 'group' && deliveryChatId) {
+      const [membership] = await db
+        .select({ id: chatParticipants.id })
+        .from(chatParticipants)
+        .where(
+          and(
+            eq(chatParticipants.chatId, deliveryChatId),
+            eq(chatParticipants.userId, agentUserId),
+            eq(chatParticipants.isActive, true)
+          )
+        )
+        .limit(1);
+      if (!membership) {
+        return {
+          success: false,
+          text: 'You can only deliver alerts to group chats you are a member of.',
+          error: 'Not a member of delivery chat',
+        };
+      }
     }
 
     // Fetch current config
@@ -187,12 +291,12 @@ export const setPriceAlertAction: Action = {
       };
     }
 
-    const alerts = (config.priceAlerts ?? []) as PriceAlert[];
+    const storedAlerts = config.priceAlerts as PriceAlert[] | null;
+    const alerts = storedAlerts ?? [];
 
     // Check for duplicate (same token + condition)
     const existing = alerts.find(
-      (a) =>
-        a.tokenSymbol === tokenSymbol.toUpperCase() && a.condition === condition
+      (a) => a.tokenSymbol === symbol && a.condition === condition
     );
 
     const now = new Date().toISOString();
@@ -200,23 +304,34 @@ export const setPriceAlertAction: Action = {
 
     if (existing) {
       // Update existing alert
+      const nextChannel = deliveryChannel ?? existing.deliveryChannel;
       newAlert = {
         ...existing,
         threshold,
-        deliveryChannel: deliveryChannel ?? existing.deliveryChannel,
-        deliveryChatId: deliveryChatId ?? existing.deliveryChatId,
+        deliveryChannel: nextChannel,
+        // Switching back to team chat drops the stale group target
+        deliveryChatId:
+          nextChannel === 'group'
+            ? (deliveryChatId ?? existing.deliveryChatId)
+            : undefined,
         cooldownMinutes: cooldownMinutes ?? existing.cooldownMinutes,
         enabled: true,
-        lastTriggeredAt: undefined, // Reset cooldown on update
+        // A new threshold is a new alert condition: reset the cooldown.
+        // Otherwise keep the last trigger so re-saving does not re-fire.
+        lastTriggeredAt:
+          threshold !== existing.threshold
+            ? undefined
+            : existing.lastTriggeredAt,
       };
       const updatedAlerts = alerts.map((a) =>
         a.id === existing.id ? newAlert : a
       );
 
-      await db
-        .update(userAgentConfigs)
-        .set({ priceAlerts: updatedAlerts, updatedAt: new Date() })
-        .where(eq(userAgentConfigs.id, config.id));
+      if (
+        !(await writeAlertsIfUnchanged(config.id, storedAlerts, updatedAlerts))
+      ) {
+        return CONCURRENT_UPDATE_RESULT;
+      }
 
       logger.info(
         `[SET_PRICE_ALERT] Updated alert: ${tokenSymbol} ${condition} ${threshold}`,
@@ -226,7 +341,7 @@ export const setPriceAlertAction: Action = {
 
       return {
         success: true,
-        text: `Updated price alert: ${tokenSymbol.toUpperCase()} ${condition} $${threshold}. Delivery: ${deliveryChannel ?? existing.deliveryChannel}. Cooldown: ${cooldownMinutes ?? existing.cooldownMinutes} min.`,
+        text: `Updated price alert: ${symbol} ${condition} $${threshold}. Delivery: ${newAlert.deliveryChannel}. Cooldown: ${newAlert.cooldownMinutes} min.`,
         data: { alertId: existing.id, updated: true },
       };
     }
@@ -235,21 +350,22 @@ export const setPriceAlertAction: Action = {
     const alertId = await generateSnowflakeId();
     newAlert = {
       id: alertId,
-      tokenSymbol: tokenSymbol.toUpperCase(),
+      tokenSymbol: symbol,
       condition,
       threshold,
       deliveryChannel: deliveryChannel ?? 'team_chat',
-      deliveryChatId,
+      deliveryChatId: deliveryChannel === 'group' ? deliveryChatId : undefined,
       enabled: true,
       cooldownMinutes: cooldownMinutes ?? 15,
       createdAt: now,
     };
 
     const updatedAlerts = [...alerts, newAlert];
-    await db
-      .update(userAgentConfigs)
-      .set({ priceAlerts: updatedAlerts, updatedAt: new Date() })
-      .where(eq(userAgentConfigs.id, config.id));
+    if (
+      !(await writeAlertsIfUnchanged(config.id, storedAlerts, updatedAlerts))
+    ) {
+      return CONCURRENT_UPDATE_RESULT;
+    }
 
     logger.info(
       `[SET_PRICE_ALERT] Created alert: ${tokenSymbol} ${condition} ${threshold}`,
@@ -259,7 +375,7 @@ export const setPriceAlertAction: Action = {
 
     return {
       success: true,
-      text: `Price alert set: ${tokenSymbol.toUpperCase()} ${condition} $${threshold}. Delivery: ${newAlert.deliveryChannel}. Cooldown: ${newAlert.cooldownMinutes} min.`,
+      text: `Price alert set: ${symbol} ${condition} $${threshold}. Delivery: ${newAlert.deliveryChannel}. Cooldown: ${newAlert.cooldownMinutes} min.`,
       data: { alertId, created: true },
     };
   },
@@ -418,6 +534,18 @@ export const removePriceAlertAction: Action = {
       };
     }
 
+    if (
+      condition !== undefined &&
+      condition !== 'above' &&
+      condition !== 'below'
+    ) {
+      return {
+        success: false,
+        text: 'Condition must be "above" or "below".',
+        error: 'Invalid condition',
+      };
+    }
+
     const [config] = await db
       .select({
         id: userAgentConfigs.id,
@@ -435,22 +563,28 @@ export const removePriceAlertAction: Action = {
       };
     }
 
-    const alerts = (config.priceAlerts ?? []) as PriceAlert[];
+    const storedAlerts = config.priceAlerts as PriceAlert[] | null;
+    const alerts = storedAlerts ?? [];
 
     let removed: PriceAlert | undefined;
-    let remaining: PriceAlert[];
 
     if (alertId) {
       removed = alerts.find((a) => a.id === alertId);
-      remaining = alerts.filter((a) => a.id !== alertId);
     } else {
-      const upperSymbol = tokenSymbol!.toUpperCase();
-      removed = alerts.find(
+      const upperSymbol = normalizeSymbol(tokenSymbol);
+      const matches = alerts.filter(
         (a) =>
           a.tokenSymbol === upperSymbol &&
           (!condition || a.condition === condition)
       );
-      remaining = removed ? alerts.filter((a) => a.id !== removed!.id) : alerts;
+      if (matches.length > 1) {
+        return {
+          success: false,
+          text: `Multiple alerts match ${upperSymbol}. Specify condition ("above"/"below") or alertId.`,
+          error: 'Ambiguous alert selector',
+        };
+      }
+      removed = matches[0];
     }
 
     if (!removed) {
@@ -461,10 +595,11 @@ export const removePriceAlertAction: Action = {
       };
     }
 
-    await db
-      .update(userAgentConfigs)
-      .set({ priceAlerts: remaining, updatedAt: new Date() })
-      .where(eq(userAgentConfigs.id, config.id));
+    const removedId = removed.id;
+    const remaining = alerts.filter((a) => a.id !== removedId);
+    if (!(await writeAlertsIfUnchanged(config.id, storedAlerts, remaining))) {
+      return CONCURRENT_UPDATE_RESULT;
+    }
 
     logger.info(
       `[REMOVE_PRICE_ALERT] Removed alert: ${removed.tokenSymbol} ${removed.condition} ${removed.threshold}`,

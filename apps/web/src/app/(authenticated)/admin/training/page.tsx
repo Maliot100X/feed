@@ -39,6 +39,7 @@ import {
   TrendingUp,
 } from 'lucide-react';
 import { useCallback, useEffect, useState } from 'react';
+import { toast } from 'sonner';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import {
@@ -104,6 +105,11 @@ interface TrainingStatus {
       scenarioGroups: number;
       dataQuality: number;
     };
+    thresholds: {
+      minTrajectories: number;
+      minScenarioGroups: number;
+      minDataQuality: number;
+    };
   };
   recentJobs: TrainingJob[];
   models: TrainingModel[];
@@ -127,56 +133,71 @@ export default function TrainingDashboard() {
   const [status, setStatus] = useState<TrainingStatus | null>(null);
   const [loading, setLoading] = useState(true);
   const [training, setTraining] = useState(false);
+  const [loadError, setLoadError] = useState<string | null>(null);
 
   const loadStatus = useCallback(async () => {
-    const res = await fetch(apiUrl('/api/admin/training/status'));
-
-    if (!res.ok) {
-      logger.error(
-        'Failed to load training status',
-        undefined,
-        'TrainingAdmin'
+    try {
+      const res = await fetch(apiUrl('/api/admin/training/status'));
+      if (!res.ok) {
+        logger.error(
+          'Failed to load training status',
+          { status: res.status },
+          'TrainingAdmin'
+        );
+        setLoadError(`Failed to load training status (HTTP ${res.status})`);
+        return;
+      }
+      const data: TrainingStatus = await res.json();
+      setStatus(data);
+      setLoadError(null);
+    } catch (err) {
+      setLoadError(
+        err instanceof Error ? err.message : 'Failed to load training status'
       );
+    } finally {
       setLoading(false);
-      return;
     }
-
-    const data = await res.json();
-    setStatus(data);
-    setLoading(false);
   }, []);
 
   useEffect(() => {
-    loadStatus();
-    const interval = setInterval(loadStatus, 5000); // Refresh every 5s
+    void loadStatus();
+    const interval = setInterval(() => void loadStatus(), 5000); // Refresh every 5s
     return () => clearInterval(interval);
   }, [loadStatus]);
 
   async function triggerTraining() {
+    if (training) return;
     setTraining(true);
 
-    const res = await fetch(apiUrl('/api/admin/training/trigger'), {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ force: false }),
-    });
+    let started: { jobId?: string } | null = null;
+    try {
+      const res = await fetch(apiUrl('/api/admin/training/trigger'), {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ force: false }),
+      });
+      const body: { success?: boolean; jobId?: string; error?: string } =
+        await res.json().catch(() => ({}));
 
-    if (!res.ok) {
-      const errorData = await res.json().catch(() => ({}));
-      setTraining(false);
-      alert(`Error: ${errorData.error || 'Failed to trigger training'}`);
+      if (!res.ok || !body.success) {
+        toast.error(
+          body.error ?? `Failed to trigger training (HTTP ${res.status})`
+        );
+        return;
+      }
+      started = body;
+    } catch (err) {
+      toast.error(
+        err instanceof Error ? err.message : 'Failed to trigger training'
+      );
       return;
+    } finally {
+      setTraining(false);
     }
 
-    const result = await res.json();
-
-    if (result.success) {
-      alert(`Training started! Job ID: ${result.jobId}`);
-      await loadStatus();
-    } else {
-      alert(`Failed to start training: ${result.error || 'Unknown error'}`);
-    }
-    setTraining(false);
+    // The job was accepted; a failed status refresh is not a start failure.
+    toast.success(`Training started! Job ID: ${started?.jobId ?? 'unknown'}`);
+    await loadStatus();
   }
 
   if (loading) {
@@ -189,13 +210,17 @@ export default function TrainingDashboard() {
 
   if (!status) {
     return (
-      <div className="p-8">
-        <div className="text-red-500">Failed to load training status</div>
+      <div className="space-y-4 p-8">
+        <div className="text-red-500">
+          {loadError ?? 'Failed to load training status'}
+        </div>
+        <Button onClick={() => void loadStatus()}>Retry</Button>
       </div>
     );
   }
 
   const { automation, readiness } = status;
+  const { thresholds } = readiness;
 
   return (
     <div className="space-y-6 p-8">
@@ -208,8 +233,17 @@ export default function TrainingDashboard() {
         </div>
         <div className="flex gap-2">
           <Button
-            onClick={triggerTraining}
-            disabled={training || !!automation.training.currentJob}
+            onClick={() => void triggerTraining()}
+            disabled={
+              training || !!automation.training.currentJob || !readiness.ready
+            }
+            title={
+              automation.training.currentJob
+                ? 'A training job is already running'
+                : readiness.ready
+                  ? undefined
+                  : `Not ready: ${readiness.reason}`
+            }
             size="lg"
           >
             {training ? (
@@ -226,6 +260,12 @@ export default function TrainingDashboard() {
           </Button>
         </div>
       </div>
+
+      {loadError && (
+        <div className="rounded border border-destructive bg-destructive/10 px-4 py-3 text-destructive text-sm">
+          {loadError} — showing last loaded status.
+        </div>
+      )}
 
       {/* Data Collection Stats */}
       <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-4">
@@ -308,32 +348,40 @@ export default function TrainingDashboard() {
               <span>Trajectories:</span>
               <Badge
                 variant={
-                  readiness.stats.totalTrajectories >= 100
+                  readiness.stats.totalTrajectories >=
+                  thresholds.minTrajectories
                     ? 'default'
                     : 'secondary'
                 }
               >
-                {readiness.stats.totalTrajectories} / 100
+                {readiness.stats.totalTrajectories} /{' '}
+                {thresholds.minTrajectories}
               </Badge>
             </div>
             <div className="flex justify-between">
               <span>Scenario Groups:</span>
               <Badge
                 variant={
-                  readiness.stats.scenarioGroups >= 10 ? 'default' : 'secondary'
+                  readiness.stats.scenarioGroups >= thresholds.minScenarioGroups
+                    ? 'default'
+                    : 'secondary'
                 }
               >
-                {readiness.stats.scenarioGroups} / 10
+                {readiness.stats.scenarioGroups} /{' '}
+                {thresholds.minScenarioGroups}
               </Badge>
             </div>
             <div className="flex justify-between">
               <span>Data Quality:</span>
               <Badge
                 variant={
-                  readiness.stats.dataQuality >= 0.95 ? 'default' : 'secondary'
+                  readiness.stats.dataQuality >= thresholds.minDataQuality
+                    ? 'default'
+                    : 'secondary'
                 }
               >
-                {(readiness.stats.dataQuality * 100).toFixed(1)}% / 95%
+                {(readiness.stats.dataQuality * 100).toFixed(1)}% /{' '}
+                {(thresholds.minDataQuality * 100).toFixed(0)}%
               </Badge>
             </div>
           </div>
@@ -350,14 +398,9 @@ export default function TrainingDashboard() {
             </CardDescription>
           </CardHeader>
           <CardContent>
-            <div className="space-y-2">
-              <div className="h-2 w-full rounded-full bg-secondary">
-                <div
-                  className="h-2 rounded-full bg-primary transition-all duration-500"
-                  style={{ width: '50%' }}
-                />
-              </div>
-              <p className="text-muted-foreground text-sm">ETA: ~30 minutes</p>
+            <div className="flex items-center gap-2 text-muted-foreground text-sm">
+              <Loader2 className="h-4 w-4 animate-spin" />
+              Running — progress and ETA are not reported by the pipeline.
             </div>
           </CardContent>
         </Card>

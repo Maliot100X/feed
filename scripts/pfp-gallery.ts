@@ -17,13 +17,13 @@ import { execSync } from 'node:child_process';
 import { existsSync } from 'node:fs';
 import { mkdir, readdir, readFile, symlink, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
+import { loadActorsData } from '@feed/engine';
 
 // ─── Config ─────────────────────────────────────────────────────────────────
 
 const ROOT = join(import.meta.dir, '..');
 const OUTPUT_DIR = join(ROOT, 'output', 'pfp-gallery');
-const ACTORS_DIR = join(ROOT, 'packages/engine/src/data/actors');
-const ORGS_DIR = join(ROOT, 'packages/engine/src/data/organizations');
+const ORGS_DIR = join(ROOT, 'packages/pack-default/src/organizations');
 const PUBLIC_ACTORS = join(ROOT, 'apps/web/public/images/actors');
 const PUBLIC_ACTOR_BANNERS = join(ROOT, 'apps/web/public/images/actor-banners');
 const PUBLIC_ORGS = join(ROOT, 'apps/web/public/images/organizations');
@@ -253,29 +253,24 @@ function extractFieldRobust(source: string, field: string): string | undefined {
 }
 
 async function loadActors(): Promise<ActorEntry[]> {
-  const files = await readdir(ACTORS_DIR);
-  const actors: ActorEntry[] = [];
-
-  for (const file of files.filter((f) => f.endsWith('.ts'))) {
-    const id = file.replace('.ts', '');
-    const source = await readFile(join(ACTORS_DIR, file), 'utf-8');
-
-    const pfpPath = join(PUBLIC_ACTORS, `${id}.jpg`);
-    const bannerPath = join(PUBLIC_ACTOR_BANNERS, `${id}.jpg`);
+  // Canonical actor source (default content pack via the engine loader).
+  const actors: ActorEntry[] = loadActorsData().actors.map((actor) => {
+    const pfpPath = join(PUBLIC_ACTORS, `${actor.id}.jpg`);
+    const bannerPath = join(PUBLIC_ACTOR_BANNERS, `${actor.id}.jpg`);
     const hasPfp = existsSync(pfpPath);
     const hasBanner = existsSync(bannerPath);
 
-    actors.push({
-      id,
-      name: extractFieldRobust(source, 'name') ?? id,
-      realName: extractFieldRobust(source, 'realName'),
-      pfpDescription: extractFieldRobust(source, 'pfpDescription'),
+    return {
+      id: actor.id,
+      name: actor.name,
+      realName: actor.realName,
+      pfpDescription: actor.pfpDescription,
       hasPfp,
       hasBanner,
       pfpPath: hasPfp ? pfpPath : undefined,
       bannerPath: hasBanner ? bannerPath : undefined,
-    });
-  }
+    };
+  });
 
   return actors.sort((a, b) => a.id.localeCompare(b.id));
 }

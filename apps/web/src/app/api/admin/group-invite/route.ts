@@ -5,8 +5,11 @@
  * @access Admin
  *
  * @description
- * Sends a group chat invite on behalf of an NPC to a user. Admin only.
- * Used for game mechanics and NPC interactions.
+ * Adds a user to an existing NPC-owned group chat on behalf of that NPC and
+ * notifies them. Admin only. The chat must already exist, be a group chat and
+ * belong to a group of type `npc` owned by `npcId`; this route never creates
+ * groups/chats or rebinds an existing chat to a different group. When
+ * `chatId` is omitted the NPC must own exactly one group chat.
  *
  * @openapi
  * /api/admin/group-invite:
@@ -26,8 +29,6 @@
  *             required:
  *               - npcId
  *               - userId
- *               - chatId
- *               - chatName
  *             properties:
  *               npcId:
  *                 type: string
@@ -37,15 +38,14 @@
  *                 description: Target user ID
  *               chatId:
  *                 type: string
- *                 description: Chat ID
- *               chatName:
- *                 type: string
- *                 description: Chat name
+ *                 description: Existing NPC-owned group chat ID (optional when the NPC owns exactly one)
  *     responses:
  *       200:
  *         description: Invite sent successfully
  *       400:
- *         description: Invalid input
+ *         description: Invalid input, chat not owned by the NPC, already a member, or group limit reached
+ *       404:
+ *         description: NPC, user or NPC group chat not found
  *       401:
  *         description: Unauthorized
  *       403:
@@ -59,8 +59,7 @@
  *   body: JSON.stringify({
  *     npcId: 'npc-id',
  *     userId: 'user-id',
- *     chatId: 'chat-id',
- *     chatName: 'Group Chat'
+ *     chatId: 'chat-id'
  *   })
  * });
  * ```
@@ -76,62 +75,121 @@ import {
 import {
   asSystem,
   chatParticipants,
-  chats,
   generateSnowflakeId,
   groupMembers,
-  groups,
   sql,
 } from '@feed/db';
 import { StaticDataRegistry } from '@feed/engine';
+import { GROUP_CONFIG } from '@feed/shared';
 import type { NextRequest } from 'next/server';
 import { NextResponse } from 'next/server';
+import { z } from 'zod';
+
+const GroupInviteSchema = z.object({
+  npcId: z.string().trim().min(1, 'npcId is required'),
+  userId: z.string().trim().min(1, 'userId is required'),
+  chatId: z.string().trim().min(1).optional(),
+});
+
+type TargetChat = { chatId: string; chatName: string; groupId: string };
+type TargetChatResult =
+  | { ok: true; chat: TargetChat }
+  | { ok: false; error: string; status: number };
 
 /**
- * Generate a deterministic group ID from a chat ID.
- * This ensures idempotency - same chatId always produces same groupId.
- * Uses a hash-based approach to generate a consistent snowflake-like ID.
+ * Resolve the existing NPC-owned group chat to add the user to.
+ * Never creates or rebinds chats/groups.
  */
-function deterministicGroupId(chatId: string): string {
-  // Create a deterministic hash from chatId
-  // Use a simple but consistent hash that produces a snowflake-like ID
-  let hash = 0;
-  for (let i = 0; i < chatId.length; i++) {
-    const char = chatId.charCodeAt(i);
-    hash = (hash << 5) - hash + char;
-    hash = hash & hash; // Convert to 32bit integer
-  }
-  // Combine with a fixed prefix to ensure uniqueness and snowflake-like format
-  // Use absolute value and pad to ensure consistent length
-  const absHash = Math.abs(hash);
-  return `grp_${chatId}_${absHash.toString().padStart(10, '0')}`;
+async function resolveNpcGroupChat(
+  npcId: string,
+  chatId: string | undefined
+): Promise<TargetChatResult> {
+  return asSystem(async (db) => {
+    if (chatId) {
+      const chat = await db.chat.findUnique({
+        where: { id: chatId },
+        select: { id: true, name: true, isGroup: true, groupId: true },
+      });
+      if (!chat) {
+        return { ok: false, error: 'Chat not found', status: 404 };
+      }
+      if (!chat.isGroup || !chat.groupId) {
+        return { ok: false, error: 'Chat is not a group chat', status: 400 };
+      }
+      const group = await db.group.findUnique({
+        where: { id: chat.groupId },
+        select: { type: true, ownerId: true, name: true },
+      });
+      if (!group || group.type !== 'npc' || group.ownerId !== npcId) {
+        return {
+          ok: false,
+          error: 'Chat does not belong to a group owned by this NPC',
+          status: 400,
+        };
+      }
+      return {
+        ok: true,
+        chat: {
+          chatId: chat.id,
+          chatName: chat.name ?? group.name,
+          groupId: chat.groupId,
+        },
+      };
+    }
+
+    const npcGroups = await db.group.findMany({
+      where: { ownerId: npcId, type: 'npc' },
+      select: { id: true, name: true },
+    });
+    if (npcGroups.length === 0) {
+      return { ok: false, error: 'NPC has no group chat', status: 404 };
+    }
+    const groupChats = await db.chat.findMany({
+      where: { groupId: { in: npcGroups.map((g) => g.id) }, isGroup: true },
+      select: { id: true, name: true, groupId: true },
+    });
+    if (groupChats.length === 0) {
+      return { ok: false, error: 'NPC has no group chat', status: 404 };
+    }
+    if (groupChats.length > 1) {
+      return {
+        ok: false,
+        error: 'NPC owns multiple group chats; chatId is required',
+        status: 400,
+      };
+    }
+    const [chat] = groupChats;
+    const group = npcGroups.find((g) => g.id === chat?.groupId);
+    if (!chat?.groupId || !group) {
+      return { ok: false, error: 'NPC has no group chat', status: 404 };
+    }
+    return {
+      ok: true,
+      chat: {
+        chatId: chat.id,
+        chatName: chat.name ?? group.name,
+        groupId: chat.groupId,
+      },
+    };
+  });
 }
 
 /**
  * POST /api/admin/group-invite
- * Send a group chat invite from an NPC to a user
- * Admin only
+ * Add a user to an existing NPC-owned group chat and notify them.
+ * Admin only.
  */
 export const POST = withErrorHandling(async (request: NextRequest) => {
   const admin = await requireAdmin(request);
 
-  const body = await request.json();
-  const { npcId, userId, chatId, chatName } = body;
-
-  // Audit log the invite
-  logAdminModify({
-    adminId: admin.userId,
-    ipAddress: getClientIp(request.headers) ?? undefined,
-    resourceType: 'group_invite',
-    metadata: { action: 'send_group_invite', npcId, userId, chatId },
-  });
-
-  // Validate inputs
-  if (!npcId || !userId) {
+  const parsed = GroupInviteSchema.safeParse(await request.json());
+  if (!parsed.success) {
     return NextResponse.json(
-      { error: 'npcId and userId are required' },
+      { error: parsed.error.issues[0]?.message ?? 'Invalid request body' },
       { status: 400 }
     );
   }
+  const { npcId, userId, chatId } = parsed.data;
 
   // Verify NPC exists
   const staticActor = StaticDataRegistry.getActor(npcId);
@@ -160,24 +218,21 @@ export const POST = withErrorHandling(async (request: NextRequest) => {
     return NextResponse.json({ error: 'User not found' }, { status: 404 });
   }
 
-  // Check if user is already a member
-  const finalChatIdCheck = chatId || `${npcId}-owned-chat`;
-  const existingMembership = await asSystem(async (db) => {
-    // First find the group for this chat
-    const chat = await db.chat.findUnique({
-      where: { id: finalChatIdCheck },
-      select: { groupId: true },
-    });
-    if (!chat?.groupId) return null;
+  const target = await resolveNpcGroupChat(npcId, chatId);
+  if (!target.ok) {
+    return NextResponse.json(
+      { error: target.error },
+      { status: target.status }
+    );
+  }
+  const { chatId: finalChatId, chatName, groupId } = target.chat;
 
-    return await db.groupMember.findFirst({
-      where: {
-        groupId: chat.groupId,
-        userId,
-        isActive: true,
-      },
-    });
-  });
+  // Check if user is already a member of the verified group
+  const existingMembership = await asSystem(async (db) =>
+    db.groupMember.findFirst({
+      where: { groupId, userId, isActive: true },
+    })
+  );
 
   if (existingMembership) {
     return NextResponse.json(
@@ -206,7 +261,6 @@ export const POST = withErrorHandling(async (request: NextRequest) => {
     return npcGroups;
   });
 
-  const { GROUP_CONFIG } = await import('@feed/shared');
   if (npcGroupCount >= GROUP_CONFIG.MAX_ACTIVE_USER_GROUPS) {
     return NextResponse.json(
       {
@@ -216,59 +270,16 @@ export const POST = withErrorHandling(async (request: NextRequest) => {
     );
   }
 
-  // Generate chat ID and name if not provided
-  const finalChatId = chatId || `${npcId}-owned-chat`;
   const npcName =
     'name' in npc ? npc.name : npc.displayName || npc.username || 'Unknown';
-  const finalChatName = chatName || `${npcName}'s Inner Circle`;
 
-  // Use deterministic groupId to prevent race conditions when creating groups
-  // Same chatId will always produce the same groupId
-  const deterministicGrpId = deterministicGroupId(finalChatId);
+  const participantId = await generateSnowflakeId();
+  const memberId = await generateSnowflakeId();
 
-  // Record the invite using atomic upsert operations to prevent race conditions
-  const groupId = await asSystem(async (db) => {
-    // Use transaction for atomicity
-    return await db.transaction(async (tx) => {
+  await asSystem(async (db) => {
+    await db.transaction(async (tx) => {
       const now = new Date();
 
-      // Step 1: Upsert the Group (INSERT ... ON CONFLICT DO NOTHING)
-      // Using deterministic ID ensures same group is used even with concurrent requests
-      await tx
-        .insert(groups)
-        .values({
-          id: deterministicGrpId,
-          name: finalChatName,
-          type: 'npc',
-          ownerId: npcId,
-          createdById: npcId,
-          createdAt: now,
-          updatedAt: now,
-        })
-        .onConflictDoNothing({ target: groups.id });
-
-      // Step 2: Upsert the Chat (INSERT ... ON CONFLICT DO UPDATE to set groupId)
-      await tx
-        .insert(chats)
-        .values({
-          id: finalChatId,
-          name: finalChatName,
-          isGroup: true,
-          gameId: 'realtime',
-          groupId: deterministicGrpId,
-          createdAt: now,
-          updatedAt: now,
-        })
-        .onConflictDoUpdate({
-          target: chats.id,
-          set: {
-            groupId: deterministicGrpId,
-            updatedAt: now,
-          },
-        });
-
-      // Step 3: Upsert ChatParticipant
-      const participantId = await generateSnowflakeId();
       await tx
         .insert(chatParticipants)
         .values({
@@ -286,13 +297,11 @@ export const POST = withErrorHandling(async (request: NextRequest) => {
           },
         });
 
-      // Step 4: Upsert GroupMember using full unique constraint
-      const memberId = await generateSnowflakeId();
       await tx
         .insert(groupMembers)
         .values({
           id: memberId,
-          groupId: deterministicGrpId,
+          groupId,
           userId,
           role: 'member',
           addedBy: npcId,
@@ -312,20 +321,31 @@ export const POST = withErrorHandling(async (request: NextRequest) => {
             kickReason: sql`NULL`,
           },
         });
-
-      return deterministicGrpId;
     });
   });
 
+  await logAdminModify({
+    adminId: admin.userId,
+    ipAddress: getClientIp(request.headers) ?? undefined,
+    resourceType: 'group_invite',
+    resourceId: groupId,
+    metadata: {
+      action: 'send_group_invite',
+      npcId,
+      userId,
+      chatId: finalChatId,
+    },
+  });
+
   // Send notification to user (admin adds are immediate, no inviteId needed)
-  await notifyGroupChatInvite(userId, npcId, groupId, finalChatName);
+  await notifyGroupChatInvite(userId, npcId, groupId, chatName);
 
   return NextResponse.json({
     success: true,
-    message: `Invited ${targetUser.displayName || targetUser.username} to ${finalChatName}`,
+    message: `Invited ${targetUser.displayName || targetUser.username} to ${chatName}`,
     data: {
       chatId: finalChatId,
-      chatName: finalChatName,
+      chatName,
       npcId,
       npcName,
       userId,

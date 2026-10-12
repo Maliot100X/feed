@@ -319,15 +319,15 @@ async function collectMetrics(snapshotTime: Date) {
     }>`
         SELECT
           COALESCE(
-            (SELECT ABS(SUM(amount::numeric)) FROM "BalanceTransaction" 
+            (SELECT SUM(ABS(amount::numeric)) FROM "BalanceTransaction" 
              WHERE "createdAt" >= ${oneHourAgoStr}::timestamp 
              AND "createdAt" < ${snapshotTimeStr}::timestamp
-             AND type IN ('prediction_buy', 'prediction_sell')), 0
+             AND type IN ('pred_buy', 'pred_sell')), 0
           )::text as volume,
           (SELECT COUNT(*) FROM "Market" WHERE resolved = false)::text as "activeMarkets",
           (SELECT COUNT(*) FROM "Position" WHERE shares::numeric > 0)::text as "openPositions",
           COALESCE(
-            (SELECT ABS(SUM(amount::numeric)) FROM "BalanceTransaction" 
+            (SELECT SUM(ABS(amount::numeric)) FROM "BalanceTransaction" 
              WHERE "createdAt" >= ${oneHourAgoStr}::timestamp 
              AND "createdAt" < ${snapshotTimeStr}::timestamp
              AND type IN ('perp_open', 'perp_close')), 0

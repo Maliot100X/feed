@@ -14,6 +14,7 @@ import {
   desc,
   eq,
   getDbInstance,
+  gt,
   isNull,
   markets,
   perpPositions,
@@ -124,7 +125,8 @@ export class AutonomousTradingService {
     const predictionMarkets = await db
       .select()
       .from(markets)
-      .where(eq(markets.resolved, false))
+      // Exclude expired-but-unresolved contracts: they are not tradable.
+      .where(and(eq(markets.resolved, false), gt(markets.endDate, new Date())))
       .orderBy(desc(markets.createdAt))
       .limit(10);
 

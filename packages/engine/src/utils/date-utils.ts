@@ -6,23 +6,23 @@
 import { logger } from '@feed/shared';
 
 /**
- * Extract day number from timestamp string.
- * Assumes game runs in October 2025 format: "2025-10-DDTHH:MM:SSZ"
+ * Extract the calendar day-of-month from an ISO-like timestamp string
+ * ("YYYY-MM-DDTHH:MM:SSZ"). Returns 0 when no valid calendar date is present
+ * (including impossible dates such as 2025-02-30).
  */
 export function extractDayFromTimestamp(timestamp: string): number {
-  // Try ISO format: "2025-10-15T12:00:00Z"
-  const isoMatch = timestamp.match(/2025-10-(\d{2})/);
-  if (isoMatch) {
-    return Number.parseInt(isoMatch[1]!, 10);
-  }
+  const match = timestamp.match(/(\d{4})-(\d{2})-(\d{2})T/);
+  if (!match) return 0;
 
-  // Fallback: try to extract from any date format
-  const dateMatch = timestamp.match(/-(\d{2})T/);
-  if (dateMatch) {
-    return Number.parseInt(dateMatch[1]!, 10);
-  }
-
-  return 0;
+  const year = Number.parseInt(match[1]!, 10);
+  const month = Number.parseInt(match[2]!, 10);
+  const day = Number.parseInt(match[3]!, 10);
+  const date = new Date(Date.UTC(year, month - 1, day));
+  const isValidCalendarDate =
+    date.getUTCFullYear() === year &&
+    date.getUTCMonth() === month - 1 &&
+    date.getUTCDate() === day;
+  return isValidCalendarDate ? day : 0;
 }
 
 /**
@@ -99,10 +99,13 @@ export function getGameDayNumber(startedAt: Date, timestamp: Date): number {
 /**
  * Validate a dayNumber for storage in Post/WorldEvent int columns.
  * Days are 1-indexed (Day 1 is the first day of the game).
- * Returns undefined for invalid day numbers to prevent DB errors.
+ * Returns undefined for invalid day numbers (non-integers included) to
+ * prevent DB errors.
  */
 export function toSafeDayNumber(dayNumber: number): number | undefined {
-  return Number.isFinite(dayNumber) && dayNumber >= 1 && dayNumber <= 2147483647
+  return Number.isInteger(dayNumber) &&
+    dayNumber >= 1 &&
+    dayNumber <= 2147483647
     ? dayNumber
     : undefined;
 }

@@ -60,18 +60,7 @@
 
 import { teamChatService } from '@feed/agents';
 import { authenticateUser, withErrorHandling } from '@feed/api';
-import {
-  chatParticipants,
-  chats,
-  db,
-  eq,
-  groupMembers,
-  groups,
-  inArray,
-  messages,
-  userAgentConfigs,
-  withTransaction,
-} from '@feed/db';
+import { db, inArray, userAgentConfigs } from '@feed/db';
 import { logger, toISO } from '@feed/shared';
 import type { NextRequest } from 'next/server';
 import { NextResponse } from 'next/server';
@@ -208,93 +197,5 @@ export const POST = withErrorHandling(async function POST(req: NextRequest) {
       agentCount: agents.length,
     },
     syncedAgents: syncedCount,
-  });
-});
-
-/**
- * DELETE /api/agents/team-chat
- * Reset/delete team chat (for clearing corrupted state)
- *
- * ⚠️ DESTRUCTIVE OPERATION - DEVELOPMENT ONLY:
- * Disabled in production. Use only for development/testing.
- *
- * This permanently deletes all Agents data including:
- * - All messages and conversation history
- * - Group membership records
- * - Chat participant records
- *
- * This operation cannot be undone. Use only for:
- * - Clearing corrupted state
- * - User account cleanup
- * - Development/testing reset
- *
- * The team chat will be recreated automatically when the user
- * visits Agents again or when an agent is created.
- */
-export const DELETE = withErrorHandling(async function DELETE(
-  req: NextRequest
-) {
-  // Gate destructive endpoint to development only
-  if (process.env.NODE_ENV === 'production') {
-    return NextResponse.json(
-      { success: false, error: 'This endpoint is disabled in production' },
-      { status: 403 }
-    );
-  }
-
-  const user = await authenticateUser(req);
-
-  const teamChat = await teamChatService.getTeamChat(user.id);
-
-  if (!teamChat) {
-    return NextResponse.json(
-      { success: false, error: 'No team chat exists to delete' },
-      { status: 404 }
-    );
-  }
-
-  logger.warn(
-    `Deleting team chat (destructive operation)`,
-    { chatId: teamChat.chatId, groupId: teamChat.groupId },
-    'TeamChatAPI'
-  );
-
-  // Delete all related data in a transaction for atomicity
-  // Need to delete all chats in the group, not just the active one
-  await withTransaction(async (tx) => {
-    // Get all chats in this group
-    const allChatsInGroup = await tx
-      .select({ id: chats.id })
-      .from(chats)
-      .where(eq(chats.groupId, teamChat.groupId));
-    const chatIds = allChatsInGroup.map((c) => c.id);
-
-    if (chatIds.length > 0) {
-      // Delete messages for all chats
-      await tx.delete(messages).where(inArray(messages.chatId, chatIds));
-      // Delete participants for all chats
-      await tx
-        .delete(chatParticipants)
-        .where(inArray(chatParticipants.chatId, chatIds));
-      // Delete all chats
-      await tx.delete(chats).where(inArray(chats.id, chatIds));
-    }
-
-    // Delete group members and the group itself
-    await tx
-      .delete(groupMembers)
-      .where(eq(groupMembers.groupId, teamChat.groupId));
-    await tx.delete(groups).where(eq(groups.id, teamChat.groupId));
-  });
-
-  logger.info(
-    `Team chat deleted`,
-    { chatId: teamChat.chatId, groupId: teamChat.groupId },
-    'TeamChatAPI'
-  );
-
-  return NextResponse.json({
-    success: true,
-    message: 'Team chat deleted. Visit Agents again to create a fresh one.',
   });
 });

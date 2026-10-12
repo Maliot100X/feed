@@ -5,7 +5,6 @@
  */
 
 import { JsonStorageProvider } from './adapters/json';
-import { PostgresStorageProvider } from './adapters/postgres';
 import type {
   IStorageProvider,
   StorageProviderConfig,
@@ -22,33 +21,21 @@ import { setStorageProvider } from './ports/storage-provider';
  *   mode: 'json',
  *   jsonBasePath: './simulation-data',
  * });
- *
- * // For production (PostgreSQL)
- * const provider = await createStorageProvider({ mode: 'postgres' });
  * ```
+ *
+ * Production code uses @feed/db directly; there is no PostgreSQL provider.
  */
 export async function createStorageProvider(
   config: StorageProviderConfig
 ): Promise<IStorageProvider> {
-  let provider: IStorageProvider;
-
-  switch (config.mode) {
-    case 'json':
-      provider = new JsonStorageProvider(config);
-      break;
-    case 'memory':
-      // Memory mode uses JSON provider without persistence
-      provider = new JsonStorageProvider({
-        ...config,
-        persistOnChange: false,
-      });
-      break;
-    case 'postgres':
-      provider = new PostgresStorageProvider();
-      break;
-    default:
-      throw new Error(`Unknown storage mode: ${config.mode}`);
+  const mode: string = config.mode;
+  if (mode !== 'json' && mode !== 'memory') {
+    throw new Error(
+      `Unsupported storage mode: ${mode}. Supported modes: json, memory.`
+    );
   }
+  // Memory mode uses the JSON provider with all implicit disk I/O disabled.
+  const provider: IStorageProvider = new JsonStorageProvider(config);
 
   // Initialize and set as global provider
   await provider.initialize();

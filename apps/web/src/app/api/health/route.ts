@@ -5,10 +5,10 @@ import { NextResponse } from 'next/server';
  * Health Check API
  *
  * @description
- * Health check endpoint for monitoring service availability. Returns server status,
- * timestamp, and environment information. Used by:
- * - CI/CD pipelines (GitHub Actions) to verify deployment readiness
- * - Load balancers for health checks
+ * Cheap process liveness check. Returns server status, timestamp, and
+ * environment. It does NOT check dependencies (database, Redis, providers) or
+ * the deployed revision, so it is not a readiness signal. Used by:
+ * - Load balancers / uptime monitors for liveness
  * - Monitoring services (Datadog, New Relic, etc.)
  * - Uptime monitoring tools
  *

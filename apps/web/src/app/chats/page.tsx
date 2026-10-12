@@ -15,21 +15,11 @@ import {
 } from '@/components/chats';
 import { CreateGroupModal } from '@/components/groups/CreateGroupModal';
 import { GroupManagementModal } from '@/components/groups/GroupManagementModal';
-import { useAuth } from '@/hooks/useAuth';
-import { useOwnedAgents } from '@/hooks/useOwnedAgents';
-import { useSSE } from '@/hooks/useSSE';
+import { useLoginModal } from '@/hooks/useLoginModal';
 
 export default function ChatsPage() {
   const router = useRouter();
-  const { login } = useAuth();
-
-  // Get global SSE connection status
-  const { isConnected: globalSSEConnected } = useSSE({
-    channels: ['feed'],
-  });
-
-  // Hook kept for potential future use (owned agent detection is via chatDetails)
-  useOwnedAgents();
+  const queueLoginModal = useLoginModal((state) => state.queueLoginModal);
 
   const {
     // Auth
@@ -117,10 +107,9 @@ export default function ChatsPage() {
   // Auth required — redirect to feed and show login
   useEffect(() => {
     if (!ready || authenticated) return;
-    router.push('/feed');
-    const timer = setTimeout(() => login(), 500);
-    return () => clearTimeout(timer);
-  }, [ready, authenticated, router, login]);
+    queueLoginModal();
+    router.replace('/feed');
+  }, [ready, authenticated, router, queueLoginModal]);
 
   if (ready && !authenticated) {
     return null;
@@ -131,9 +120,9 @@ export default function ChatsPage() {
 
   return (
     <>
-      {/* Mobile: fixed between MobileHeader (top-14) and BottomNav (bottom-14) */}
+      {/* Mobile: fixed between MobileHeader (top-14) and BottomNav (--bottom-nav-height; 0 while the keyboard is open) */}
       {/* Desktop: normal flow, full viewport height */}
-      <div className="fixed inset-x-0 top-14 bottom-14 z-30 flex flex-col overflow-hidden border-border md:relative md:inset-auto md:z-auto md:h-dvh lg:border-l">
+      <div className="fixed inset-x-0 top-14 bottom-[var(--bottom-nav-height)] z-30 flex flex-col overflow-hidden border-border md:relative md:inset-auto md:z-auto md:h-dvh lg:border-l">
         <div className="flex min-h-0 flex-1 overflow-hidden">
           {/* Left Column: Chat List */}
           {/* Mobile: full width when no chat selected, hidden when chat selected */}
@@ -148,7 +137,7 @@ export default function ChatsPage() {
             )}
           >
             <ChatHeader
-              isConnected={globalSSEConnected}
+              isConnected={sseConnected}
               activeFilter={activeFilter}
               onFilterChange={setActiveFilter}
               onCreateGroup={() => setIsCreateGroupModalOpen(true)}

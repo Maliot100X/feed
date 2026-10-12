@@ -192,7 +192,11 @@ mock.module('../services/world-facts-generator', () => ({
 
 // Import the function AFTER mocks are set up
 // Note: In Bun, mock.module is hoisted, so this import will use the mocked modules
-import { GENERATION_MARKER, updateWorldFactsIfNeeded } from '../game-tick';
+import {
+  computeLockRenewalIntervalMs,
+  GENERATION_MARKER,
+  updateWorldFactsIfNeeded,
+} from '../game-tick';
 
 // Helper to reset all mocks and flags
 function resetMocks() {
@@ -220,53 +224,24 @@ function resetMocks() {
 }
 
 describe('World Facts Update - Lock Renewal Interval Calculation', () => {
-  test('lock renewal interval is half of lock duration', () => {
-    // Default lock duration is 30 minutes = 1,800,000 ms
-    // Half of that is 15 minutes = 900,000 ms
-    // Minimum is 1 minute = 60,000 ms
-    // So default should be 900,000 ms (15 minutes)
-    const DEFAULT_LOCK_DURATION_MINUTES = 30;
-    const lockDurationMs = DEFAULT_LOCK_DURATION_MINUTES * 60 * 1000;
-    const minRenewalMs = 60 * 1000; // 1 minute
-
-    const expectedRenewalInterval = Math.max(
-      minRenewalMs,
-      Math.floor(lockDurationMs / 2)
-    );
-
-    expect(expectedRenewalInterval).toBe(15 * 60 * 1000); // 15 minutes
+  test('renews at half the lock duration', () => {
+    expect(computeLockRenewalIntervalMs(30 * 60 * 1000)).toBe(15 * 60 * 1000);
   });
 
-  test('lock renewal interval respects minimum of 1 minute', () => {
-    // If lock duration is 1 minute = 60,000 ms
-    // Half of that is 30 seconds = 30,000 ms
-    // But minimum is 1 minute = 60,000 ms
-    // So renewal should be 60,000 ms (1 minute)
-    const shortLockDurationMs = 60 * 1000; // 1 minute
-    const minRenewalMs = 60 * 1000; // 1 minute
-
-    const expectedRenewalInterval = Math.max(
-      minRenewalMs,
-      Math.floor(shortLockDurationMs / 2)
-    );
-
-    expect(expectedRenewalInterval).toBe(60 * 1000); // 1 minute minimum
+  test('short locks still renew before they expire', () => {
+    for (const durationMs of [30_000, 60_000, 3, 2]) {
+      const interval = computeLockRenewalIntervalMs(durationMs);
+      expect(interval).toBeGreaterThan(0);
+      expect(interval).toBeLessThan(durationMs);
+    }
   });
 
-  test('lock renewal interval is clamped for very short lock durations', () => {
-    // If lock duration is 30 seconds = 30,000 ms
-    // Half of that is 15 seconds = 15,000 ms
-    // But minimum is 1 minute = 60,000 ms
-    // So renewal should be 60,000 ms (1 minute)
-    const veryShortLockDurationMs = 30 * 1000; // 30 seconds
-    const minRenewalMs = 60 * 1000; // 1 minute
-
-    const expectedRenewalInterval = Math.max(
-      minRenewalMs,
-      Math.floor(veryShortLockDurationMs / 2)
-    );
-
-    expect(expectedRenewalInterval).toBe(60 * 1000); // 1 minute minimum
+  test('rejects durations that cannot renew before expiry', () => {
+    for (const durationMs of [0, 1, -5, Number.NaN]) {
+      expect(() => computeLockRenewalIntervalMs(durationMs)).toThrow(
+        'Lock duration must be a finite number'
+      );
+    }
   });
 });
 
@@ -494,17 +469,8 @@ describe('World Facts Update - Successful Run', () => {
 });
 
 describe('World Facts Update - Marker Persistence Integration', () => {
-  /**
-   * Note: Due to Bun test isolation, some mocks may not be applied correctly
-   * when running alongside other tests. The marker insertion logic is verified
-   * through the following approach:
-   * 1. Verify the function completes without throwing
-   * 2. Verify the expected data structure matches what the code produces
-   *
-   * The actual marker insertion is tested by verifying:
-   * - The insert mock captures data when called
-   * - The marker structure follows the expected format
-   */
+  // The unit runner executes each file in its own process, so the module
+  // mocks above always apply and the production marker insert is captured.
 
   beforeEach(() => {
     resetMocks();
@@ -521,7 +487,7 @@ describe('World Facts Update - Marker Persistence Integration', () => {
     expect(result.stats?.worldFactsGenerated).toBeGreaterThanOrEqual(0);
   });
 
-  test('marker data structure is correct when captured', async () => {
+  test('inserts the generation marker after a successful run', async () => {
     // Reset insertedMarkers to ensure clean state
     insertedMarkers = [];
 
@@ -529,94 +495,23 @@ describe('World Facts Update - Marker Persistence Integration', () => {
     const result = await updateWorldFactsIfNeeded();
     expect(result.updated).toBe(true);
 
-    // Check if the marker was captured by the mock
-    // Due to Bun test isolation, the mock may not capture inserts from the
-    // actual function. If captured, verify the actual marker structure.
-    // Otherwise, verify the mock works directly (proves structure is correct).
-    if (insertedMarkers.length > 0) {
-      // Find the generation marker in insertedMarkers using imported constants
-      const actualMarker = insertedMarkers.find(
-        (m) =>
-          m.category === GENERATION_MARKER.CATEGORY &&
-          m.key === GENERATION_MARKER.KEY
-      );
-      expect(actualMarker).toBeDefined();
-
-      // Assert the implementation output matches the imported constants (DRY)
-      expect(actualMarker!.category).toBe(GENERATION_MARKER.CATEGORY);
-      expect(actualMarker!.key).toBe(GENERATION_MARKER.KEY);
-      expect(actualMarker!.isActive).toBe(GENERATION_MARKER.IS_ACTIVE);
-      expect(actualMarker!.priority).toBe(GENERATION_MARKER.PRIORITY);
-      expect(actualMarker!.source).toBe(GENERATION_MARKER.SOURCE);
-      expect(actualMarker!.label).toBe(GENERATION_MARKER.LABEL);
-
-      // For timestamps/IDs, use flexible matchers
-      expect(actualMarker!.id).toBe('test-snowflake-id'); // From mock
-      expect(actualMarker!.createdAt).toBeInstanceOf(Date);
-      expect(actualMarker!.updatedAt).toBeInstanceOf(Date);
-      expect(actualMarker!.lastUpdated).toBeInstanceOf(Date);
-
-      // Verify value format contains expected pattern
-      expect(typeof actualMarker!.value).toBe('string');
-      expect(actualMarker!.value as string).toContain('Generation run at');
-      expect(actualMarker!.value as string).toContain('facts created');
-    } else {
-      // FALLBACK FOR BUN TEST ISOLATION:
-      // When Bun's test isolation prevents insertedMarkers from capturing actual
-      // function calls, we exercise the mock (mockInsertValues) directly instead
-      // of verifying production behavior. This proves the expected marker structure
-      // matches GENERATION_MARKER constants when the mock is invoked, even though
-      // it doesn't validate the actual updateWorldFactsIfNeeded() insert path.
-      // We call mockInsertValues() directly and verify insertedMarkers contains
-      // the expected shape - this is explicitly NOT testing production code.
-      const now = new Date();
-      const testMarker = {
-        id: 'test-snowflake-id',
-        category: GENERATION_MARKER.CATEGORY,
-        key: GENERATION_MARKER.KEY,
-        label: GENERATION_MARKER.LABEL,
-        value: `Generation run at ${now.toISOString()} - 5 facts created`,
-        source: GENERATION_MARKER.SOURCE,
-        lastUpdated: now,
-        isActive: GENERATION_MARKER.IS_ACTIVE,
-        priority: GENERATION_MARKER.PRIORITY,
-        createdAt: now,
-        updatedAt: now,
-      };
-
-      // Directly invoke the mock to verify it captures data correctly
-      mockInsertValues(testMarker);
-      expect(insertedMarkers.length).toBe(1);
-
-      const actualMarker = insertedMarkers[0];
-      expect(actualMarker).toBeDefined();
-
-      // Verify using imported constants (DRY - single source of truth)
-      expect(actualMarker!.category).toBe(GENERATION_MARKER.CATEGORY);
-      expect(actualMarker!.key).toBe(GENERATION_MARKER.KEY);
-      expect(actualMarker!.isActive).toBe(GENERATION_MARKER.IS_ACTIVE);
-      expect(actualMarker!.priority).toBe(GENERATION_MARKER.PRIORITY);
-      expect(actualMarker!.source).toBe(GENERATION_MARKER.SOURCE);
-      expect(actualMarker!.label).toBe(GENERATION_MARKER.LABEL);
-      expect(actualMarker!.value).toContain('Generation run at');
-      expect(actualMarker!.value).toContain('facts created');
-    }
-  });
-
-  test('insert mock captures data correctly', () => {
-    // Test the mock directly
-    const testData = { key: 'test-marker', value: 'test-value' };
-    mockInsertValues(testData);
-
-    expect(insertedMarkers.length).toBe(1);
-    expect(insertedMarkers[0]).toEqual(testData);
-  });
-
-  test('insert mock rejects when markerInsertThrows is true', async () => {
-    markerInsertThrows = true;
-
-    await expect(mockInsertValues({ key: 'test' })).rejects.toThrow(
-      'Marker insert failed'
+    const actualMarker = insertedMarkers.find(
+      (m) =>
+        m.category === GENERATION_MARKER.CATEGORY &&
+        m.key === GENERATION_MARKER.KEY
     );
+    expect(actualMarker).toBeDefined();
+
+    expect(actualMarker!.isActive).toBe(GENERATION_MARKER.IS_ACTIVE);
+    expect(actualMarker!.priority).toBe(GENERATION_MARKER.PRIORITY);
+    expect(actualMarker!.source).toBe(GENERATION_MARKER.SOURCE);
+    expect(actualMarker!.label).toBe(GENERATION_MARKER.LABEL);
+    expect(actualMarker!.id).toBe('test-snowflake-id'); // From mock
+    expect(actualMarker!.createdAt).toBeInstanceOf(Date);
+    expect(actualMarker!.updatedAt).toBeInstanceOf(Date);
+    expect(actualMarker!.lastUpdated).toBeInstanceOf(Date);
+    expect(typeof actualMarker!.value).toBe('string');
+    expect(actualMarker!.value as string).toContain('Generation run at');
+    expect(actualMarker!.value as string).toContain('facts created');
   });
 });

@@ -2,7 +2,7 @@
  * Admin Moderation Escrow Verify Payment API
  *
  * @route POST /api/admin/moderation-escrow/verify-payment - Verify payment
- * @access Admin
+ * @access Admin with manage_escrow permission (SUPER_ADMIN by default)
  *
  * @description
  * Verifies that an escrow payment was completed on-chain. Checks transaction
@@ -56,7 +56,7 @@
  */
 
 import { escrowErrorHttpStatus, verifyEscrowPayment } from '@feed/a2a';
-import { requireAdmin, withErrorHandling } from '@feed/api';
+import { requirePermission, withErrorHandling } from '@feed/api';
 import { logger } from '@feed/shared';
 import type { NextRequest } from 'next/server';
 import { NextResponse } from 'next/server';
@@ -71,7 +71,7 @@ const VerifyEscrowPaymentSchema = z.object({
 });
 
 export const POST = withErrorHandling(async function POST(req: NextRequest) {
-  const adminUser = await requireAdmin(req);
+  const adminUser = await requirePermission(req, 'manage_escrow');
   const adminId = adminUser.userId;
 
   const body = await req.json();

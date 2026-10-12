@@ -289,38 +289,44 @@ describe('Posting Probability Service - Weighted Random Sample', () => {
     expect(result.length).toBe(2);
   });
 
-  test('handles all-zero probabilities gracefully', () => {
-    const candidates = [
+  test('never selects zero-weight (ineligible) candidates', () => {
+    const allZero = [
       { probability: 0, id: 'a' },
       { probability: 0, id: 'b' },
       { probability: 0, id: 'c' },
     ];
-    const result = weightedRandomSample(candidates, 2);
+    expect(weightedRandomSample(allZero, 2)).toEqual([]);
 
-    // Should still return 2 items (random selection fallback)
-    expect(result.length).toBe(2);
+    const mixed = [
+      { probability: 0, id: 'capped' },
+      { probability: 0.4, id: 'ok' },
+    ];
+    expect(weightedRandomSample(mixed, 2).map((c) => c.id)).toEqual(['ok']);
   });
 
-  test('higher probability candidates are selected more often', () => {
+  test('selects by cumulative weight with a deterministic rng', () => {
     const candidates = [
-      { probability: 0.9, id: 'high' },
-      { probability: 0.01, id: 'low' },
+      { probability: 0.25, id: 'a' },
+      { probability: 0.75, id: 'b' },
+      { probability: 0, id: 'z' },
     ];
+    // rng * total(1.0): [0, 0.25) -> a, [0.25, 1) -> b
+    expect(weightedRandomSample(candidates, 1, () => 0)[0]?.id).toBe('a');
+    expect(weightedRandomSample(candidates, 1, () => 0.2499)[0]?.id).toBe('a');
+    expect(weightedRandomSample(candidates, 1, () => 0.25)[0]?.id).toBe('b');
+    expect(weightedRandomSample(candidates, 1, () => 0.9999)[0]?.id).toBe('b');
+  });
 
-    let highCount = 0;
-    // Increase iterations for more stable statistical results
-    const iterations = 1000;
-
-    for (let i = 0; i < iterations; i++) {
-      const result = weightedRandomSample(candidates, 1);
-      if (result[0]?.id === 'high') {
-        highCount++;
-      }
-    }
-
-    // With 0.9/(0.9+0.01) ≈ 98.9% probability, expect at least 850 hits out of 1000
-    // Using a generous threshold to avoid flakiness
-    expect(highCount).toBeGreaterThan(850);
+  test('rejects invalid counts and weights', () => {
+    expect(() => weightedRandomSample([{ probability: 1 }], -1)).toThrow(
+      RangeError
+    );
+    expect(() => weightedRandomSample([{ probability: 1 }], 1.5)).toThrow(
+      RangeError
+    );
+    expect(() =>
+      weightedRandomSample([{ probability: Number.NaN }], 1)
+    ).toThrow(RangeError);
   });
 
   test('does not include duplicates in result', () => {

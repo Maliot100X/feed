@@ -62,18 +62,6 @@ export * from './export';
 // - exportGroupedForGRPO() - Groups for RULER ranking
 
 // ==========================================
-// ADVANCED: Manual Instrumentation
-// Only use if you need custom control beyond actions
-// ==========================================
-export * from './integration';
-// Exports:
-// - startAutonomousTick()
-// - endAutonomousTick()
-// - loggedLLMCall()
-// - logProviderAccess()
-// - withTrajectoryLogging()
-
-// ==========================================
 // REWARD SCORING
 // Deterministic judge is auto-called in endTrajectory().
 // For manual scoring, import from @feed/training directly:

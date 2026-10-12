@@ -4,11 +4,18 @@ export const dynamic = 'force-dynamic';
 
 import type { CommentData } from '@feed/shared';
 import { cn, getProfileUrl } from '@feed/shared';
-import { ArrowLeft, MessageCircle, Repeat2 } from 'lucide-react';
+import { ArrowLeft, MessageCircle } from 'lucide-react';
 import nextDynamic from 'next/dynamic';
 import Link from 'next/link';
 import { useRouter } from 'next/navigation';
-import { use, useCallback, useEffect, useRef, useState } from 'react';
+import {
+  type ReactNode,
+  use,
+  useCallback,
+  useEffect,
+  useRef,
+  useState,
+} from 'react';
 import { CommentInput } from '@/components/interactions/CommentInput';
 import { InteractionBar } from '@/components/interactions/InteractionBar';
 import { LikeButton } from '@/components/interactions/LikeButton';
@@ -108,6 +115,14 @@ interface PostData {
   isShared: boolean;
 }
 
+/** `GET /api/comments/[id]` response body (not wrapped in `data`). */
+interface CommentThreadData {
+  comment: CommentDetail;
+  replies?: Reply[];
+  parentChain?: ParentComment[];
+  post?: PostData | null;
+}
+
 /**
  * Original post card - shows at the top of the comment thread
  * Clickable to navigate to the full post
@@ -116,9 +131,9 @@ interface PostData {
 function OriginalPostCard({ post }: { post: PostData }) {
   const router = useRouter();
   const { user } = useAuth();
-  const showVerifiedBadge = isNpcIdentifier(post.authorId);
-  const isOwnPost = user?.id === post.authorId;
   const authorIsNPC = isNpcIdentifier(post.authorId);
+  const showVerifiedBadge = authorIsNPC;
+  const isOwnPost = user?.id === post.authorId;
 
   return (
     <div className="relative">
@@ -222,25 +237,18 @@ function OriginalPostCard({ post }: { post: PostData }) {
  * Parent comment card - shows in the thread chain above main comment
  * Clickable to navigate to that comment's thread
  */
-function ParentCommentCard({
-  parent,
-  showConnector,
-}: {
-  parent: ParentComment;
-  showConnector: boolean;
-}) {
+function ParentCommentCard({ parent }: { parent: ParentComment }) {
   const router = useRouter();
   const { user } = useAuth();
-  const showVerifiedBadge = isNpcIdentifier(parent.authorId);
-  const isOwnComment = user?.id === parent.authorId;
   const authorIsNPC = isNpcIdentifier(parent.authorId);
+  const showVerifiedBadge = authorIsNPC;
+  const isOwnComment = user?.id === parent.authorId;
 
   return (
     <div className="relative">
       {/* Connector line - from avatar center down */}
-      {showConnector && (
-        <div className="absolute top-16 -bottom-3 left-[2.25rem] w-0.5 bg-border sm:left-[2.75rem]" />
-      )}
+      {/* Every parent leads down to the main comment */}
+      <div className="absolute top-16 -bottom-3 left-[2.25rem] w-0.5 bg-border sm:left-[2.75rem]" />
 
       <div
         className="flex cursor-pointer gap-3 px-4 py-3 transition-colors hover:bg-muted/50 sm:px-6"
@@ -323,16 +331,17 @@ function ReplyCard({
   onReplySubmit,
 }: {
   reply: Reply;
-  postId: string;
+  /** null when the parent post isn't accessible; replying is then disabled. */
+  postId: string | null;
   onReplySubmit: () => void;
 }) {
   const router = useRouter();
   const { user } = useAuth();
-  const showVerifiedBadge = isNpcIdentifier(reply.authorId);
+  const authorIsNPC = isNpcIdentifier(reply.authorId);
+  const showVerifiedBadge = authorIsNPC;
   const hasReplies = reply.replyCount > 0;
   const [isReplying, setIsReplying] = useState(false);
   const isOwnComment = user?.id === reply.authorId;
-  const authorIsNPC = isNpcIdentifier(reply.authorId);
 
   const handleNavigateToReply = () => {
     router.push(`/comment/${reply.id}`);
@@ -422,7 +431,7 @@ function ReplyCard({
 
           {/* Footer actions - matches feed InteractionBar style */}
           <div
-            className="mt-2 flex w-full items-center justify-between text-muted-foreground"
+            className="mt-2 flex w-full items-center gap-10 text-muted-foreground"
             onClick={(e) => e.stopPropagation()}
           >
             {/* Reply button */}
@@ -446,17 +455,6 @@ function ReplyCard({
               )}
             </button>
 
-            {/* Repost button (placeholder) */}
-            <div>
-              <button
-                type="button"
-                disabled
-                className="flex cursor-default items-center gap-1 text-muted-foreground/40 text-xs"
-              >
-                <Repeat2 size={18} />
-              </button>
-            </div>
-
             {/* Like button */}
             <div>
               <LikeButton
@@ -471,7 +469,7 @@ function ReplyCard({
           </div>
 
           {/* Inline reply input */}
-          {isReplying && (
+          {isReplying && postId && (
             <div className="mt-3" onClick={(e) => e.stopPropagation()}>
               <CommentInput
                 postId={postId}
@@ -503,163 +501,103 @@ export default function CommentPage({ params }: CommentPageProps) {
   const [parentChain, setParentChain] = useState<ParentComment[]>([]);
   const [post, setPost] = useState<PostData | null>(null);
   const [isLoading, setIsLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
+  const [error, setError] = useState<'not-found' | 'failed' | null>(null);
   const [isReplying, setIsReplying] = useState(false);
+  // Incremented per load; late responses from an older load (e.g. previous
+  // route id) are ignored.
+  const loadGenerationRef = useRef(0);
 
-  const loadComment = useCallback(async () => {
-    setIsLoading(true);
-    setError(null);
+  /**
+   * Load the thread. A background refresh (after replying) keeps the current
+   * thread on screen instead of swapping to the skeleton.
+   */
+  const loadComment = useCallback(
+    async ({ background = false }: { background?: boolean } = {}) => {
+      const generation = ++loadGenerationRef.current;
+      if (!background) {
+        setIsLoading(true);
+        setError(null);
+      }
 
-    const response = await fetch(apiUrl(`/api/comments/${commentId}`));
+      const result = await fetch(
+        apiUrl(`/api/comments/${encodeURIComponent(commentId)}`)
+      )
+        .then(async (response) => {
+          if (response.status === 404) return 'not-found' as const;
+          if (!response.ok) return 'failed' as const;
+          return (await response.json()) as CommentThreadData;
+        })
+        .catch(() => 'failed' as const);
 
-    if (!response.ok) {
-      setError('Comment not found');
+      if (generation !== loadGenerationRef.current) return;
+
+      if (result === 'not-found' || result === 'failed') {
+        // Keep the visible thread if only a background refresh failed.
+        if (!background) setError(result);
+        setIsLoading(false);
+        return;
+      }
+
+      setComment(result.comment);
+      setReplies(result.replies ?? []);
+      setParentChain(result.parentChain ?? []);
+      setPost(result.post ?? null);
+      setError(null);
       setIsLoading(false);
-      return;
-    }
-
-    const result = await response.json();
-    const data = result.data || result;
-
-    setComment(data.comment);
-    setReplies(data.replies || []);
-    setParentChain(data.parentChain || []);
-    setPost(data.post || null);
-    setIsLoading(false);
-  }, [commentId]);
+    },
+    [commentId]
+  );
 
   useEffect(() => {
-    loadComment();
+    void loadComment();
   }, [loadComment]);
 
-  // Scroll to main comment when loaded (after parent chain)
+  // Scroll to the main comment once the thread (with parents above it) is
+  // first rendered for this comment id.
+  const scrolledForRef = useRef<string | null>(null);
   useEffect(() => {
-    if (
-      !isLoading &&
-      comment &&
-      parentChain.length > 0 &&
-      mainCommentRef.current
-    ) {
-      // Small delay to ensure DOM is rendered
-      setTimeout(() => {
-        mainCommentRef.current?.scrollIntoView({ behavior: 'instant' });
-      }, 50);
-    }
+    if (isLoading || !comment || parentChain.length === 0) return;
+    if (scrolledForRef.current === comment.id) return;
+    const frame = window.requestAnimationFrame(() => {
+      mainCommentRef.current?.scrollIntoView({ behavior: 'instant' });
+      scrolledForRef.current = comment.id;
+    });
+    return () => window.cancelAnimationFrame(frame);
   }, [isLoading, comment, parentChain.length]);
+
+  const refreshThread = useCallback(
+    () => loadComment({ background: true }),
+    [loadComment]
+  );
 
   const handleReplySubmit = async (_replyComment: CommentData) => {
     setIsReplying(false);
-    // Reload to get fresh data
-    await loadComment();
+    await refreshThread();
   };
 
   const { user } = useAuth();
-  const showVerifiedBadge = comment ? isNpcIdentifier(comment.authorId) : false;
-  const isOwnComment = comment ? user?.id === comment.authorId : false;
   const mainCommentAuthorIsNPC = comment
     ? isNpcIdentifier(comment.authorId)
     : false;
-
-  if (isLoading) {
-    return (
-      <PageContainer noPadding className="flex w-full flex-col">
-        <div className="relative flex min-h-dvh flex-1 md:min-h-screen">
-          {/* Desktop loading */}
-          <div className="hidden min-w-0 flex-1 flex-col border-border lg:flex lg:border-r lg:border-l">
-            <div className="sticky top-0 z-10 shrink-0 bg-background shadow-sm">
-              <div className="px-6 py-4">
-                <div className="flex items-center gap-4">
-                  <div className="h-9 w-9 rounded-full bg-muted" />
-                  <Skeleton className="h-6 w-20" />
-                </div>
-              </div>
-            </div>
-            <div className="flex-1 bg-background">
-              <div className="w-full lg:mx-auto lg:max-w-[700px]">
-                <div className="space-y-4 sm:px-4 sm:py-6">
-                  <Skeleton className="h-8 w-3/4" />
-                  <Skeleton className="h-32 w-full" />
-                  <Skeleton className="h-20 w-full" />
-                </div>
-              </div>
-            </div>
-          </div>
-          <WidgetSidebar showLatestNews={false} showMarkets={false} />
-          {/* Mobile loading */}
-          <div className="flex flex-1 flex-col lg:hidden">
-            <div className="sticky top-0 z-10 shrink-0 border-border border-b bg-background">
-              <div className="flex items-center gap-4 px-4 py-3">
-                <div className="h-9 w-9 rounded-full bg-muted" />
-                <Skeleton className="h-6 w-20" />
-              </div>
-            </div>
-            <div className="space-y-4 sm:px-4 sm:py-6">
-              <Skeleton className="h-8 w-3/4" />
-              <Skeleton className="h-32 w-full" />
-              <Skeleton className="h-20 w-full" />
-            </div>
-          </div>
-        </div>
-      </PageContainer>
-    );
-  }
-
-  if (error || !comment) {
-    return (
-      <PageContainer noPadding className="flex w-full flex-col">
-        <div className="relative flex min-h-dvh flex-1 md:min-h-screen">
-          {/* Desktop error */}
-          <div className="hidden min-w-0 flex-1 flex-col border-border lg:flex lg:border-r lg:border-l">
-            <div className="flex flex-1 flex-col items-center justify-center bg-background">
-              <div className="text-center">
-                <h1 className="mb-2 font-bold text-2xl">Comment Not Found</h1>
-                <p className="mb-4 text-muted-foreground">
-                  {error || 'The comment you are looking for does not exist.'}
-                </p>
-                <button
-                  onClick={() => router.push('/feed')}
-                  className="rounded-md bg-primary px-4 py-2 text-primary-foreground transition-colors hover:bg-primary/90"
-                >
-                  Go to Feed
-                </button>
-              </div>
-            </div>
-          </div>
-          <WidgetSidebar showLatestNews={false} showMarkets={false} />
-          {/* Mobile error */}
-          <div className="flex flex-1 flex-col items-center justify-center lg:hidden">
-            <div className="px-4 text-center">
-              <h1 className="mb-2 font-bold text-2xl">Comment Not Found</h1>
-              <p className="mb-4 text-muted-foreground">
-                {error || 'The comment you are looking for does not exist.'}
-              </p>
-              <button
-                onClick={() => router.push('/feed')}
-                className="rounded-md bg-primary px-4 py-2 text-primary-foreground transition-colors hover:bg-primary/90"
-              >
-                Go to Feed
-              </button>
-            </div>
-          </div>
-        </div>
-      </PageContainer>
-    );
-  }
+  const showVerifiedBadge = mainCommentAuthorIsNPC;
+  const isOwnComment = comment ? user?.id === comment.authorId : false;
 
   // Back: go to previous page when there's history; else fallback to thread hierarchy (parent comment > post > feed) for direct links / new tab
   const backButtonHandler = () => {
     if (typeof window !== 'undefined' && window.history.length > 1) {
       router.back();
     } else if (parentChain.length > 0) {
-      router.push(`/comment/${parentChain[parentChain.length - 1]?.id}`);
+      router.push(
+        `/comment/${encodeURIComponent(parentChain[parentChain.length - 1]?.id ?? '')}`
+      );
     } else if (post) {
-      router.push(`/post/${post.id}`);
+      router.push(`/post/${encodeURIComponent(post.id)}`);
     } else {
       router.push('/feed');
     }
   };
 
-  const threadContent = (
+  const renderThread = (comment: CommentDetail) => (
     <>
       {/* Original post */}
       {post && <OriginalPostCard post={post} />}
@@ -667,12 +605,8 @@ export default function CommentPage({ params }: CommentPageProps) {
       {/* Parent chain - show all parent comments leading up to this one */}
       {parentChain.length > 0 && (
         <div>
-          {parentChain.map((parent, index) => (
-            <ParentCommentCard
-              key={parent.id}
-              parent={parent}
-              showConnector={index < parentChain.length}
-            />
+          {parentChain.map((parent) => (
+            <ParentCommentCard key={parent.id} parent={parent} />
           ))}
         </div>
       )}
@@ -756,7 +690,7 @@ export default function CommentPage({ params }: CommentPageProps) {
 
             {/* Actions - matches CommentCard/ReplyCard 4-column layout */}
             <div
-              className="mt-2 flex w-full items-center justify-between text-muted-foreground"
+              className="mt-2 flex w-full items-center gap-10 text-muted-foreground"
               onClick={(e) => e.stopPropagation()}
             >
               {/* Reply button */}
@@ -779,17 +713,6 @@ export default function CommentPage({ params }: CommentPageProps) {
                   </span>
                 )}
               </button>
-
-              {/* Repost button (placeholder) */}
-              <div>
-                <button
-                  type="button"
-                  disabled
-                  className="flex cursor-default items-center gap-1 text-muted-foreground/40 text-xs"
-                >
-                  <Repeat2 size={18} />
-                </button>
-              </div>
 
               {/* Like button */}
               <div>
@@ -837,8 +760,8 @@ export default function CommentPage({ params }: CommentPageProps) {
               <ReplyCard
                 key={reply.id}
                 reply={reply}
-                postId={post?.id || ''}
-                onReplySubmit={loadComment}
+                postId={post?.id ?? null}
+                onReplySubmit={() => void refreshThread()}
               />
             ))}
           </div>
@@ -850,61 +773,81 @@ export default function CommentPage({ params }: CommentPageProps) {
     </>
   );
 
+  let body: ReactNode;
+  if (isLoading) {
+    body = (
+      <div className="space-y-4 sm:px-4 sm:py-6">
+        <Skeleton className="h-8 w-3/4" />
+        <Skeleton className="h-32 w-full" />
+        <Skeleton className="h-20 w-full" />
+      </div>
+    );
+  } else if (error || !comment) {
+    const notFound = error !== 'failed';
+    body = (
+      <div className="flex flex-col items-center justify-center px-4 py-16 text-center">
+        <h2 className="mb-2 font-bold text-2xl">
+          {notFound ? 'Comment Not Found' : "Couldn't load comment"}
+        </h2>
+        <p className="mb-4 text-muted-foreground">
+          {notFound
+            ? 'The comment you are looking for does not exist.'
+            : 'Something went wrong. Please try again.'}
+        </p>
+        <div className="flex gap-2">
+          {!notFound && (
+            <button
+              type="button"
+              onClick={() => void loadComment()}
+              className="rounded-md border border-border px-4 py-2 transition-colors hover:bg-muted"
+            >
+              Try again
+            </button>
+          )}
+          <button
+            type="button"
+            onClick={() => router.push('/feed')}
+            className="rounded-md bg-primary px-4 py-2 text-primary-foreground transition-colors hover:bg-primary/90"
+          >
+            Go to Feed
+          </button>
+        </div>
+      </div>
+    );
+  } else {
+    body = renderThread(comment);
+  }
+
+  // One responsive tree: the thread (and its LikeButton/CommentInput
+  // controls and main-comment ref) is mounted exactly once.
   return (
     <PageContainer noPadding className="flex w-full flex-col">
       <div className="relative flex min-h-dvh flex-1 md:min-h-screen">
-        {/* Desktop: Thread content area */}
-        <div className="hidden min-w-0 flex-1 flex-col border-border lg:flex lg:border-r lg:border-l">
-          {/* Desktop: Top bar with back button */}
-          <div className="sticky top-0 z-10 shrink-0 bg-background shadow-sm">
-            <div className="px-6 py-4">
-              <div className="flex items-center gap-4">
-                <button
-                  onClick={backButtonHandler}
-                  className="rounded-full p-2 text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
-                >
-                  <ArrowLeft size={20} />
-                </button>
-                <div className="flex items-center gap-2">
-                  <MessageCircle className="h-5 w-5 text-[#0066FF]" />
-                  <h1 className="font-semibold text-lg">Thread</h1>
-                </div>
-              </div>
-            </div>
-          </div>
-
-          {/* Thread content */}
-          <div className="flex-1 bg-background">
-            <div className="w-full lg:mx-auto lg:max-w-[700px]">
-              {threadContent}
-            </div>
-          </div>
-        </div>
-
-        {/* Widget sidebar - desktop only */}
-        <WidgetSidebar showLatestNews={false} showMarkets={false} />
-
-        {/* Mobile/Tablet: Single column layout */}
-        <div className="flex flex-1 flex-col overflow-hidden lg:hidden">
-          {/* Mobile header */}
-          <div className="sticky top-0 z-10 shrink-0 border-border border-b bg-background">
-            <div className="flex items-center gap-4 px-4 py-3">
+        <div className="flex min-w-0 flex-1 flex-col border-border lg:border-r lg:border-l">
+          <div className="sticky top-0 z-10 shrink-0 border-border border-b bg-background lg:border-b-0 lg:shadow-sm">
+            <div className="flex items-center gap-4 px-4 py-3 lg:px-6 lg:py-4">
               <button
+                type="button"
                 onClick={backButtonHandler}
+                aria-label="Go back"
                 className="rounded-full p-2 text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
               >
                 <ArrowLeft size={20} />
               </button>
               <div className="flex items-center gap-2">
-                <MessageCircle className="h-5 w-5 text-[#0066FF]" />
+                <MessageCircle className="h-5 w-5 text-primary" />
                 <h1 className="font-semibold text-lg">Thread</h1>
               </div>
             </div>
           </div>
 
-          {/* Mobile content */}
-          <div className="flex-1 overflow-y-auto">{threadContent}</div>
+          <div className="flex-1 bg-background">
+            <div className="w-full lg:mx-auto lg:max-w-[700px]">{body}</div>
+          </div>
         </div>
+
+        {/* Widget sidebar - desktop only */}
+        <WidgetSidebar showLatestNews={false} showMarkets={false} />
       </div>
     </PageContainer>
   );

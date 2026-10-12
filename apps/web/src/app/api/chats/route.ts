@@ -25,11 +25,6 @@
  *         schema:
  *           type: boolean
  *         description: Get all game chats (public, no auth)
- *       - in: query
- *         name: debug
- *         schema:
- *           type: boolean
- *         description: Enable debug logging
  *     responses:
  *       200:
  *         description: Chat listings
@@ -102,7 +97,6 @@
  * - Filters out NPC/actor DMs (only real user DMs shown)
  *
  * @query {boolean} all - Get all game chats (public, no auth required)
- * @query {boolean} debug - Enable debug logging
  *
  * **All Game Chats Mode (all=true):**
  * Returns all group chats for the game without authentication.
@@ -205,18 +199,9 @@ export const GET = withErrorHandling(async (request: NextRequest) => {
 
   // Validate query parameters
   const { searchParams } = new URL(request.url);
-  const query: Record<string, string> = {};
-
-  const all = searchParams.get('all');
-  const debug = searchParams.get('debug');
-
-  if (all) query.all = all;
-  if (debug) query.debug = debug;
-
-  const validatedQuery =
-    Object.keys(query).length > 0
-      ? ChatQuerySchema.parse(query)
-      : { all: undefined, debug: undefined };
+  const validatedQuery = ChatQuerySchema.parse({
+    all: searchParams.get('all') ?? undefined,
+  });
 
   const getAllChats = validatedQuery.all === 'true';
 
@@ -309,7 +294,6 @@ export const GET = withErrorHandling(async (request: NextRequest) => {
       userId: user.userId,
       privyId: user.privyId,
       dbUserId: user.dbUserId,
-      fullUser: user,
     },
     'GET /api/chats'
   );

@@ -61,6 +61,17 @@ interface WhitelistConfig {
 
 type FilterSource = 'all' | WhitelistSource;
 
+/**
+ * Parse the leaderboard "Top N" input. Accepts only a plain positive safe
+ * integer (no fractions, exponents, signs or blank input).
+ */
+export function parseRankThreshold(input: string): number | null {
+  const trimmed = input.trim();
+  if (!/^\d+$/.test(trimmed)) return null;
+  const value = Number(trimmed);
+  return Number.isSafeInteger(value) && value >= 1 ? value : null;
+}
+
 // ---------------------------------------------------------------------------
 // Component
 // ---------------------------------------------------------------------------
@@ -71,6 +82,8 @@ export function WhitelistTab() {
   const [stats, setStats] = useState<WhitelistStats | null>(null);
   const [config, setConfig] = useState<WhitelistConfig | null>(null);
   const [loading, setLoading] = useState(true);
+  const [entriesError, setEntriesError] = useState<string | null>(null);
+  const [configError, setConfigError] = useState<string | null>(null);
 
   // Filter & search
   const [filterSource, setFilterSource] = useState<FilterSource>('all');
@@ -86,7 +99,9 @@ export function WhitelistTab() {
   const [isSavingConfig, setIsSavingConfig] = useState(false);
 
   // Remove
-  const [removingUserId, setRemovingUserId] = useState<string | null>(null);
+  const [removingUserIds, setRemovingUserIds] = useState<ReadonlySet<string>>(
+    () => new Set()
+  );
 
   // -------------------------------------------------------------------------
   // Filtered entries
@@ -120,11 +135,20 @@ export function WhitelistTab() {
   const fetchEntries = useCallback(async () => {
     try {
       const res = await fetch(apiUrl('/api/admin/whitelist'));
-      if (!res.ok) throw new Error('Failed to fetch whitelist');
-      const data = await res.json();
-      setEntries(data.entries ?? []);
-      setStats(data.stats ?? null);
+      if (!res.ok)
+        throw new Error(`Failed to fetch whitelist (HTTP ${res.status})`);
+      const data: { entries?: WhitelistEntry[]; stats?: WhitelistStats } =
+        await res.json();
+      if (!Array.isArray(data.entries) || !data.stats) {
+        throw new Error('Unexpected whitelist response shape');
+      }
+      setEntries(data.entries);
+      setStats(data.stats);
+      setEntriesError(null);
     } catch (err) {
+      setEntriesError(
+        err instanceof Error ? err.message : 'Failed to load whitelist data'
+      );
       toast.error('Failed to load whitelist data');
       logger.error(
         'Failed to load whitelist data',
@@ -139,16 +163,23 @@ export function WhitelistTab() {
   const fetchConfig = useCallback(async () => {
     try {
       const res = await fetch(apiUrl('/api/admin/whitelist/config'));
-      if (!res.ok) throw new Error('Failed to fetch config');
-      const data = await res.json();
-      const cfg = data.config ?? null;
+      if (!res.ok)
+        throw new Error(`Failed to fetch config (HTTP ${res.status})`);
+      const data: { config?: WhitelistConfig } = await res.json();
+      const cfg = data.config;
+      if (!cfg || typeof cfg.leaderboardRankThreshold !== 'number') {
+        throw new Error('Unexpected whitelist config response shape');
+      }
       setConfig(cfg);
-      setRankThreshold(
-        cfg?.leaderboardRankThreshold != null
-          ? String(cfg.leaderboardRankThreshold)
-          : '100'
-      );
+      setConfigError(null);
+      setRankThreshold(String(cfg.leaderboardRankThreshold));
     } catch (err) {
+      // Never offer a guessed threshold: saving stays disabled until the
+      // real config has loaded.
+      setConfig(null);
+      setConfigError(
+        err instanceof Error ? err.message : 'Failed to load config'
+      );
       logger.error(
         'Failed to fetch whitelist config',
         err instanceof Error ? err : { error: err },
@@ -167,7 +198,7 @@ export function WhitelistTab() {
   // -------------------------------------------------------------------------
 
   function handleAddUser() {
-    if (!addUserId.trim()) return;
+    if (isPending || !addUserId.trim()) return;
 
     startTransition(async () => {
       try {
@@ -202,7 +233,8 @@ export function WhitelistTab() {
     const label = entry?.displayName ?? entry?.username ?? userId.slice(0, 12);
     if (!window.confirm(`Revoke whitelist entry for "${label}"?`)) return;
 
-    setRemovingUserId(userId);
+    if (removingUserIds.has(userId)) return;
+    setRemovingUserIds((prev) => new Set(prev).add(userId));
     try {
       const res = await fetch(apiUrl('/api/admin/whitelist'), {
         method: 'DELETE',
@@ -221,22 +253,24 @@ export function WhitelistTab() {
     } catch {
       toast.error('Failed to remove user');
     } finally {
-      setRemovingUserId(null);
+      setRemovingUserIds((prev) => {
+        const next = new Set(prev);
+        next.delete(userId);
+        return next;
+      });
     }
   }
 
   async function handleSaveConfig() {
+    if (isSavingConfig || !config) return;
+    const threshold = parseRankThreshold(rankThreshold);
+    if (threshold === null) {
+      toast.error('Top N must be a positive whole number');
+      return;
+    }
+
     setIsSavingConfig(true);
     try {
-      const threshold = rankThreshold.trim()
-        ? Number.parseInt(rankThreshold.trim(), 10)
-        : 100;
-
-      if (Number.isNaN(threshold) || threshold < 1) {
-        toast.error('Top N must be a positive integer');
-        return;
-      }
-
       const res = await fetch(apiUrl('/api/admin/whitelist/config'), {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
@@ -250,7 +284,10 @@ export function WhitelistTab() {
         return;
       }
 
-      setConfig(data.config ?? null);
+      if (data.config) {
+        setConfig(data.config);
+        setRankThreshold(String(data.config.leaderboardRankThreshold));
+      }
     } catch {
       toast.error('Failed to save config');
     } finally {
@@ -358,7 +395,9 @@ export function WhitelistTab() {
             <input
               type="number"
               min="1"
+              step="1"
               value={rankThreshold}
+              disabled={!config}
               onChange={(e) => setRankThreshold(e.target.value)}
               placeholder="e.g. 100"
               className="h-9 w-full rounded-lg border border-border bg-background px-3 text-sm outline-none focus:border-primary focus:ring-1 focus:ring-primary"
@@ -366,7 +405,7 @@ export function WhitelistTab() {
           </div>
           <button
             onClick={handleSaveConfig}
-            disabled={isSavingConfig}
+            disabled={isSavingConfig || !config}
             className={cn(
               'flex h-9 items-center gap-1.5 rounded-lg bg-primary px-4 font-medium text-primary-foreground text-sm transition-colors',
               'hover:bg-primary/90 disabled:cursor-not-allowed disabled:opacity-50'
@@ -380,6 +419,18 @@ export function WhitelistTab() {
             Save
           </button>
         </div>
+        {configError && (
+          <p className="mt-2 text-red-500 text-xs">
+            {configError} — saving is disabled.{' '}
+            <button
+              type="button"
+              onClick={() => void fetchConfig()}
+              className="underline"
+            >
+              Retry
+            </button>
+          </p>
+        )}
         <p className="mt-2 text-muted-foreground text-xs">
           This value is used by the daily cron job (00:00 UTC). Changes take
           effect on the next cron run. Users revoked by an admin will never be
@@ -509,9 +560,22 @@ export function WhitelistTab() {
                   colSpan={6}
                   className="px-4 py-8 text-center text-muted-foreground"
                 >
-                  {entries.length === 0
-                    ? 'No whitelist entries yet. Add users manually or import from snapshot.'
-                    : 'No entries match your search/filter.'}
+                  {entriesError ? (
+                    <span className="text-red-500">
+                      {entriesError}.{' '}
+                      <button
+                        type="button"
+                        onClick={() => void fetchEntries()}
+                        className="underline"
+                      >
+                        Retry
+                      </button>
+                    </span>
+                  ) : entries.length === 0 ? (
+                    'No whitelist entries yet. Add users manually or import from snapshot.'
+                  ) : (
+                    'No entries match your search/filter.'
+                  )}
                 </td>
               </tr>
             ) : (
@@ -567,11 +631,11 @@ export function WhitelistTab() {
                     {!entry.revokedAt && (
                       <button
                         onClick={() => handleRemoveUser(entry.userId)}
-                        disabled={removingUserId === entry.userId}
+                        disabled={removingUserIds.has(entry.userId)}
                         title="Revoke whitelist access"
                         className="flex h-7 w-7 items-center justify-center rounded-lg text-red-500 transition-colors hover:bg-red-500/10"
                       >
-                        {removingUserId === entry.userId ? (
+                        {removingUserIds.has(entry.userId) ? (
                           <Loader2 className="h-4 w-4 animate-spin" />
                         ) : (
                           <Trash2 className="h-4 w-4" />

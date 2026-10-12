@@ -254,4 +254,44 @@ describe('NPCPersonaGenerator', () => {
       expect(eve!.opposesOrgs).toEqual([]);
     });
   });
+
+  describe('input validation and isolation', () => {
+    it('persona arrays do not alias actor data', () => {
+      const generator = new NPCPersonaGenerator();
+      const actors: Actor[] = mockActors.map((a) => ({
+        ...a,
+        affiliations: a.affiliations ? [...a.affiliations] : undefined,
+        domain: a.domain ? [...a.domain] : undefined,
+      }));
+      const personas = generator.assignPersonas(
+        actors,
+        mockOrganizations,
+        () => 0.5
+      );
+      const alice = personas.get('alice')!;
+      alice.insiderOrgs.push('mutated');
+      alice.favorsOrgs.push('mutated-too');
+      alice.expertise.push('mutated-domain');
+
+      expect(actors[0]!.affiliations).toEqual(['openagi']);
+      expect(actors[0]!.domain).toEqual(['tech', 'ai']);
+      expect(alice.favorsOrgs).not.toContain('mutated');
+    });
+
+    it('rejects duplicate actor IDs', () => {
+      const generator = new NPCPersonaGenerator();
+      expect(() =>
+        generator.assignPersonas(
+          [mockActors[0]!, mockActors[0]!],
+          mockOrganizations,
+          () => 0.5
+        )
+      ).toThrow('Duplicate actor ID');
+    });
+
+    it('returns an empty map for no actors', () => {
+      const generator = new NPCPersonaGenerator();
+      expect(generator.assignPersonas([], mockOrganizations).size).toBe(0);
+    });
+  });
 });

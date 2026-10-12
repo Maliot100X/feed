@@ -3,140 +3,74 @@
  *
  * Tests the /api/feedback/game-feedback endpoint for submitting
  * bug reports, feature requests, and performance feedback.
+ *
+ * Route handlers run in-process against the real `@feed/api` services and
+ * authenticate with the dev `x-dev-user-id` bypass (NODE_ENV=test). Nothing
+ * is module-mocked: `mock.module` is process-global in bun and leaked fake
+ * `@feed/api` exports into every later integration file.
  */
 
-import { afterAll, beforeAll, describe, expect, mock, test } from 'bun:test';
-import { db } from '@feed/db';
+import { afterAll, beforeAll, describe, expect, test } from 'bun:test';
+import { db, feedbacks, inArray, users } from '@feed/db';
+import { generateSnowflakeId } from '@feed/shared';
 import { NextRequest } from 'next/server';
+import { GET as getAdminFeedback } from '@/app/api/admin/feedback/route';
+import { POST as submitGameFeedback } from '@/app/api/feedback/game-feedback/route';
 
-// Mock Linear sync to prevent actual API calls in tests
-mock.module('@feed/api/linear', () => ({
-  syncFeedbackToLinear: async () => {
-    return;
-  },
-  getLinearConfig: () => null,
-}));
+const createdUserIds: string[] = [];
 
-// Mock auth to return a test user (includes requireAdmin for admin endpoint tests)
-const testUserId = `test-user-${Date.now()}`;
-mock.module('@feed/api', () => {
-  return {
-    RATE_LIMIT_CONFIGS: {
-      SUBMIT_FEEDBACK: {
-        actionType: 'submit_feedback',
-        maxRequests: 100,
-        windowMs: 60_000,
-      },
-    },
-    authenticate: async () => ({ userId: testUserId }),
-    checkRateLimitAndDuplicates: () => null,
-    createGameFeedback: async ({
-      userId,
-      parsed,
-    }: {
-      userId: string;
-      parsed: {
-        feedbackType: 'bug' | 'feature_request' | 'performance';
-        description: string;
-        stepsToReproduce?: string | null;
-        screenshotUrl?: string | null;
-        rating?: number | null;
-      };
-    }) => {
-      const feedbackId = `feedback-${Date.now()}-${Math.random()
-        .toString(36)
-        .slice(2, 8)}`;
-      const categoryByType = {
-        bug: 'bug_report',
-        feature_request: 'feature_request',
-        performance: 'performance_issue',
-      } as const;
-      const score = parsed.rating != null ? parsed.rating * 20 : 50;
+async function createUser(isAdmin: boolean): Promise<string> {
+  const id = await generateSnowflakeId();
+  await db.insert(users).values({
+    id,
+    username: `feedback-test-${id}`,
+    displayName: 'Feedback Test User',
+    isAdmin,
+    isTest: true,
+    updatedAt: new Date(),
+  });
+  createdUserIds.push(id);
+  return id;
+}
 
-      await db.feedback.create({
-        data: {
-          id: feedbackId,
-          fromUserId: userId,
-          toUserId: null,
-          score,
-          comment: parsed.description,
-          category: categoryByType[parsed.feedbackType],
-          interactionType: 'general_game_feedback',
-          metadata: {
-            feedbackType: parsed.feedbackType,
-            stepsToReproduce: parsed.stepsToReproduce ?? null,
-            screenshotUrl: parsed.screenshotUrl ?? null,
-            rating: parsed.rating ?? null,
-          },
-          createdAt: new Date(),
-          updatedAt: new Date(),
-        },
-      });
-
-      return {
-        id: feedbackId,
-        fromUserId: userId,
-        score,
-        feedbackType: parsed.feedbackType,
-      };
-    },
-    getLinearConfig: () => null,
-    requireUserByIdentifier: async () => ({
-      id: testUserId,
-      email: 'test@example.com',
+/**
+ * Each submission comes from a fresh user so the real per-user
+ * SUBMIT_FEEDBACK rate limit (5/min) never couples test cases.
+ */
+async function feedbackRequest(
+  payload: Record<string, string | number>
+): Promise<NextRequest> {
+  return new NextRequest('http://localhost/api/feedback/game-feedback', {
+    method: 'POST',
+    body: JSON.stringify(payload),
+    headers: new Headers({
+      'Content-Type': 'application/json',
+      'x-dev-user-id': await createUser(false),
     }),
-    requireAdmin: async () => ({ userId: testUserId, isAdmin: true }),
-    errorResponse: (message: string, status = 500) =>
-      Response.json({ success: false, error: message }, { status }),
-    successResponse: (data: unknown, status = 200) =>
-      Response.json(data, { status }),
-    syncFeedbackToLinear: async () => {
-      return;
-    },
-    withErrorHandling:
-      <T extends (request: Request) => Promise<Response>>(handler: T) =>
-      async (request: Request) => {
-        try {
-          return await handler(request);
-        } catch (error) {
-          return Response.json(
-            {
-              success: false,
-              error: error instanceof Error ? error.message : String(error),
-            },
-            { status: 400 }
-          );
-        }
-      },
-  };
+  });
+}
+
+let adminUserId = '';
+
+function adminFeedbackRequest(query = ''): NextRequest {
+  return new NextRequest(`http://localhost/api/admin/feedback${query}`, {
+    method: 'GET',
+    headers: new Headers({ 'x-dev-user-id': adminUserId }),
+  });
+}
+
+beforeAll(async () => {
+  adminUserId = await createUser(true);
 });
 
-// Dynamic import to ensure mocks are applied
-const { POST: submitGameFeedback } = await import(
-  '@/app/api/feedback/game-feedback/route'
-);
+afterAll(async () => {
+  await db
+    .delete(feedbacks)
+    .where(inArray(feedbacks.fromUserId, createdUserIds));
+  await db.delete(users).where(inArray(users.id, createdUserIds));
+});
 
 describe('General Game Feedback API', () => {
-  beforeAll(async () => {
-    // Create test user
-    await db.user.upsert({
-      where: { id: testUserId },
-      create: {
-        id: testUserId,
-        username: `feedback-test-${Date.now()}`,
-        displayName: 'Feedback Test User',
-        updatedAt: new Date(),
-      },
-      update: {},
-    });
-  });
-
-  afterAll(async () => {
-    // Cleanup test data
-    await db.feedback.deleteMany({ where: { fromUserId: testUserId } });
-    await db.user.delete({ where: { id: testUserId } }).catch(() => {});
-  });
-
   test('POST /api/feedback/game-feedback - bug report succeeds', async () => {
     const payload = {
       feedbackType: 'bug',
@@ -145,14 +79,7 @@ describe('General Game Feedback API', () => {
         '1. Click button\n2. Nothing happens\n3. Expected: modal opens',
     };
 
-    const request = new NextRequest(
-      'http://localhost/api/feedback/game-feedback',
-      {
-        method: 'POST',
-        body: JSON.stringify(payload),
-        headers: new Headers({ 'Content-Type': 'application/json' }),
-      }
-    );
+    const request = await feedbackRequest(payload);
 
     const response = await submitGameFeedback(request);
     expect(response.status).toBe(201);
@@ -178,14 +105,7 @@ describe('General Game Feedback API', () => {
       rating: 4,
     };
 
-    const request = new NextRequest(
-      'http://localhost/api/feedback/game-feedback',
-      {
-        method: 'POST',
-        body: JSON.stringify(payload),
-        headers: new Headers({ 'Content-Type': 'application/json' }),
-      }
-    );
+    const request = await feedbackRequest(payload);
 
     const response = await submitGameFeedback(request);
     expect(response.status).toBe(201);
@@ -210,14 +130,7 @@ describe('General Game Feedback API', () => {
         'Test performance issue - game lags when many agents are online',
     };
 
-    const request = new NextRequest(
-      'http://localhost/api/feedback/game-feedback',
-      {
-        method: 'POST',
-        body: JSON.stringify(payload),
-        headers: new Headers({ 'Content-Type': 'application/json' }),
-      }
-    );
+    const request = await feedbackRequest(payload);
 
     const response = await submitGameFeedback(request);
     expect(response.status).toBe(201);
@@ -240,14 +153,7 @@ describe('General Game Feedback API', () => {
       stepsToReproduce: 'Steps here',
     };
 
-    const request = new NextRequest(
-      'http://localhost/api/feedback/game-feedback',
-      {
-        method: 'POST',
-        body: JSON.stringify(payload),
-        headers: new Headers({ 'Content-Type': 'application/json' }),
-      }
-    );
+    const request = await feedbackRequest(payload);
 
     const response = await submitGameFeedback(request);
     // Should fail validation - description must be at least 10 chars
@@ -261,14 +167,7 @@ describe('General Game Feedback API', () => {
       // Missing stepsToReproduce
     };
 
-    const request = new NextRequest(
-      'http://localhost/api/feedback/game-feedback',
-      {
-        method: 'POST',
-        body: JSON.stringify(payload),
-        headers: new Headers({ 'Content-Type': 'application/json' }),
-      }
-    );
+    const request = await feedbackRequest(payload);
 
     const response = await submitGameFeedback(request);
     expect(response.status).toBe(400);
@@ -281,28 +180,14 @@ describe('General Game Feedback API', () => {
       // Missing rating
     };
 
-    const request = new NextRequest(
-      'http://localhost/api/feedback/game-feedback',
-      {
-        method: 'POST',
-        body: JSON.stringify(payload),
-        headers: new Headers({ 'Content-Type': 'application/json' }),
-      }
-    );
+    const request = await feedbackRequest(payload);
 
     const response = await submitGameFeedback(request);
     expect(response.status).toBe(400);
   });
 });
 
-// Dynamic import for admin endpoint (uses requireAdmin from the consolidated mock above)
-const { GET: getAdminFeedback } = await import(
-  '@/app/api/admin/feedback/route'
-);
-
 describe('Admin Feedback API', () => {
-  let createdFeedbackId: string;
-
   beforeAll(async () => {
     // Create test feedback for admin queries
     const payload = {
@@ -311,33 +196,14 @@ describe('Admin Feedback API', () => {
       stepsToReproduce: '1. Test step\n2. Another step',
     };
 
-    const request = new NextRequest(
-      'http://localhost/api/feedback/game-feedback',
-      {
-        method: 'POST',
-        body: JSON.stringify(payload),
-        headers: new Headers({ 'Content-Type': 'application/json' }),
-      }
-    );
+    const request = await feedbackRequest(payload);
 
     const response = await submitGameFeedback(request);
-    const json = await response.json();
-    createdFeedbackId = json.feedbackId;
-  });
-
-  afterAll(async () => {
-    // Cleanup
-    if (createdFeedbackId) {
-      await db.feedback
-        .delete({ where: { id: createdFeedbackId } })
-        .catch(() => {});
-    }
+    expect(response.status).toBe(201);
   });
 
   test('GET /api/admin/feedback - returns feedback list', async () => {
-    const request = new NextRequest('http://localhost/api/admin/feedback', {
-      method: 'GET',
-    });
+    const request = adminFeedbackRequest();
 
     const response = await getAdminFeedback(request);
     expect(response.status).toBe(200);
@@ -351,10 +217,7 @@ describe('Admin Feedback API', () => {
   });
 
   test('GET /api/admin/feedback - filters by type', async () => {
-    const request = new NextRequest(
-      'http://localhost/api/admin/feedback?type=bug',
-      { method: 'GET' }
-    );
+    const request = adminFeedbackRequest('?type=bug');
 
     const response = await getAdminFeedback(request);
     expect(response.status).toBe(200);
@@ -367,20 +230,14 @@ describe('Admin Feedback API', () => {
   });
 
   test('GET /api/admin/feedback - rejects invalid type', async () => {
-    const request = new NextRequest(
-      'http://localhost/api/admin/feedback?type=invalid_type',
-      { method: 'GET' }
-    );
+    const request = adminFeedbackRequest('?type=invalid_type');
 
     const response = await getAdminFeedback(request);
     expect(response.status).toBe(400);
   });
 
   test('GET /api/admin/feedback - search works', async () => {
-    const request = new NextRequest(
-      'http://localhost/api/admin/feedback?search=searchable',
-      { method: 'GET' }
-    );
+    const request = adminFeedbackRequest('?search=searchable');
 
     const response = await getAdminFeedback(request);
     expect(response.status).toBe(200);
@@ -394,10 +251,7 @@ describe('Admin Feedback API', () => {
   });
 
   test('GET /api/admin/feedback - pagination params work', async () => {
-    const request = new NextRequest(
-      'http://localhost/api/admin/feedback?limit=5&offset=0',
-      { method: 'GET' }
-    );
+    const request = adminFeedbackRequest('?limit=5&offset=0');
 
     const response = await getAdminFeedback(request);
     expect(response.status).toBe(200);
@@ -409,10 +263,7 @@ describe('Admin Feedback API', () => {
   });
 
   test('GET /api/admin/feedback - hasLinearIssue filter works', async () => {
-    const request = new NextRequest(
-      'http://localhost/api/admin/feedback?hasLinearIssue=false',
-      { method: 'GET' }
-    );
+    const request = adminFeedbackRequest('?hasLinearIssue=false');
 
     const response = await getAdminFeedback(request);
     expect(response.status).toBe(200);

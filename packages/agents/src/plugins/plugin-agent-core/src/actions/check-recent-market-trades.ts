@@ -72,7 +72,14 @@ export const checkRecentMarketTradesAction: Action = {
     const actionParams = state?.data?.actionParams as
       | { limit?: number }
       | undefined;
-    const limit = Math.min(Math.max(actionParams?.limit ?? 15, 1), 30);
+    // Only finite numbers are honoured; floor to an integer before clamping
+    // (PostgreSQL LIMIT requires an integer).
+    const rawLimit: unknown = actionParams?.limit;
+    const parsedLimit =
+      typeof rawLimit === 'number' ? rawLimit : Number(rawLimit ?? 15);
+    const limit = Number.isFinite(parsedLimit)
+      ? Math.min(Math.max(Math.floor(parsedLimit), 1), 30)
+      : 15;
 
     try {
       // Get recent NPC trades
@@ -161,8 +168,10 @@ export const checkRecentMarketTradesAction: Action = {
         data: {
           trades: allTrades,
           count: allTrades.length,
-          npcTradeCount: rawNpcTrades.length,
-          agentTradeCount: agentTradeResults.length,
+          // Counts describe the displayed (combined, limited) trades.
+          npcTradeCount: allTrades.filter((t) => t.traderType === 'NPC').length,
+          agentTradeCount: allTrades.filter((t) => t.traderType === 'Agent')
+            .length,
         },
         values: {
           count: allTrades.length,

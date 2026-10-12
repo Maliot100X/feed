@@ -21,11 +21,19 @@ interface ModelInfo {
 interface AIModelsData {
   providers: {
     surplus: boolean;
+    elizacloud: boolean;
     groq: boolean;
     claude: boolean;
     openai: boolean;
   };
-  activeProvider: 'surplus' | 'groq' | 'claude' | 'openai';
+  activeProvider:
+    | 'surplus'
+    | 'elizacloud'
+    | 'groq'
+    | 'claude'
+    | 'openai'
+    | null;
+  activeModel: string | null;
   recommendedModels: ModelInfo[];
 }
 
@@ -105,7 +113,7 @@ export function AIModelsTab() {
     }
   };
 
-  const getProviderIcon = (provider: string) => {
+  const getProviderIcon = (provider: string | null) => {
     switch (provider) {
       case 'groq':
         return <Zap className="h-4 w-4" />;
@@ -118,10 +126,14 @@ export function AIModelsTab() {
     }
   };
 
-  const getProviderName = (provider: string) => {
+  const getProviderName = (provider: string | null) => {
     switch (provider) {
+      case null:
+        return 'None configured';
       case 'surplus':
         return 'Surplus Intelligence';
+      case 'elizacloud':
+        return 'ElizaCloud';
       case 'groq':
         return 'Groq';
       case 'claude':
@@ -225,7 +237,7 @@ export function AIModelsTab() {
 
       {/* Recommended Models */}
       <div className="rounded-lg border border-border bg-card/50 p-6 backdrop-blur">
-        <h3 className="mb-4 font-semibold text-lg">Recommended Models</h3>
+        <h3 className="mb-4 font-semibold text-lg">Configured Model</h3>
         <div className="grid grid-cols-1 gap-2">
           {data.recommendedModels.map((model) => (
             <div key={model.id} className="rounded-lg border border-border p-4">

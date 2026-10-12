@@ -65,7 +65,13 @@ export const GET = withErrorHandling(async function GET(
   if (error) return error;
 
   const { id } = await params;
-  const questionNumber = Number.parseInt(id);
+  if (!/^\d{1,9}$/.test(id)) {
+    return NextResponse.json(
+      { error: 'Invalid question number' },
+      { status: 400 }
+    );
+  }
+  const questionNumber = Number(id);
 
   // Get question and market:
   const question = await db.question.findUnique({
@@ -84,13 +90,13 @@ export const GET = withErrorHandling(async function GET(
     return NextResponse.json({ error: 'Market not found' }, { status: 404 });
   }
 
-  // Get positions for volume analysis (public data):
+  // Get the most recent 1000 positions for volume analysis (public data):
   const positions = await db.position.findMany({
     where: {
       marketId: market.id,
     },
-    orderBy: { createdAt: 'asc' },
-    take: 1000, // Last 1000 positions
+    orderBy: { createdAt: 'desc' },
+    take: 1000,
   });
 
   // Build price history from positions (grouped by creation time)

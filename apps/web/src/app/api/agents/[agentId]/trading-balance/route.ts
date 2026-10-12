@@ -17,6 +17,12 @@ import { balanceTransactions, db, desc, eq, users } from '@feed/db';
 import { FEED_POINTS_SYMBOL, logger, toISO } from '@feed/shared';
 import type { NextRequest } from 'next/server';
 import { NextResponse } from 'next/server';
+import { z } from 'zod';
+
+const TradingBalanceMutationSchema = z.object({
+  action: z.enum(['deposit', 'withdraw']),
+  amount: z.number().finite().positive().max(1_000_000_000),
+});
 
 export const GET = withErrorHandling(async function GET(
   req: NextRequest,
@@ -95,26 +101,18 @@ export const POST = withErrorHandling(async function POST(
 ) {
   const user = await authenticateUser(req);
   const { agentId } = await params;
-  const body = await req.json();
-
-  const { action, amount } = body;
-
-  if (!action || !['deposit', 'withdraw'].includes(action)) {
+  const parsed = TradingBalanceMutationSchema.safeParse(await req.json());
+  if (!parsed.success) {
     return NextResponse.json(
       {
         success: false,
-        error: 'Invalid action. Must be "deposit" or "withdraw"',
+        error:
+          'Invalid request. "action" must be "deposit" or "withdraw" and "amount" a positive number',
       },
       { status: 400 }
     );
   }
-
-  if (!amount || amount <= 0) {
-    return NextResponse.json(
-      { success: false, error: 'Amount must be a positive number' },
-      { status: 400 }
-    );
-  }
+  const { action, amount } = parsed.data;
 
   try {
     if (action === 'deposit') {

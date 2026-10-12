@@ -13,6 +13,7 @@
  * and prevent outdated or incorrect references.
  */
 
+import { PredictionPricing } from '@feed/core/markets/prediction/pricing';
 import {
   agentTrades,
   db,
@@ -46,8 +47,12 @@ import {
  * Module-level TTL cache for generateWorldContext.
  * Eliminates ~7 redundant DB query sets per generation cycle.
  */
-let worldContextCache: { context: WorldContext; timestamp: number } | null =
-  null;
+let worldContextCache: {
+  context: WorldContext;
+  timestamp: number;
+  /** Simulation/live mode and UTC day the context was built for */
+  scope: string;
+} | null = null;
 const WORLD_CONTEXT_CACHE_TTL_MS = 60_000;
 
 /**
@@ -119,10 +124,16 @@ export interface WorldContext {
  * Shuffles actors to add variety to prompts. Optimized to only
  * load actors data (not organizations or relationships).
  *
- * @param maxActors - Maximum number of actors to include (default: all)
+ * @param maxActors - Maximum number of actors to include (default: all; 0 = none)
  * @returns Formatted string listing actors in "Name (@username)" format
  */
 export function generateWorldActors(maxActors?: number): string {
+  if (
+    maxActors !== undefined &&
+    (!Number.isInteger(maxActors) || maxActors < 0)
+  ) {
+    throw new Error(`maxActors must be a non-negative integer: ${maxActors}`);
+  }
   // OPTIMIZATION: Only load actors, not organizations or relationships
   const actorsData = loadActorsData({
     includeActors: true,
@@ -132,9 +143,10 @@ export function generateWorldActors(maxActors?: number): string {
 
   // Shuffle actors to add randomness/entropy to prompts
   const shuffledActors = shuffleArray(actors);
-  const actorsToShow = maxActors
-    ? shuffledActors.slice(0, maxActors)
-    : shuffledActors;
+  const actorsToShow =
+    maxActors === undefined
+      ? shuffledActors
+      : shuffledActors.slice(0, maxActors);
 
   const actorsList = actorsToShow
     .map((actor) => `${actor.name} (@${actor.username})`)
@@ -171,11 +183,12 @@ export async function generateCurrentMarkets(): Promise<string> {
     .slice(0, 5)
     .map((state) => {
       const staticOrg = StaticDataRegistry.getOrganization(state.id);
-      return staticOrg
-        ? {
-            ...staticOrg,
-            currentPrice: state.currentPrice ?? staticOrg.initialPrice,
-          }
+      const currentPrice = Number(
+        state.currentPrice ?? staticOrg?.initialPrice
+      );
+      // Skip companies without a real positive price rather than inventing one
+      return staticOrg && Number.isFinite(currentPrice) && currentPrice > 0
+        ? { ...staticOrg, currentPrice }
         : null;
     })
     .filter(
@@ -193,9 +206,10 @@ export async function generateCurrentMarkets(): Promise<string> {
           market.yesShares?.toString() || '0'
         );
         const noShares = Number.parseFloat(market.noShares?.toString() || '0');
-        const totalShares = yesShares + noShares;
-        const yesPrice =
-          totalShares > 0 ? Math.round((yesShares / totalShares) * 100) : 50;
+        // CPMM: YES price is the NO reserve fraction (canonical pricing)
+        const yesPrice = Math.round(
+          PredictionPricing.getCurrentPrice(yesShares, noShares, 'yes') * 100
+        );
 
         return `${market.question} (${yesPrice}% Yes)`;
       }
@@ -208,9 +222,7 @@ export async function generateCurrentMarkets(): Promise<string> {
     const shuffledCompanies = shuffleArray(companies);
     const perpList = shuffledCompanies.map(
       (company: (typeof companies)[number]) => {
-        const price =
-          Number(company.currentPrice) || Number(company.initialPrice) || 100;
-        return `${company.name} $${price.toFixed(2)}`;
+        return `${company.name} $${company.currentPrice.toFixed(2)}`;
       }
     );
     parts.push(`Stocks: ${perpList.join(' | ')}`);
@@ -253,11 +265,12 @@ export async function generateActivePredictions(): Promise<string> {
   const shuffledQuestions = shuffleArray(activeQuestions);
   const questionsList = shuffledQuestions.map(
     (q: (typeof activeQuestions)[number]) => {
-      const resolutionDate = q.resolutionDate
-        ? new Date(q.resolutionDate)
-        : new Date();
+      if (!q.resolutionDate) {
+        return q.text;
+      }
       const daysUntil = Math.ceil(
-        (resolutionDate.getTime() - Date.now()) / (1000 * 60 * 60 * 24)
+        (new Date(q.resolutionDate).getTime() - Date.now()) /
+          (1000 * 60 * 60 * 24)
       );
       return `${q.text} (resolves in ${daysUntil}d)`;
     }
@@ -416,9 +429,12 @@ export async function generateWorldContext(
     maxActors === 50 &&
     realityGroundingLevel === 'concise';
 
+  // Never reuse a context across simulation/live mode or across UTC days
+  const cacheScope = `${isSimulationMode() ? 'sim' : 'live'}:${new Date().toISOString().slice(0, 10)}`;
   if (
     isStandardCall &&
     worldContextCache &&
+    worldContextCache.scope === cacheScope &&
     Date.now() - worldContextCache.timestamp < WORLD_CONTEXT_CACHE_TTL_MS
   ) {
     return worldContextCache.context;
@@ -472,15 +488,23 @@ export async function generateWorldContext(
     currentMonth: dateContext.month,
     currentDay: dateContext.day,
 
-    // Reality grounding (includes real market data when available)
-    realityGrounding: await enrichRealityGroundingWithPrices(realityGrounding),
+    // Reality grounding (includes real market data when available). Prices
+    // are only added when grounding was requested.
+    realityGrounding:
+      includeRealityGrounding && realityGroundingLevel !== 'none'
+        ? await enrichRealityGroundingWithPrices(realityGrounding)
+        : '',
 
     // Dynamic world facts
     worldFacts: worldFactsData.general,
   };
 
   if (isStandardCall) {
-    worldContextCache = { context: result, timestamp: Date.now() };
+    worldContextCache = {
+      context: result,
+      timestamp: Date.now(),
+      scope: cacheScope,
+    };
   }
 
   return result;
@@ -488,21 +512,17 @@ export async function generateWorldContext(
 
 /**
  * Enrich reality grounding context with real-world crypto/market prices.
- * Appends price data to existing grounding text. No-op if service unavailable.
+ * Appends price data to existing grounding text when prices are available.
  */
 async function enrichRealityGroundingWithPrices(
   baseGrounding: string
 ): Promise<string> {
-  try {
-    const { realPriceService } = await import('../services/real-price-service');
-    const marketContext = realPriceService.getMarketContextForPrompt();
-    if (marketContext) {
-      return baseGrounding
-        ? `${baseGrounding}\n\n${marketContext}`
-        : marketContext;
-    }
-  } catch {
-    // Real price service not available
+  const { realPriceService } = await import('../services/real-price-service');
+  const marketContext = realPriceService.getMarketContextForPrompt();
+  if (marketContext) {
+    return baseGrounding
+      ? `${baseGrounding}\n\n${marketContext}`
+      : marketContext;
   }
   return baseGrounding;
 }

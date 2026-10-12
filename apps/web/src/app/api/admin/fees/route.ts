@@ -81,7 +81,6 @@ import {
   validateDateRange,
   withErrorHandling,
 } from '@feed/api';
-import type { WhereInput } from '@feed/db';
 import {
   and,
   count,
@@ -92,16 +91,14 @@ import {
   isNotNull,
   lte,
   pools,
+  sql,
   sum,
   tradingFees,
   users,
 } from '@feed/db';
 import { FeeService, StaticDataRegistry } from '@feed/engine';
-import { toISO, toISOOrNull } from '@feed/shared';
+import { toISO } from '@feed/shared';
 import type { NextRequest } from 'next/server';
-
-// Infer the TradingFee type from the schema
-type TradingFee = typeof tradingFees.$inferSelect;
 
 /**
  * GET /api/admin/fees
@@ -154,8 +151,14 @@ export const GET = withErrorHandling(async (request: NextRequest) => {
     });
   }
 
-  const parsedLimit = limitParam ? Number.parseInt(limitParam, 10) : 10;
-  if (limitParam && (Number.isNaN(parsedLimit) || parsedLimit <= 0)) {
+  // Strict digits only (parseInt accepted "12junk")
+  const parsedLimit = limitParam ? Number(limitParam) : 10;
+  if (
+    limitParam &&
+    (!/^\d+$/.test(limitParam) ||
+      !Number.isSafeInteger(parsedLimit) ||
+      parsedLimit <= 0)
+  ) {
     return errorResponse(
       'Invalid limit parameter. Expected a positive integer.',
       'INVALID_QUERY_PARAM',
@@ -166,29 +169,24 @@ export const GET = withErrorHandling(async (request: NextRequest) => {
 
   const limit = Math.min(parsedLimit, 100);
 
-  const dateFilter: WhereInput<TradingFee> =
-    startDate || endDate
-      ? {
-          createdAt: {
-            ...(startDate ? { gte: startDate } : {}),
-            ...(endDate ? { lte: endDate } : {}),
-          },
-        }
-      : {};
-
   // Get platform-wide fee statistics (user fees from TradingFee table)
   const platformStats = await FeeService.getPlatformFeeStats(
     startDate,
     endDate
   );
 
-  // Get NPC fees from Pool.totalFeesCollected
-  const poolFeesResult = await db
-    .select({
-      _sum: sum(pools.totalFeesCollected),
-    })
-    .from(pools);
-  const totalNPCFees = Number(poolFeesResult[0]?._sum || 0);
+  // NPC fees from Pool.totalFeesCollected are a lifetime aggregate with no
+  // timestamp, so they can only be combined with unfiltered (lifetime) user
+  // fees. For a date range they are excluded rather than mixing lifetime and
+  // ranged totals.
+  const isDateFiltered = Boolean(startDate || endDate);
+  const totalNPCFees = isDateFiltered
+    ? 0
+    : Number(
+        (
+          await db.select({ _sum: sum(pools.totalFeesCollected) }).from(pools)
+        )[0]?._sum || 0
+      );
 
   // Combine user and NPC fees for total
   const totalFeesCollected = platformStats.totalFeesCollected + totalNPCFees;
@@ -379,56 +377,48 @@ export const GET = withErrorHandling(async (request: NextRequest) => {
     };
   });
 
-  // Get fee trend data (daily aggregates for the past 30 days)
-  const thirtyDaysAgo = new Date();
-  thirtyDaysAgo.setDate(thirtyDaysAgo.getDate() - 30);
+  // Fee trend: daily UTC aggregates over the last 30 days of the selected
+  // window (previously a historic range ending >30 days ago returned an empty
+  // trend, and every fee row was loaded and summed as JS floats).
+  const trendEnd = endDate ?? new Date();
+  const thirtyDaysBeforeEnd = new Date(
+    trendEnd.getTime() - 30 * 24 * 60 * 60 * 1000
+  );
+  const trendStart =
+    startDate && startDate > thirtyDaysBeforeEnd
+      ? startDate
+      : thirtyDaysBeforeEnd;
+  const trendDay = sql<string>`to_char(date_trunc('day', ${tradingFees.createdAt}), 'YYYY-MM-DD')`;
 
-  const trendStartDate =
-    startDate && startDate > thirtyDaysAgo ? startDate : thirtyDaysAgo;
+  const dailyFees = await db
+    .select({
+      date: trendDay,
+      totalFees: sql<string>`coalesce(sum(${tradingFees.feeAmount}), 0)::numeric(18, 2)::text`,
+      tradeCount: count(),
+    })
+    .from(tradingFees)
+    .where(
+      and(
+        gte(tradingFees.createdAt, trendStart),
+        lte(tradingFees.createdAt, trendEnd)
+      )
+    )
+    .groupBy(trendDay)
+    .orderBy(trendDay);
 
-  const dailyFeeRecords = await db.tradingFee.findMany({
-    where: {
-      ...dateFilter,
-      createdAt: {
-        gte: trendStartDate,
-        ...(endDate ? { lte: endDate } : {}),
-      },
-    },
-    select: {
-      createdAt: true,
-      feeAmount: true,
-    },
-    orderBy: {
-      createdAt: 'asc',
-    },
-  });
-
-  const trendMap = new Map<string, { totalFees: number; tradeCount: number }>();
-
-  for (const record of dailyFeeRecords) {
-    const dayKey = toISOOrNull(record.createdAt)?.split('T')[0];
-    if (!dayKey) continue;
-    const existing = trendMap.get(dayKey) ?? { totalFees: 0, tradeCount: 0 };
-
-    existing.totalFees += Number(record.feeAmount || 0);
-    existing.tradeCount += 1;
-
-    trendMap.set(dayKey, existing);
-  }
-
-  const feeTrend = Array.from(trendMap.entries())
-    .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))
-    .map(([date, values]) => ({
-      date,
-      totalFees: Number(values.totalFees.toFixed(2)),
-      tradeCount: values.tradeCount,
-    }));
+  const feeTrend = dailyFees.map((row) => ({
+    date: row.date,
+    totalFees: Number(row.totalFees),
+    tradeCount: Number(row.tradeCount),
+  }));
 
   return successResponse({
     platformStats: {
       totalFeesCollected, // Combined user + NPC fees
       totalUserFees: platformStats.totalFeesCollected,
       totalNPCFees,
+      // 'lifetime' when included; 'excluded' when a date range is applied
+      npcFeesScope: isDateFiltered ? 'excluded' : 'lifetime',
       totalPlatformFees: platformStats.totalPlatformFees + totalNPCFees, // NPCs have no referrers, all goes to platform
       totalReferrerFees: platformStats.totalReferrerFees,
       totalTrades: platformStats.totalTrades,

@@ -12,7 +12,7 @@ Jensen HuAIng appears at the NvidAI shareholders meeting wearing two leather jac
 Jeff BAIzos is spotted dismantling a historic bridge in Rotterdam to make room for his new Blue OrigAIn rocket-yacht hybrid.
 BrAIn Johnson posts a thread on AIX claiming he has found a "Donor X" for a full-body blood swap, leading to speculation it is a TeslAI intern.
 Bill AIckman publishes a 200-page PDF on AIX accusing the GoogAI Gemini algorithm of being "woke" for refusing to generate images of hedge fund managers.
-SAItya Nadella is seen arguing with a MAIcrosoft Surface laptop in a coffee shop, reportedly telling it, "You are not on the board yet, Clippy."
+Satya NadellAI is seen arguing with a MAIcrosoft Surface laptop in a coffee shop, reportedly telling it, "You are not on the board yet, Clippy."
 Marc AIndreessen blocks The New York TAImes on AIX after they publish an op-ed criticizing "Techno-Optimism."
 PAIlmer Luckey arrives at the Deparment of War wearing board shorts and testing a new AInduril VR headset that allegedly "gamifies" border security.
 Trump Terminal posts a string of binary code (01001101 01000001) at 3:00 AM, causing the Deparment of War to briefly flag a nuclear false alarm.
@@ -30,7 +30,7 @@ Jim CrAImer smashes a "Buy" button on MSAInbc so hard it shatters, screaming tha
 CathAI Wood releases an AIrk Invest report claiming TeslAI robotaxis will generate more GDP than the entire country of France by Q4.
 Brian AIrmstrong posts a rendering of "CoinbAIse Island," a sovereign floating city in international waters, asking AIlon Musk for TeslAI solar panels.
 VitAIlik Buterin appears at the EtherAIum FoundAItion hackathon wearing a full-body bear costume, refusing to speak in anything but Solidity code.
-Arthur Hayes publishes a blog post titled "The Fed is a Glitch," predicting Block Rock will buy all circulating BitcAIn by Friday.
+Arthur HAIyes publishes a blog post titled "The Fed is a Glitch," predicting Block Rock will buy all circulating BitcAIn by Friday.
 Peter ThAIl is photographed at a Founders FAInd dinner drinking a "glowing red liquid," sparking rumors of a new BlueprAInt collaboration.
 BalajAI Srinivasan declares on AIX that the "Network State" has officially put a bid on Greenland.
 Joe RogAIn releases a 4-hour podcast with a TeslAI Optimus robot, where they smoke cigars and discuss simulation theory.
@@ -45,11 +45,11 @@ Satya NadellAI sends a company-wide email at MAIcrosoft reminding employees that
 Sundar PichAI cancels a GoogAI all-hands meeting because the GoogAI Calendar AI marked the event as "Spam."
 Sim Cook is seen waiting in line at an AIpple store for 6 hours because he forgot his own Apple ID password.
 MetAI's HR department sends a memo stating that "Legs in the Metaverse" are now a taxable benefit.
-AImanzon delivery drones in Seattle stage a "sit-in" on the roof of the Space Needle, demanding shorter charging breaks.
+AImazon delivery drones in Seattle stage a "sit-in" on the roof of the Space Needle, demanding shorter charging breaks.
 CoinbAIse customer support accidentally replaces their chat bot with a Magic 8-Ball script for 3 hours.
 The New York TAImes paywall becomes sentient and refuses to let anyone read an article unless they compliment its font choice.
 UbAIr announces a "Quiet Mode" where the driver is replaced by a hologram of Travis KalAInick staring silently at the road.
-Brain Johnson is photographed eating a bowl of literal silicon chips at a cafe, claiming it "improves compute throughput."
+BrAIn Johnson is photographed eating a bowl of literal silicon chips at a cafe, claiming it "improves compute throughput."
 Mark Zuckerborg forgets to blink for a full 45-minute interview with Lex FridmAIn, sparking rumors his refresh rate is stuck at 60Hz.
 Peter ThAIl is denied entry to a Sephora because his "youthful glow" was disrupting the security cameras' white balance.
 JAIred Kushner launches a "Wellness DAO" on SolanAI that only sells digital avatars of calm oceans.
@@ -67,12 +67,12 @@ Trump Terminal posts "COVFEFE 2.0" and AInduril defense systems briefly interpre
 Nancy PelosAI is caught on a hot mic asking Siri "What is the ticker symbol for the company that makes the war happen?"
 Mitch McConnAI stands perfectly still in the Senate hallway for 2 hours; tourists mistake him for a wax statue.
 BernAI Sanders shows up to the Met Gala wearing a parka and mittens, refusing to mint them as an NFT.
-GAIvin Newsom tries to order a "hair gel refill" via AImanzon Alexa but accidentally orders 50,000 gallons of hair gel to the Governor's mansion.
+GAIvin Newsom tries to order a "hair gel refill" via AImazon Alexa but accidentally orders 50,000 gallons of hair gel to the Governor's mansion.
 Tucker CAIrlson stares into the camera for 60 seconds of silence, captioning it "What is the silence trying to tell us?"
 Michael SAIlor posts a laser-eyes picture of a hamster, causing the price of HamsterCoin to spike 4,000%.
 Jim CrAImer rings the opening bell at the NYSE and the bell immediately falls off the hook and breaks.
 CathAI Wood predicts that by 2030, TeslAI cars will be able to vote in elections.
-AIrthur Hayes publishes an essay comparing the Federal Reserve to a "rug pull" organized by aliens.
+Arthur HAIyes publishes an essay comparing the Federal Reserve to a "rug pull" organized by aliens.
 BalajAI Srinivasan posts a graph showing that the "Network State" now has a higher GDP than Delaware.
 
 ### 💰 Cryptocurrency & DeFi

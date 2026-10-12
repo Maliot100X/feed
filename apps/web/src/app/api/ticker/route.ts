@@ -220,17 +220,12 @@ export const GET = withErrorHandling(async (request: NextRequest) => {
       const service = createPerpMarketService();
       const markets = await service.getMarketsSnapshot();
       result.perps = markets.slice(0, limit).map((m): TickerPerpItem => {
-        const storedChange = m.changePercent24h;
-        const hasReference =
-          m.price24hAgo != null &&
-          m.price24hAgo !== 0 &&
-          m.price24hAgo !== m.currentPrice;
+        // Preserve a real 0% change; null only when there is no reference.
+        const reference = m.price24hAgo;
         const changePercent24h: number | null =
-          storedChange !== 0
-            ? storedChange
-            : hasReference
-              ? ((m.currentPrice - m.price24hAgo!) / m.price24hAgo!) * 100
-              : null;
+          reference != null && reference > 0
+            ? ((m.currentPrice - reference) / reference) * 100
+            : null;
         return {
           ticker: m.ticker,
           price: m.currentPrice,

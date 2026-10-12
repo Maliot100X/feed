@@ -63,113 +63,48 @@ export default defineCommand({
       consola.warn('No systems found — building entry only');
     }
 
-    // Resolve import paths relative to outDir
-    const enginePath = relative(
-      outDir,
-      resolve(rootDir, 'core/engine.ts')
-    ).replace(/\\/g, '/');
-
-    const systemImports = files.map((f, i) => {
+    // Framework modules are resolved from this package's source, not from the
+    // project root (which may be an external project using @feed/sim).
+    const toImportPath = (f: string) => {
       const rel = relative(outDir, f).replace(/\\/g, '/');
-      return `import * as _sys${i} from '${rel}';`;
-    });
-
-    const systemRegistrations = files.map(
-      (_, i) => `  registerScanned(_sys${i});`
+      return rel.startsWith('.') ? rel : `./${rel}`;
+    };
+    const frameworkPath = (file: string) =>
+      toImportPath(resolve(import.meta.dir, '../../core', file));
+    const runtimePath = frameworkPath('runtime.ts');
+    const configPath = frameworkPath('config.ts');
+    const systemImports = files.map(
+      (f, i) => `import * as _sys${i} from '${toImportPath(f)}';`
     );
-
-    const configPath = relative(
-      outDir,
-      resolve(rootDir, 'core/config.ts')
-    ).replace(/\\/g, '/');
+    const systemResolutions = files.map(
+      (f, i) => `  ...resolveModuleSystems(_sys${i}, ${JSON.stringify(f)}),`
+    );
 
     const entrySource = `#!/usr/bin/env bun
 /**
  * Feed Runtime — built entry point
  * Generated at ${new Date().toISOString()}
+ *
+ * System resolution, config overrides and engine construction come from the
+ * shared runtime module so built and dev/CLI registration behave identically.
  */
 
-import { FeedEngine } from '${enginePath}';
+import {
+  createEngineFromConfig,
+  registerSystems,
+  resolveModuleSystems,
+} from '${runtimePath}';
 import { loadFeedConfig } from '${configPath}';
 
 ${systemImports.join('\n')}
 
-interface FeedSystemLike {
-  id: string;
-  name: string;
-  phase: number;
-  onTick: (...args: unknown[]) => unknown;
-  [key: string]: unknown;
-}
-
-function isFeedSystem(obj: unknown): obj is FeedSystemLike {
-  if (!obj || typeof obj !== 'object') return false;
-  const m = obj as Record<string, unknown>;
-  return (
-    typeof m.id === 'string' &&
-    typeof m.name === 'string' &&
-    typeof m.phase === 'number' &&
-    typeof m.onTick === 'function'
-  );
-}
-
-function tryInstantiate(ctor: Function): FeedSystemLike | null {
-  try {
-    const inst = new (ctor as new () => unknown)();
-    return isFeedSystem(inst) ? inst : null;
-  } catch { return null; }
-}
-
-function useIfEnabled(sys: FeedSystemLike): void {
-  if (_disabled.has(sys.id)) {
-    console.warn(\`System "\${sys.id}" disabled by config\`);
-    return;
-  }
-  const override = _phaseOverrides[sys.id];
-  if (typeof override === 'number' && sys.phase !== override) {
-    try {
-      (sys as { phase: number }).phase = override;
-    } catch {
-      // Fallback: keep original instance behavior and only override phase for ordering.
-      const original = sys;
-      sys = {
-        ...original,
-        phase: override,
-        onTick: (...args) => original.onTick(...args),
-      };
-    }
-  }
-  engine.use(sys);
-}
-
-function registerScanned(mod: Record<string, unknown>): void {
-  const candidate = mod.default ?? mod;
-  if (isFeedSystem(candidate)) {
-    useIfEnabled(candidate);
-    return;
-  }
-  if (typeof candidate === 'function') {
-    const inst = tryInstantiate(candidate);
-    if (inst) { useIfEnabled(inst); return; }
-  }
-  for (const val of Object.values(mod)) {
-    if (isFeedSystem(val)) { useIfEnabled(val); continue; }
-    if (typeof val === 'function') {
-      const inst = tryInstantiate(val);
-      if (inst) { useIfEnabled(inst); }
-    }
-  }
-}
+const systems = [
+${systemResolutions.join('\n')}
+];
 
 const { config: runtimeConfig } = await loadFeedConfig();
-const { systemsDir: _a, disabledSystems, systemPhases, migratedSubsystems: _b, dev: _c, ...engineKeys } = runtimeConfig;
-const engine = new FeedEngine({
-  config: { budgetMs: runtimeConfig.budgetMs ?? 60_000, ...engineKeys },
-});
-
-const _disabled = new Set(disabledSystems ?? []);
-const _phaseOverrides: Record<string, unknown> = systemPhases ?? {};
-${systemRegistrations.join('\n')}
+const engine = createEngineFromConfig(runtimeConfig);
+registerSystems(engine, systems, runtimeConfig);
 
 await engine.boot();
 

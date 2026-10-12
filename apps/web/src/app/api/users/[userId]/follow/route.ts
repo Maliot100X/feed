@@ -485,18 +485,19 @@ export const GET = withErrorHandling(
     // Optional authentication - if not authenticated, return false
     const authUser = await authenticate(request).catch(() => null);
     const params = await context.params;
-    const { userId: targetId } = UserIdParamSchema.parse(params);
+    const { userId: targetIdentifier } = UserIdParamSchema.parse(params);
 
     if (!authUser) {
       return successResponse({ isFollowing: false });
     }
 
-    // Check if target is a user
-    const [targetUser] = await db
-      .select({ id: users.id, isActor: users.isActor })
-      .from(users)
-      .where(eq(users.id, targetId))
-      .limit(1);
+    // Resolve the target the same way POST/DELETE do, so a username (or other
+    // identifier) reports the same follow state the mutation produced.
+    const targetUser = await findUserByIdentifier(targetIdentifier, {
+      id: true,
+      isActor: true,
+    });
+    const targetId = targetUser?.id ?? targetIdentifier;
 
     // If targetUser has isActor flag, treat as actor (not regular user)
     if (targetUser && !targetUser.isActor) {

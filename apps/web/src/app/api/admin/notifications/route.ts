@@ -6,7 +6,8 @@
  *
  * @description
  * Creates and sends a notification to a specific user or all users.
- * Supports various notification types and optional links. Admin only.
+ * Supports various notification types. Exactly one target is required:
+ * `userId` for a single user or `sendToAll: true` for a broadcast. Admin only.
  *
  * @openapi
  * /api/admin/notifications:
@@ -28,7 +29,7 @@
  *             properties:
  *               userId:
  *                 type: string
- *                 description: Target user ID (optional, sends to all if omitted)
+ *                 description: Target user ID (required unless sendToAll is true; cannot be combined with sendToAll)
  *               message:
  *                 type: string
  *                 minLength: 1
@@ -41,8 +42,6 @@
  *                 type: string
  *               commentId:
  *                 type: string
- *               link:
- *                 type: string
  *               sendToAll:
  *                 type: boolean
  *                 default: false
@@ -50,7 +49,7 @@
  *       200:
  *         description: Notification created successfully
  *       400:
- *         description: Invalid input
+ *         description: Invalid input, both/neither target given, or target is a game actor
  *       401:
  *         description: Unauthorized
  *       403:
@@ -74,6 +73,7 @@
 
 import {
   createNotification,
+  errorResponse,
   NotFoundError,
   requireAdmin,
   successResponse,
@@ -84,34 +84,43 @@ import { logger } from '@feed/shared';
 import type { NextRequest } from 'next/server';
 import { z } from 'zod';
 
-const CreateNotificationSchema = z.object({
-  userId: z.string().optional(), // If not provided, send to all users
-  message: z.string().min(1).max(500),
-  type: z
-    .enum([
-      'system',
-      'comment',
-      'reaction',
-      'follow',
-      'mention',
-      'reply',
-      'share',
-    ])
-    .default('system'),
-  postId: z.string().optional(),
-  commentId: z.string().optional(),
-  link: z.string().optional(), // Optional custom link
-  sendToAll: z.boolean().default(false), // Send to all users
-});
+const CreateNotificationSchema = z
+  .object({
+    userId: z.string().trim().min(1).optional(),
+    message: z.string().min(1).max(500),
+    type: z
+      .enum([
+        'system',
+        'comment',
+        'reaction',
+        'follow',
+        'mention',
+        'reply',
+        'share',
+      ])
+      .default('system'),
+    postId: z.string().optional(),
+    commentId: z.string().optional(),
+    sendToAll: z.boolean().default(false), // Send to all users
+  })
+  .refine((body) => Boolean(body.userId) !== body.sendToAll, {
+    message: 'Provide exactly one of userId or sendToAll: true',
+  });
 
 export const POST = withErrorHandling(async (request: NextRequest) => {
   // Require admin authentication
   const adminUser = await requireAdmin(request);
 
   // Parse request body
-  const body = await request.json();
-  const { userId, message, type, postId, commentId, sendToAll } =
-    CreateNotificationSchema.parse(body);
+  const parsed = CreateNotificationSchema.safeParse(await request.json());
+  if (!parsed.success) {
+    return errorResponse(
+      parsed.error.issues[0]?.message ?? 'Invalid request body',
+      'VALIDATION_ERROR',
+      400
+    );
+  }
+  const { userId, message, type, postId, commentId, sendToAll } = parsed.data;
 
   logger.info(
     'Admin creating notification',
@@ -136,11 +145,15 @@ export const POST = withErrorHandling(async (request: NextRequest) => {
       },
     });
 
-    // Send notifications in batches to avoid overwhelming the database
+    // Send notifications in batches to avoid overwhelming the database.
+    // Count actual outcomes instead of claiming every recipient succeeded.
+    let sent = 0;
+    let skipped = 0;
+    let failed = 0;
     const batchSize = 50;
     for (let i = 0; i < users.length; i += batchSize) {
       const batch = users.slice(i, i + batchSize);
-      await Promise.all(
+      const results = await Promise.allSettled(
         batch.map((user) =>
           createNotification({
             userId: user.id,
@@ -149,33 +162,44 @@ export const POST = withErrorHandling(async (request: NextRequest) => {
             title: 'Notification',
             postId,
             commentId,
-          }).catch((error) => {
-            logger.warn(
-              'Failed to send notification to user',
-              {
-                error,
-                userId: user.id,
-              },
-              'POST /api/admin/notifications'
-            );
           })
         )
       );
+      results.forEach((result, index) => {
+        if (result.status === 'rejected') {
+          failed++;
+          logger.warn(
+            'Failed to send notification to user',
+            { error: result.reason, userId: batch[index]?.id },
+            'POST /api/admin/notifications'
+          );
+        } else if (result.value.created) {
+          sent++;
+        } else {
+          skipped++;
+        }
+      });
     }
 
     logger.info(
-      'Admin notification sent to all users',
+      'Admin notification broadcast finished',
       {
         adminUserId: adminUser.userId,
         userCount: users.length,
+        sent,
+        skipped,
+        failed,
       },
       'POST /api/admin/notifications'
     );
 
     return successResponse({
-      success: true,
-      message: `Notification sent to ${users.length} users`,
+      success: failed === 0,
+      message: `Notification sent to ${sent} of ${users.length} users${failed > 0 ? ` (${failed} failed)` : ''}`,
       recipientCount: users.length,
+      sentCount: sent,
+      skippedCount: skipped,
+      failedCount: failed,
     });
   }
   if (userId) {
@@ -195,13 +219,14 @@ export const POST = withErrorHandling(async (request: NextRequest) => {
     }
 
     if (targetUser.isActor) {
-      return successResponse({
-        success: false,
-        message: 'Cannot send notifications to game actors/NPCs',
-      });
+      return errorResponse(
+        'Cannot send notifications to game actors/NPCs',
+        'INVALID_TARGET',
+        400
+      );
     }
 
-    await createNotification({
+    const result = await createNotification({
       userId: targetUser.id,
       type,
       message,
@@ -221,8 +246,10 @@ export const POST = withErrorHandling(async (request: NextRequest) => {
     );
 
     return successResponse({
-      success: true,
-      message: `Notification sent to ${targetUser.displayName}`,
+      success: result.created,
+      message: result.created
+        ? `Notification sent to ${targetUser.displayName}`
+        : 'Notification was not created (duplicate within dedupe window or recipient unavailable)',
       recipient: {
         id: targetUser.id,
         username: targetUser.username,
@@ -230,8 +257,10 @@ export const POST = withErrorHandling(async (request: NextRequest) => {
       },
     });
   }
-  return successResponse({
-    success: false,
-    message: 'Please provide a userId or set sendToAll to true',
-  });
+  // Unreachable: the schema requires exactly one target.
+  return errorResponse(
+    'Provide exactly one of userId or sendToAll: true',
+    'VALIDATION_ERROR',
+    400
+  );
 });

@@ -20,6 +20,35 @@ import {
 import { generateSnowflakeId, logger } from '@feed/shared';
 
 /**
+ * Find an existing active DM chat between two users without creating one.
+ */
+export async function findDMChat(
+  userA: string,
+  userB: string
+): Promise<string | null> {
+  const otherParticipants = aliasedTable(chatParticipants, 'cp2');
+  const [existingChat] = await db
+    .select({ chatId: chatParticipants.chatId })
+    .from(chatParticipants)
+    .innerJoin(chats, eq(chatParticipants.chatId, chats.id))
+    .innerJoin(
+      otherParticipants,
+      eq(chatParticipants.chatId, otherParticipants.chatId)
+    )
+    .where(
+      and(
+        eq(chatParticipants.userId, userA),
+        eq(chatParticipants.isActive, true),
+        eq(chats.isGroup, false),
+        eq(otherParticipants.userId, userB),
+        eq(otherParticipants.isActive, true)
+      )
+    )
+    .limit(1);
+  return existingChat?.chatId ?? null;
+}
+
+/**
  * Get or create a DM chat between two users.
  *
  * NOTE: This function should NOT be used for agent-owner communication.
@@ -64,30 +93,9 @@ export async function getOrCreateDMChat(
     );
   }
 
-  // Find existing DM chat using a single query with self-join
-  const otherParticipants = aliasedTable(chatParticipants, 'cp2');
-
-  const existingChat = await db
-    .select({ chatId: chatParticipants.chatId })
-    .from(chatParticipants)
-    .innerJoin(chats, eq(chatParticipants.chatId, chats.id))
-    .innerJoin(
-      otherParticipants,
-      eq(chatParticipants.chatId, otherParticipants.chatId)
-    )
-    .where(
-      and(
-        eq(chatParticipants.userId, userA),
-        eq(chatParticipants.isActive, true),
-        eq(chats.isGroup, false),
-        eq(otherParticipants.userId, userB),
-        eq(otherParticipants.isActive, true)
-      )
-    )
-    .limit(1);
-
-  if (existingChat.length > 0 && existingChat[0]) {
-    return existingChat[0].chatId;
+  const existingChatId = await findDMChat(userA, userB);
+  if (existingChatId) {
+    return existingChatId;
   }
 
   // Create new DM chat
@@ -151,32 +159,9 @@ export async function getOrCreateDMChat(
         'DMService'
       );
 
-      // Retry lookup
-      const retryOtherParticipants = aliasedTable(
-        chatParticipants,
-        'cp2_retry'
-      );
-      const retryMatch = await db
-        .select({ chatId: chatParticipants.chatId })
-        .from(chatParticipants)
-        .innerJoin(chats, eq(chatParticipants.chatId, chats.id))
-        .innerJoin(
-          retryOtherParticipants,
-          eq(chatParticipants.chatId, retryOtherParticipants.chatId)
-        )
-        .where(
-          and(
-            eq(chatParticipants.userId, userA),
-            eq(chatParticipants.isActive, true),
-            eq(chats.isGroup, false),
-            eq(retryOtherParticipants.userId, userB),
-            eq(retryOtherParticipants.isActive, true)
-          )
-        )
-        .limit(1);
-
-      if (retryMatch.length > 0 && retryMatch[0]) {
-        return retryMatch[0].chatId;
+      const retryChatId = await findDMChat(userA, userB);
+      if (retryChatId) {
+        return retryChatId;
       }
     }
     throw error;

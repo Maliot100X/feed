@@ -40,7 +40,7 @@
  * ```
  */
 
-import { withErrorHandling } from '@feed/api';
+import { NotFoundError, withErrorHandling } from '@feed/api';
 import { db } from '@feed/db';
 import { ImageResponse } from 'next/og';
 import type { NextRequest } from 'next/server';
@@ -59,22 +59,26 @@ export const GET = withErrorHandling(async function GET(
 ) {
   const { userId } = await context.params;
 
-  const [user, referralCount] = await Promise.all([
-    db.user.findUnique({
-      where: { id: userId },
-      select: {
-        username: true,
-        displayName: true,
-        profileImageUrl: true,
-        reputationPoints: true,
-      },
-    }),
-    db.referral.count({
-      where: { referrerId: userId },
-    }),
-  ]);
+  const user = await db.user.findUnique({
+    where: { id: userId },
+    select: {
+      username: true,
+      displayName: true,
+      profileImageUrl: true,
+      reputationPoints: true,
+    },
+  });
 
-  const displayName = user?.displayName || user?.username || 'A Feed Trader';
+  // Never render a plausible-looking card with zero stats for an unknown user.
+  if (!user) {
+    throw new NotFoundError('User', 'USER_NOT_FOUND');
+  }
+
+  const referralCount = await db.referral.count({
+    where: { referrerId: userId },
+  });
+
+  const displayName = user.displayName || user.username || 'A Feed Trader';
 
   return new ImageResponse(
     <div
@@ -122,7 +126,7 @@ export const GET = withErrorHandling(async function GET(
           zIndex: 1,
         }}
       >
-        {user?.profileImageUrl && (
+        {user.profileImageUrl && (
           <img
             src={user.profileImageUrl}
             alt={displayName}
@@ -197,7 +201,7 @@ export const GET = withErrorHandling(async function GET(
                 display: 'flex',
               }}
             >
-              {(user?.reputationPoints || 0).toLocaleString()}
+              {user.reputationPoints.toLocaleString()}
             </div>
           </div>
 

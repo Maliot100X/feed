@@ -160,6 +160,15 @@ describe('ActorContextBuilder', () => {
     }
   });
 
+  it('formatForPrompt does not mutate registry post examples', async () => {
+    const ctx = await builder.buildContext('ailon-musk');
+    expect(ctx).not.toBeNull();
+    const before = [...ctx!.identity.postExamples];
+    builder.formatForPrompt(ctx!);
+    builder.formatForPrompt(ctx!);
+    expect(ctx!.identity.postExamples).toEqual(before);
+  });
+
   it('formatForPrompt handles empty context gracefully', async () => {
     const ctx = await builder.buildContext('ailon-musk');
     expect(ctx).not.toBeNull();
@@ -174,7 +183,6 @@ describe('ActorContextBuilder', () => {
         resolvedQuestions: [],
         directMessages: [],
         headlines: [],
-        trendingTopics: [],
       },
       relationships: [],
       state: { mood: 'neutral', memories: '', avoidPatterns: '' },

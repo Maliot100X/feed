@@ -6,7 +6,8 @@
  *
  * @description
  * Posts a tweet to Twitter/X using OAuth 2.0. Requires user to have connected
- * their Twitter account. Supports optional content type and content ID for tracking.
+ * their Twitter account. Share tracking is performed by the client via
+ * POST /api/users/[userId]/share; contentType/contentId are accepted but unused.
  *
  * @openapi
  * /api/twitter/tweet:
@@ -33,10 +34,10 @@
  *               contentType:
  *                 type: string
  *                 enum: [market, profile, referral]
- *                 description: Optional content type for tracking
+ *                 description: Accepted for compatibility (unused)
  *               contentId:
  *                 type: string
- *                 description: Optional content ID for tracking
+ *                 description: Accepted for compatibility (unused)
  *     responses:
  *       200:
  *         description: Tweet posted successfully
@@ -47,12 +48,14 @@
  *               properties:
  *                 success:
  *                   type: boolean
- *                 tweetId:
+ *                 tweetUrl:
  *                   type: string
  *       400:
- *         description: Missing tweet text
+ *         description: Missing or invalid tweet text
  *       401:
- *         description: Twitter account not connected
+ *         description: Twitter account not connected or token rejected
+ *       502:
+ *         description: Provider error or response without a post id
  *
  * @example
  * ```typescript
@@ -76,6 +79,13 @@ import {
 import { logger } from '@feed/shared';
 import type { NextRequest } from 'next/server';
 import { NextResponse } from 'next/server';
+import { z } from 'zod';
+
+const TweetBodySchema = z.object({
+  text: z.string().trim().min(1, 'Missing tweet text').max(25_000),
+  contentType: z.enum(['market', 'profile', 'referral']).optional(),
+  contentId: z.string().max(200).optional(),
+});
 
 export const POST = withErrorHandling(async function POST(
   request: NextRequest
@@ -98,17 +108,9 @@ export const POST = withErrorHandling(async function POST(
     );
   }
 
-  // Parse request body
-  const body = await request.json();
-  const { text, contentType, contentId } = body as {
-    text: string;
-    contentType?: 'market' | 'profile' | 'referral';
-    contentId?: string;
-  };
-
-  if (!text || !text.trim()) {
-    return NextResponse.json({ error: 'Missing tweet text' }, { status: 400 });
-  }
+  // Parse request body (contentType/contentId are accepted for compatibility;
+  // share tracking is done by the client via POST /api/users/[userId]/share).
+  const { text } = TweetBodySchema.parse(await request.json());
 
   logger.info(
     'Posting tweet via OAuth 2.0',
@@ -139,56 +141,38 @@ export const POST = withErrorHandling(async function POST(
       { error: errorText, status: tweetResponse.status },
       'TwitterPost'
     );
+    // Provider error bodies are logged, not forwarded to the client.
     return NextResponse.json(
-      { error: 'Failed to post tweet', details: errorText },
-      { status: tweetResponse.status }
+      { error: 'Failed to post tweet' },
+      { status: tweetResponse.status === 401 ? 401 : 502 }
     );
   }
 
   const responseData = (await tweetResponse.json()) as {
-    data?: { id: string; text: string };
+    data?: { id?: string; text?: string };
   };
+  const tweetId = responseData.data?.id;
+  if (!tweetId || !/^\d+$/.test(tweetId)) {
+    logger.error(
+      'Tweet response missing a valid id',
+      { userId: user.id },
+      'TwitterPost'
+    );
+    return NextResponse.json(
+      { error: 'Tweet status unknown: provider returned no post id' },
+      { status: 502 }
+    );
+  }
 
   logger.info(
     'Tweet posted successfully via OAuth 2.0',
-    { userId: user.id, tweetId: responseData.data?.id },
+    { userId: user.id, tweetId },
     'TwitterPost'
   );
-
-  // Track the share if contentType provided
-  if (contentType && responseData.data?.id) {
-    const token = request.headers.get('authorization')!.replace('Bearer ', '');
-    const tweetUrl = `https://x.com/${user.twitterUsername}/status/${responseData.data.id}`;
-
-    const shareResponse = await fetch(
-      `${process.env.NEXT_PUBLIC_APP_URL}/api/users/${user.id}/share`,
-      {
-        method: 'POST',
-        headers: {
-          Authorization: `Bearer ${token}`,
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({
-          platform: 'twitter',
-          contentType,
-          contentId,
-          url: tweetUrl,
-        }),
-      }
-    );
-
-    if (!shareResponse.ok) {
-      logger.warn(
-        'Failed to track share',
-        { status: shareResponse.status },
-        'TwitterPost'
-      );
-    }
-  }
 
   return NextResponse.json({
     success: true,
     tweet: responseData,
-    tweetUrl: `https://x.com/${user.twitterUsername || 'i'}/status/${responseData.data?.id}`,
+    tweetUrl: `https://x.com/${user.twitterUsername || 'i'}/status/${tweetId}`,
   });
 });

@@ -7,6 +7,7 @@
 
 import { describe, expect, it } from 'bun:test';
 import {
+  classifyMomentum,
   MarketMomentumService,
   MOMENTUM_CONFIG,
 } from '../../services/market-momentum-service';
@@ -355,5 +356,27 @@ describe('Edge Cases', () => {
       'buy'
     );
     expect(result.multiplier).toBe(1.0);
+  });
+});
+
+describe('classifyMomentum', () => {
+  it('reports fractional change and percent consistently', () => {
+    const result = classifyMomentum(88, 100);
+    expect(result?.priceChange1h).toBeCloseTo(-0.12);
+    expect(result?.priceChangePercent).toBeCloseTo(-12);
+    expect(result?.signal).toBe('panic');
+  });
+
+  it('classifies severe moves at the thresholds', () => {
+    expect(classifyMomentum(80, 100)?.signal).toBe('severe_panic');
+    expect(classifyMomentum(120, 100)?.signal).toBe('severe_fomo');
+    expect(classifyMomentum(105, 100)?.signal).toBe('neutral');
+  });
+
+  it('returns null for non-finite or non-positive prices', () => {
+    expect(classifyMomentum(100, 0)).toBeNull();
+    expect(classifyMomentum(Number.NaN, 100)).toBeNull();
+    expect(classifyMomentum(100, Number.POSITIVE_INFINITY)).toBeNull();
+    expect(classifyMomentum(-1, 100)).toBeNull();
   });
 });

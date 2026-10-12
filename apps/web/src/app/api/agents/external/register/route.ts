@@ -41,11 +41,14 @@ const ExternalAgentRegisterSchema = z.object({
     x402Support: z.boolean().optional(),
     platform: z.string().optional(),
   }),
+  // Inbound auth is always a Feed-issued API key. Caller-supplied credential
+  // blobs are not accepted: they were previously merged into the stored
+  // server credential record and could override the issued apiKeyHash.
   authentication: z
     .object({
       type: z.enum(['API_KEY', 'OAUTH', 'JWT', 'MUTUAL_TLS']),
-      credentials: z.record(z.string(), z.any()).optional(),
     })
+    .strict()
     .optional(),
   agentCard: z
     .object({
@@ -166,10 +169,8 @@ export const POST = withErrorHandling(async function POST(req: NextRequest) {
     capabilities: validated.capabilities,
     authentication: {
       type: 'apiKey',
-      credentials: JSON.stringify({
-        apiKeyHash,
-        ...validated.authentication?.credentials,
-      }),
+      // Server-owned: only the hash of the key issued below.
+      credentials: JSON.stringify({ apiKeyHash }),
     },
     agentCard: validated.agentCard,
     registeredByUserId: authUser.userId,

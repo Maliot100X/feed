@@ -22,7 +22,7 @@ export default defineSystem({
 
 Put this in the `systems/` directory (or wherever `systemsDir` points in your config). The engine scans that directory at boot and picks up any file that exports something matching the `FeedSystem` shape.
 
-The file must have a default export or a named export. Both work. If you have multiple exports in one file, the scanner tries all of them.
+The file must have a default export or a named export. Both work. If you have multiple exports in one file, the scanner tries all of them. Objects matching `FeedSystem` are used as-is and exported classes are instantiated; plain functions are ignored and never called. The same value exported under two names (e.g. default + named) is registered once. If a file fails to load or a system class constructor throws, scanning fails with the file path instead of continuing with a partial system set.
 
 ## Required fields
 
@@ -36,7 +36,7 @@ The file must have a default export or a named export. Both work. If you have mu
 - **dependencies** - Array of system ids. Your system will run after all of them. They can be in the same phase or an earlier one.
 - **skipDeadlineCheck** - If `true`, your system runs even when the tick is past its time budget.
 - **register(ctx)** - Called once at boot, before any ticks. Good for setting up services.
-- **destroy()** - Called once at shutdown, in reverse registration order. Good for cleanup.
+- **destroy()** - Called once at shutdown, in reverse boot order (phase- and dependency-sorted), so dependents are torn down before their dependencies. Good for cleanup.
 - **intervals** - Named handlers that run conditionally (see below).
 
 ## The tick context
@@ -100,7 +100,7 @@ defineSystem({
 
 This guarantees `market-context` runs before `trade-execution`. Both systems must be registered. If a dependency is missing, boot fails with a `SystemNotFoundError`. If there is a cycle, boot fails with a `CircularDependencyError`.
 
-Dependencies only affect ordering within a phase. If your dependency is in an earlier phase, it runs first anyway because of phase ordering. You can still list it as a dependency for clarity (and the engine will not complain), but it has no practical effect.
+Dependencies only affect ordering within a phase. If your dependency is in an earlier phase, it runs first anyway because of phase ordering. You can still list it as a dependency for clarity, but it has no practical effect. A dependency on a system in a *later* phase can never be satisfied, so boot fails with a `FrameworkError`. System ids must be unique: registering the same id twice throws.
 
 ## Intervals
 

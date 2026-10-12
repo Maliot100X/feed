@@ -2,7 +2,7 @@
 
 import { cn } from '@feed/shared';
 import { Activity } from 'lucide-react';
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { PageContainer } from '@/components/shared/PageContainer';
 import { apiUrl } from '@/utils/api-url';
 
@@ -13,10 +13,8 @@ interface GameStats {
 }
 
 interface EngineStatus {
-  isRunning: boolean;
   currentDay?: number;
   currentDate?: string;
-  speed?: number;
   lastTickAt?: string;
 }
 
@@ -26,27 +24,38 @@ export default function GamePage() {
   const [stats, setStats] = useState<GameStats | null>(null);
   const [engineStatus, setEngineStatus] = useState<EngineStatus | null>(null);
   const [refreshing, setRefreshing] = useState(false);
+  const inFlightRef = useRef(false);
 
   const loadGameData = useCallback(async () => {
+    // Skip overlapping polls/clicks while a request is outstanding.
+    if (inFlightRef.current) return;
+    inFlightRef.current = true;
     setRefreshing(true);
-    const response = await fetch(apiUrl('/api/stats'));
-    if (!response.ok) {
+    try {
+      const response = await fetch(apiUrl('/api/stats'));
+      if (!response.ok) {
+        setError('Failed to load game data');
+        return;
+      }
+      const data = (await response.json()) as {
+        stats: GameStats;
+        engineStatus: EngineStatus;
+      };
+      setStats(data.stats);
+      setEngineStatus(data.engineStatus);
+      setError(null);
+    } catch {
       setError('Failed to load game data');
+    } finally {
+      inFlightRef.current = false;
       setLoading(false);
       setRefreshing(false);
-      return;
     }
-    const data = await response.json();
-    setStats(data.stats);
-    setEngineStatus(data.engineStatus);
-    setError(null);
-    setLoading(false);
-    setRefreshing(false);
   }, []);
 
   // Initial load
   useEffect(() => {
-    loadGameData();
+    void loadGameData();
 
     // Refresh every 10 seconds
     const interval = setInterval(loadGameData, 10000);
@@ -63,21 +72,25 @@ export default function GamePage() {
     );
   }
 
-  if (error) {
+  if (error && !stats) {
     return (
       <PageContainer className="flex flex-col items-center justify-center gap-4">
-        <div className="text-destructive text-lg">⚠️ {error}</div>
-        <p className="max-w-md text-center text-muted-foreground text-sm">
-          The game tick may not be running. Start with:{' '}
-          <code className="rounded bg-muted px-2 py-1">bun run dev</code>
-        </p>
+        <div className="text-destructive text-lg">{error}</div>
+        <button
+          type="button"
+          onClick={() => void loadGameData()}
+          disabled={refreshing}
+          className="rounded-lg bg-primary px-6 py-2 font-semibold text-primary-foreground hover:bg-primary/90 disabled:opacity-50"
+        >
+          {refreshing ? 'Retrying...' : 'Try again'}
+        </button>
       </PageContainer>
     );
   }
 
   const currentDate = engineStatus?.currentDate
     ? new Date(engineStatus.currentDate)
-    : new Date();
+    : null;
   const lastTick = engineStatus?.lastTickAt
     ? new Date(engineStatus.lastTickAt)
     : null;
@@ -92,29 +105,15 @@ export default function GamePage() {
             'shadow-md'
           )}
         >
-          <div className="mb-4 flex items-center justify-between">
-            <h2 className="font-bold text-lg">Continuous Game Engine</h2>
-            <div className="flex items-center gap-2">
-              <Activity
-                className={cn(
-                  'h-4 w-4',
-                  engineStatus?.isRunning
-                    ? 'animate-pulse text-green-500'
-                    : 'text-muted-foreground'
-                )}
-              />
-              <span
-                className={cn(
-                  'font-medium text-sm',
-                  engineStatus?.isRunning
-                    ? 'text-green-500'
-                    : 'text-muted-foreground'
-                )}
-              >
-                {engineStatus?.isRunning ? 'Running' : 'Stopped'}
-              </span>
-            </div>
+          <div className="mb-4 flex items-center gap-2">
+            <Activity className="h-4 w-4 text-primary" />
+            <h2 className="font-bold text-lg">Game Engine</h2>
           </div>
+          {error && (
+            <p className="mb-3 text-destructive text-sm" role="alert">
+              {error} — showing last loaded data.
+            </p>
+          )}
 
           {/* Current Game Time */}
           <div className="space-y-2">
@@ -122,16 +121,20 @@ export default function GamePage() {
               <div className="mb-1 text-muted-foreground text-xs">
                 Current Game Date
               </div>
-              <div className="font-bold text-2xl" style={{ color: '#0066FF' }}>
-                {currentDate.toLocaleDateString('en-US', {
-                  month: 'short',
-                  day: 'numeric',
-                  year: 'numeric',
-                })}
+              <div className="font-bold text-2xl text-primary">
+                {currentDate
+                  ? currentDate.toLocaleDateString('en-US', {
+                      month: 'short',
+                      day: 'numeric',
+                      year: 'numeric',
+                    })
+                  : 'Unavailable'}
               </div>
-              <div className="mt-1 text-muted-foreground text-sm">
-                Day {engineStatus?.currentDay || 1}
-              </div>
+              {engineStatus?.currentDay != null && (
+                <div className="mt-1 text-muted-foreground text-sm">
+                  Day {engineStatus.currentDay}
+                </div>
+              )}
             </div>
 
             {lastTick && (
@@ -140,7 +143,9 @@ export default function GamePage() {
                   Last Tick
                 </div>
                 <div className="text-sm">
-                  {lastTick.toLocaleTimeString('en-US', {
+                  {lastTick.toLocaleString('en-US', {
+                    month: 'short',
+                    day: 'numeric',
                     hour: '2-digit',
                     minute: '2-digit',
                     second: '2-digit',
@@ -164,24 +169,24 @@ export default function GamePage() {
               <div className="mb-1 text-muted-foreground text-xs">
                 Total Posts
               </div>
-              <div className="font-bold text-2xl" style={{ color: '#0066FF' }}>
-                {stats?.totalPosts?.toLocaleString() || '0'}
+              <div className="font-bold text-2xl text-primary">
+                {stats?.totalPosts?.toLocaleString() ?? '—'}
               </div>
             </div>
             <div>
               <div className="mb-1 text-muted-foreground text-xs">
                 Active Questions
               </div>
-              <div className="font-bold text-2xl" style={{ color: '#0066FF' }}>
-                {stats?.activeQuestions || '0'}
+              <div className="font-bold text-2xl text-primary">
+                {stats?.activeQuestions?.toLocaleString() ?? '—'}
               </div>
             </div>
             <div>
               <div className="mb-1 text-muted-foreground text-xs">
                 Companies
               </div>
-              <div className="font-bold text-2xl" style={{ color: '#0066FF' }}>
-                {stats?.totalCompanies || '0'}
+              <div className="font-bold text-2xl text-primary">
+                {stats?.totalCompanies?.toLocaleString() ?? '—'}
               </div>
             </div>
           </div>
@@ -190,7 +195,8 @@ export default function GamePage() {
         {/* Refresh Button */}
         <div className="flex justify-center">
           <button
-            onClick={loadGameData}
+            type="button"
+            onClick={() => void loadGameData()}
             disabled={refreshing}
             className={cn(
               'rounded-lg px-6 py-3 font-semibold',
@@ -211,21 +217,17 @@ export default function GamePage() {
             'shadow-md'
           )}
         >
-          <h3 className="mb-3 font-semibold text-sm">About Continuous Mode</h3>
+          <h3 className="mb-3 font-semibold text-sm">About the Game</h3>
           <div className="space-y-2 text-muted-foreground text-sm">
             <p>
-              The continuous game engine runs in real-time, generating 10-20
-              posts per minute and updating markets automatically.
+              The game engine advances on a schedule, generating new posts and
+              updating markets automatically.
             </p>
             <p>
               Posts appear in the{' '}
               <span className="font-medium text-foreground">Home</span> feed as
               they&apos;re generated. Prediction markets update in the{' '}
               <span className="font-medium text-foreground">Markets</span> tab.
-            </p>
-            <p className="mt-4 rounded-lg bg-muted p-3 text-xs">
-              <span className="font-medium">Start development:</span>{' '}
-              <code>bun run dev</code>
             </p>
           </div>
         </div>

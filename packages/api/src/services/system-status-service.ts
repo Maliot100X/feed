@@ -1,5 +1,12 @@
 import { createHash } from 'node:crypto';
-import { checkDatabaseHealth, db, queryMonitor } from '@feed/db';
+import {
+  checkDatabaseHealth,
+  db,
+  desc,
+  eq,
+  queryMonitor,
+  systemMetricsSnapshots,
+} from '@feed/db';
 import { logger } from '@feed/shared';
 import type { CronJobStats } from '../monitoring/cron-metrics';
 import { cronMetrics } from '../monitoring/cron-metrics';
@@ -942,17 +949,16 @@ export async function getSystemStatusSnapshot(): Promise<SystemStatusSnapshot> {
     db.question.count({
       where: { status: 'active' },
     }),
-    db.$queryRaw<{
-      timestamp: Date;
-      createdAt: Date;
-      snapshotDurationMs: number;
-    }>`
-      SELECT "timestamp", "createdAt", "snapshotDurationMs"
-      FROM "SystemMetricsSnapshot"
-      WHERE "environment" = ${deploymentEnvironment}
-      ORDER BY "timestamp" DESC
-      LIMIT 1
-    `,
+    db
+      .select({
+        timestamp: systemMetricsSnapshots.timestamp,
+        createdAt: systemMetricsSnapshots.createdAt,
+        snapshotDurationMs: systemMetricsSnapshots.snapshotDurationMs,
+      })
+      .from(systemMetricsSnapshots)
+      .where(eq(systemMetricsSnapshots.environment, deploymentEnvironment))
+      .orderBy(desc(systemMetricsSnapshots.timestamp))
+      .limit(1),
   ]);
 
   const cronDashboard = withPersistedMetricsSnapshotJob(

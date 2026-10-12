@@ -59,16 +59,8 @@ import { NextResponse } from 'next/server';
  * ```
  */
 export const GET = withErrorHandling(async function GET() {
-  const spec = (await generateAutoSpec()) as {
-    openapi?: string;
-    swagger?: string;
-    [key: string]: unknown;
-  };
-
-  // Ensure openapi version field is present (required by Swagger UI)
-  if (!spec.openapi && !spec.swagger) {
-    spec.openapi = '3.0.0';
-  }
+  // The base swagger definition always sets `openapi`; no runtime repair.
+  const spec = await generateAutoSpec();
 
   return NextResponse.json(spec, {
     headers: {

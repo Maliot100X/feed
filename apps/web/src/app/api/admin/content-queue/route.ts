@@ -12,7 +12,12 @@
  * to avoid N+1 query patterns at scale.
  */
 
-import { requireAdmin, successResponse, withErrorHandling } from '@feed/api';
+import {
+  errorResponse,
+  requireAdmin,
+  successResponse,
+  withErrorHandling,
+} from '@feed/api';
 import {
   and,
   comments,
@@ -42,13 +47,24 @@ const ALLOWED_IMAGE_DOMAINS = [
 ];
 
 /**
- * Validate and sanitize image URL
- * Returns null for invalid/non-HTTPS/non-allowlisted URLs to prevent XSS/SSRF attacks
+ * Validate an image URL for display in the moderation queue.
+ * Returns null (per item, never throwing) for malformed, non-HTTPS or
+ * non-allowlisted URLs so one bad record cannot break the whole queue.
+ * Same-origin relative paths (e.g. local uploads) are kept. The server never
+ * fetches these URLs; this only limits what the admin browser loads.
  */
 function sanitizeImageUrl(url: string | null): string | null {
   if (!url) return null;
 
-  const parsed = new URL(url); // Let it throw on invalid URL - handled at API boundary
+  if (url.startsWith('/') && !url.startsWith('//')) {
+    return url;
+  }
+
+  if (!URL.canParse(url)) {
+    logger.warn('Malformed image URL rejected', { url }, 'sanitizeImageUrl');
+    return null;
+  }
+  const parsed = new URL(url);
 
   if (parsed.protocol !== 'https:') {
     logger.warn('Non-HTTPS image URL rejected', { url }, 'sanitizeImageUrl');
@@ -66,7 +82,7 @@ function sanitizeImageUrl(url: string | null): string | null {
       { url },
       'sanitizeImageUrl'
     );
-    return null; // Enforce allowlist for security
+    return null; // Enforce allowlist for display
   }
 
   return url;
@@ -74,9 +90,10 @@ function sanitizeImageUrl(url: string | null): string | null {
 
 const ContentQueueQuerySchema = z.object({
   type: z.enum(['all', 'posts', 'comments']).default('all'),
-  status: z.enum(['pending', 'resolved']).default('pending'),
-  limit: z.coerce.number().min(1).max(100).default(50),
-  offset: z.coerce.number().min(0).max(1000).default(0), // Max offset prevents scanning entire dataset
+  // 'dismissed' = reports closed by approving the content
+  status: z.enum(['pending', 'resolved', 'dismissed']).default('pending'),
+  limit: z.coerce.number().int().min(1).max(100).default(50),
+  offset: z.coerce.number().int().min(0).max(1000).default(0), // Max offset prevents scanning entire dataset
 });
 
 export const GET = withErrorHandling(async (request: NextRequest) => {
@@ -93,13 +110,9 @@ export const GET = withErrorHandling(async (request: NextRequest) => {
   });
 
   if (!parseResult.success) {
-    return successResponse(
-      {
-        error: 'Invalid query parameters',
-        details: parseResult.error.flatten(),
-      },
-      400
-    );
+    return errorResponse('Invalid query parameters', 'VALIDATION_ERROR', 400, {
+      details: parseResult.error.flatten(),
+    });
   }
 
   const { type: contentType, status, limit, offset } = parseResult.data;

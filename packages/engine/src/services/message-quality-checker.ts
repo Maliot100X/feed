@@ -6,7 +6,7 @@
  * chat invite chances, and risk of being booted from group chats.
  */
 
-import { comments, db, desc, eq, messages, userInteractions } from '@feed/db';
+import { and, comments, db, desc, eq, messages } from '@feed/db';
 
 /**
  * Message quality check result
@@ -159,11 +159,14 @@ export class MessageQualityChecker {
         .limit(20);
       recentMessages = recentComments.map((c) => c.content);
     } else if (contextType === 'dm' || contextType === 'groupchat') {
-      // Check messages from this user in this chat
+      // Check messages from this user in this chat only, so a repeated
+      // greeting to a different recipient is not flagged as a duplicate.
       const recentChatMessages = await db
         .select({ content: messages.content })
         .from(messages)
-        .where(eq(messages.senderId, userId))
+        .where(
+          and(eq(messages.senderId, userId), eq(messages.chatId, contextId))
+        )
         .orderBy(desc(messages.createdAt))
         .limit(20);
       recentMessages = recentChatMessages.map((m) => m.content);
@@ -205,6 +208,14 @@ export class MessageQualityChecker {
   ): number {
     const trimmed = message.trim();
 
+    // Hard constraints run before soft scoring so an early soft warning can
+    // never skip them.
+    const urlCount = (trimmed.match(/https?:\/\//gi) || []).length;
+    if (urlCount > 2) {
+      errors.push('Too many URLs in message');
+      return 0;
+    }
+
     // Check for all caps (spam indicator)
     const capsRatio = (trimmed.match(/[A-Z]/g) || []).length / trimmed.length;
     if (capsRatio > 0.7 && trimmed.length > 20) {
@@ -235,23 +246,16 @@ export class MessageQualityChecker {
       }
     }
 
-    // Check for URL spam (multiple URLs)
-    const urlCount = (trimmed.match(/https?:\/\//gi) || []).length;
-    if (urlCount > 2) {
-      errors.push('Too many URLs in message');
-      return 0;
-    }
-
     return 1.0;
   }
 
   /**
    * Normalize text for comparison
    */
-  private static normalizeText(text: string): string {
+  static normalizeText(text: string): string {
     return text
       .toLowerCase()
-      .replace(/[^\w\s]/g, '')
+      .replace(/[^\p{L}\p{N}\s]/gu, '')
       .replace(/\s+/g, ' ')
       .trim();
   }
@@ -259,7 +263,12 @@ export class MessageQualityChecker {
   /**
    * Calculate similarity between two texts (Jaccard similarity)
    */
-  private static calculateSimilarity(text1: string, text2: string): number {
+  static calculateSimilarity(text1: string, text2: string): number {
+    // Texts with no letters/digits (e.g. emoji-only) cannot be compared by
+    // words; treat them as duplicates only when identical.
+    if (!text1 || !text2) {
+      return text1 === text2 && text1.length > 0 ? 1 : 0;
+    }
     const words1 = new Set(text1.split(/\s+/));
     const words2 = new Set(text2.split(/\s+/));
 
@@ -267,41 +276,5 @@ export class MessageQualityChecker {
     const union = new Set([...words1, ...words2]);
 
     return intersection.size / union.size;
-  }
-
-  /**
-   * Get user's quality statistics
-   */
-  static async getUserQualityStats(userId: string) {
-    const interactions = await db
-      .select({ qualityScore: userInteractions.qualityScore })
-      .from(userInteractions)
-      .where(eq(userInteractions.userId, userId));
-
-    if (interactions.length === 0) {
-      return {
-        averageScore: 0,
-        totalMessages: 0,
-        highQualityCount: 0,
-        lowQualityCount: 0,
-      };
-    }
-
-    const averageScore =
-      interactions.reduce((sum, i) => sum + i.qualityScore, 0) /
-      interactions.length;
-    const highQualityCount = interactions.filter(
-      (i) => i.qualityScore >= 0.8
-    ).length;
-    const lowQualityCount = interactions.filter(
-      (i) => i.qualityScore < 0.5
-    ).length;
-
-    return {
-      averageScore,
-      totalMessages: interactions.length,
-      highQualityCount,
-      lowQualityCount,
-    };
   }
 }

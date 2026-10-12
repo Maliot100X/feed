@@ -126,7 +126,7 @@ class TestWallet implements WalletPort {
 // ---------------------------------------------------------------------------
 // Test-local PriceImpactPort (mirrors the real adapter)
 // ---------------------------------------------------------------------------
-let BASE_PRICE = 100;
+const BASE_PRICE = 100;
 
 function createTestPriceImpact(): PriceImpactPort {
   return {
@@ -255,31 +255,44 @@ const USER_C = 'test-avg-fill-user-c-' + Date.now();
 
 const createdPositionIds: string[] = [];
 
-async function findCleanTestMarket() {
-  const markets = await db.select().from(perpMarketSnapshots);
+/**
+ * Create a dedicated perp market + organization state for this suite so it
+ * never depends on (or mutates) seeded markets and other suites' positions.
+ */
+async function createTestMarket() {
+  const suffix = crypto.randomUUID().replaceAll('-', '').slice(0, 10);
+  TEST_TICKER = `AVGFILL${suffix}`.toUpperCase();
+  ORG_ID = `test-avg-fill-org-${suffix}`;
+  const now = new Date();
 
-  for (const market of markets) {
-    if (Number(market.currentPrice) <= 10) {
-      continue;
-    }
+  await db.insert(organizationState).values({
+    id: ORG_ID,
+    currentPrice: BASE_PRICE,
+    basePrice: BASE_PRICE,
+    updatedAt: now,
+  });
+  await db.insert(perpMarketSnapshots).values({
+    ticker: TEST_TICKER,
+    organizationId: ORG_ID,
+    name: 'Avg Fill Test Org',
+    currentPrice: BASE_PRICE,
+    high24h: BASE_PRICE,
+    low24h: BASE_PRICE,
+    fundingRate: {
+      ticker: TEST_TICKER,
+      rate: 0,
+      nextFundingTime: now.toISOString(),
+      predictedRate: 0,
+    },
+  });
+}
 
-    const openPositions = await db
-      .select({ id: perpPositions.id })
-      .from(perpPositions)
-      .where(
-        and(
-          eq(perpPositions.ticker, market.ticker),
-          isNull(perpPositions.closedAt)
-        )
-      )
-      .limit(1);
-
-    if (openPositions.length === 0) {
-      return market;
-    }
-  }
-
-  throw new Error('No clean perp market found for avg-fill integration tests');
+async function deleteTestMarket() {
+  await db.delete(perpPositions).where(eq(perpPositions.ticker, TEST_TICKER));
+  await db
+    .delete(perpMarketSnapshots)
+    .where(eq(perpMarketSnapshots.ticker, TEST_TICKER));
+  await db.delete(organizationState).where(eq(organizationState.id, ORG_ID));
 }
 
 async function resetTestMarketState() {
@@ -318,27 +331,7 @@ async function resetTestMarketState() {
 
 describe('Perp Constant-Product AMM Average Fill Integration', () => {
   beforeAll(async () => {
-    const cleanMarket = await findCleanTestMarket();
-
-    TEST_TICKER = cleanMarket.ticker;
-    ORG_ID = cleanMarket.organizationId;
-
-    const [state] = await db
-      .select()
-      .from(organizationState)
-      .where(eq(organizationState.id, ORG_ID))
-      .limit(1);
-
-    const stateBasePrice = state ? Number(state.basePrice ?? 0) : 0;
-    const marketCurrentPrice = Number(cleanMarket.currentPrice ?? 0);
-    BASE_PRICE =
-      stateBasePrice > 0
-        ? stateBasePrice
-        : marketCurrentPrice > 0
-          ? marketCurrentPrice
-          : 100;
-
-    await resetTestMarketState();
+    await createTestMarket();
 
     console.log(
       `\nUsing ticker: ${TEST_TICKER}, basePrice: ${BASE_PRICE}, baseReserve: ${PERP_MARKET_CONFIG.INITIAL_BASE_RESERVE}`
@@ -350,7 +343,7 @@ describe('Perp Constant-Product AMM Average Fill Integration', () => {
 
   afterAll(async () => {
     console.log(`\nCleaning up ${createdPositionIds.length} test positions...`);
-    await resetTestMarketState();
+    await deleteTestMarket();
     console.log('Cleanup complete.');
   });
 

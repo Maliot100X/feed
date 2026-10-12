@@ -25,21 +25,10 @@ import type {
   State,
 } from '@elizaos/core';
 import { and, db, desc, eq, messages as messagesTable, users } from '@feed/db';
-
-function formatRelativeTime(date: Date): string {
-  const diffMs = Date.now() - date.getTime();
-  const mins = Math.floor(diffMs / 60_000);
-  const hours = Math.floor(diffMs / 3_600_000);
-  const days = Math.floor(diffMs / 86_400_000);
-  if (mins < 1) return 'just now';
-  if (mins < 60) return `${mins}m ago`;
-  if (hours < 24) return `${hours}h ago`;
-  return `${days}d ago`;
-}
-
-function formatTime(date: Date): string {
-  return `${date.getHours().toString().padStart(2, '0')}:${date.getMinutes().toString().padStart(2, '0')}`;
-}
+import {
+  formatClockTime,
+  formatRelativeTime,
+} from '../../../conversation-time';
 
 /** Max chars to include per agent message before truncating */
 const PREVIEW_LENGTH = 400;
@@ -101,7 +90,7 @@ export const coordinatorDispatchHistoryProvider: Provider = {
         const handle = msg.username
           ? `@${msg.username}`
           : (msg.displayName ?? 'Agent');
-        const time = formatTime(msg.createdAt);
+        const time = formatClockTime(msg.createdAt);
         const rel = formatRelativeTime(msg.createdAt);
         const preview =
           msg.content.length > PREVIEW_LENGTH

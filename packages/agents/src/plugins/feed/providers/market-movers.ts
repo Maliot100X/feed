@@ -1,4 +1,4 @@
-import { requireContextArray } from './context-contracts';
+import { organizationMentionsContextSchema } from './context-contracts';
 /**
  * Market Movers Provider
  * Provides top gainers and losers in the market via A2A protocol
@@ -38,59 +38,33 @@ export const marketMoversProvider: Provider = {
     }
 
     try {
-      // Get organizations via A2A
+      // Get organizations via A2A (validated against the canonical contract)
       const orgsResult = await feedRuntime.a2aClient.getOrganizations(100);
-      const organizations = requireContextArray(
-        (
-          orgsResult as {
-            organizations?: Array<{
-              id: string;
-              name: string;
-              ticker?: string;
-              currentPrice: number;
-              initialPrice?: number;
-              priceChangePercentage?: number;
-            }>;
-          }
-        )?.organizations,
-        'organizations'
-      );
+      const { organizations } =
+        organizationMentionsContextSchema.parse(orgsResult);
 
       if (organizations.length === 0) {
         return { text: 'No market data available.' };
       }
 
-      // Calculate price changes (use priceChangePercentage if available, otherwise calculate)
-      const withChanges = organizations
-        .filter(
-          (org) =>
-            org.currentPrice &&
-            (org.initialPrice || org.priceChangePercentage !== undefined)
-        )
-        .map((org) => {
-          const current = org.currentPrice;
-          const change =
-            org.priceChangePercentage !== undefined
-              ? org.priceChangePercentage
-              : org.initialPrice && org.initialPrice > 0
-                ? ((current - org.initialPrice) / org.initialPrice) * 100
-                : 0;
-
-          const ticker =
-            org.ticker ||
-            org.name
-              .toUpperCase()
-              .replace(/[^A-Z]/g, '')
-              .substring(0, 5);
-
-          return {
-            id: org.id,
-            name: org.name,
-            ticker,
-            price: current,
-            change,
-          };
-        });
+      // Only tradable markets (canonical ticker) with a quoted price and a
+      // reported change percentage are ranked. Tickers are never invented and
+      // lifetime initialPrice deltas are not mixed with the reported window.
+      const withChanges = organizations.flatMap((org) =>
+        org.ticker &&
+        org.currentPrice !== null &&
+        org.priceChangePercentage !== null
+          ? [
+              {
+                id: org.id,
+                name: org.name,
+                ticker: org.ticker,
+                price: org.currentPrice,
+                change: org.priceChangePercentage,
+              },
+            ]
+          : []
+      );
 
       // Get top 5 gainers (positive change)
       const gainers = withChanges

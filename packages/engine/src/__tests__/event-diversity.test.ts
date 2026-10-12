@@ -54,24 +54,19 @@ describe('selectRelevantActors', () => {
     expect(maxAppearances).toBeLessThan(30);
   });
 
-  test('actors on cooldown get lower selection probability', () => {
-    // Select once to put some actors on cooldown
-    const first = selectRelevantActors(2);
-    expect(first.length).toBe(2);
+  test('selected actors are placed on cooldown at selection time', () => {
+    const before = Date.now();
+    const selected = selectRelevantActors(2);
+    const after = Date.now();
 
-    // Select again — cooldown actors should rarely reappear
-    const repeats = new Set<string>();
-    for (let i = 0; i < 20; i++) {
-      const result = selectRelevantActors(1);
-      if (first.includes(result[0]!)) {
-        repeats.add(result[0]!);
-      }
+    expect(selected.length).toBe(2);
+    expect(actorEventCooldown.size).toBe(2);
+    for (const id of selected) {
+      const ts = actorEventCooldown.get(id);
+      expect(ts).toBeDefined();
+      expect(ts!).toBeGreaterThanOrEqual(before);
+      expect(ts!).toBeLessThanOrEqual(after);
     }
-
-    // The cooldown actors CAN still be selected (weight 0.1, not 0),
-    // but should be rare across 20 trials
-    // This is a statistical test — allow some tolerance
-    expect(repeats.size).toBeLessThanOrEqual(2);
   });
 
   test('cooldown entries are cleaned up after expiry', () => {

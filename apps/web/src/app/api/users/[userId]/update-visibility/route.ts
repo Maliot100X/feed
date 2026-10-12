@@ -77,6 +77,8 @@
 import {
   AuthorizationError,
   authenticate,
+  cachedDb,
+  NotFoundError,
   requireUserByIdentifier,
   successResponse,
   withErrorHandling,
@@ -134,9 +136,23 @@ export const POST = withErrorHandling(
       .where(eq(users.id, canonicalUserId))
       .returning({
         id: users.id,
+        privyId: users.privyId,
+        username: users.username,
         showTwitterPublic: users.showTwitterPublic,
         showWalletPublic: users.showWalletPublic,
       });
+
+    if (!updatedUser) {
+      throw new NotFoundError('User');
+    }
+
+    // Public profile reads serve cached full user rows; drop them so the new
+    // visibility takes effect immediately.
+    await cachedDb.invalidateUserIdentifierCaches({
+      id: updatedUser.id,
+      privyId: updatedUser.privyId,
+      username: updatedUser.username,
+    });
 
     logger.info(
       `User ${canonicalUserId} updated ${platform} visibility to ${visible}`,
@@ -147,8 +163,8 @@ export const POST = withErrorHandling(
     return successResponse({
       success: true,
       visibility: {
-        twitter: updatedUser?.showTwitterPublic ?? false,
-        wallet: updatedUser?.showWalletPublic ?? false,
+        twitter: updatedUser.showTwitterPublic,
+        wallet: updatedUser.showWalletPublic,
       },
     });
   }

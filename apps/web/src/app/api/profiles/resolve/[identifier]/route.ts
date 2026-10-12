@@ -34,8 +34,15 @@ export const GET = withErrorHandling(
     _request: NextRequest,
     context: { params: Promise<{ identifier: string }> }
   ) => {
-    const { identifier: rawIdentifier } = await context.params;
-    const identifier = decodeURIComponent(rawIdentifier);
+    // Route params are already decoded by Next.js; decoding again would
+    // throw on a literal '%' or reinterpret double-encoded identifiers.
+    const { identifier } = await context.params;
+    if (identifier.length === 0 || identifier.length > 256) {
+      return NextResponse.json(
+        { error: 'Invalid identifier' },
+        { status: 400 }
+      );
+    }
 
     // Check if it's a user
     const user = (await findUserByIdentifierWithSelect(identifier, {

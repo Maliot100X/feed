@@ -5,7 +5,7 @@
  * - checkAlerts: main entry, cooldown enforcement, delivery routing
  * - getCurrentPrice: markPrice vs currentPrice fallback
  * - formatAlertMessage: message formatting, percentage calculation
- * - updateAlertTimestamp: timestamp persistence
+ * - setAlertTriggerIfUnchanged: compare-and-swap trigger claim
  *
  * Strategy: mock DB, executeDirectMessage, and teamChatService;
  * exercise real PriceAlertService code paths.
@@ -22,14 +22,19 @@ let mockDbSelectFrom: ReturnType<typeof mock>;
 let mockDbSelect: ReturnType<typeof mock>;
 let mockDbUpdateSet: ReturnType<typeof mock>;
 let mockDbUpdateWhere: ReturnType<typeof mock>;
+let mockDbUpdateReturning: ReturnType<typeof mock>;
 let mockDbUpdate: ReturnType<typeof mock>;
 
 function resetDbMocks() {
   mockDbSelectLimit = mock(async () => []);
   mockDbSelectWhere = mock(() => ({ limit: mockDbSelectLimit }));
-  mockDbSelectFrom = mock(() => ({ where: mockDbSelectWhere }));
+  mockDbSelectFrom = mock(() => ({
+    where: mockDbSelectWhere,
+    innerJoin: () => ({ where: mockDbSelectWhere }),
+  }));
   mockDbSelect = mock(() => ({ from: mockDbSelectFrom }));
-  mockDbUpdateWhere = mock(async () => []);
+  mockDbUpdateReturning = mock(async () => [{ id: 'cfg-1' }]);
+  mockDbUpdateWhere = mock(() => ({ returning: mockDbUpdateReturning }));
   mockDbUpdateSet = mock(() => ({ where: mockDbUpdateWhere }));
   mockDbUpdate = mock(() => ({ set: mockDbUpdateSet }));
 }
@@ -137,7 +142,12 @@ type ServicePrivate = {
   formatAlertMessage: (alert: Record<string, unknown>, price: number) => string;
   getCurrentPrice: (symbol: string) => Promise<number | null>;
   getOwnerTeamChatId: (agentId: string) => Promise<string | undefined>;
-  updateAlertTimestamp: (agentId: string, alertId: string) => Promise<void>;
+  setAlertTriggerIfUnchanged: (
+    agentId: string,
+    alertId: string,
+    expected: string | null,
+    next: string | null
+  ) => Promise<boolean>;
 };
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
@@ -327,6 +337,8 @@ describe('PriceAlertService', () => {
       mockDbSelectLimit.mockResolvedValueOnce([
         { markPrice: 0.5, currentPrice: 0.5 },
       ]);
+      // Membership check: agent is an active member of the group
+      mockDbSelectLimit.mockResolvedValueOnce([{ chatId: 'group-chat-999' }]);
       // No owner lookup needed — goes directly to group chat
 
       const result = await service.checkAlerts('agent-001');
@@ -334,6 +346,26 @@ describe('PriceAlertService', () => {
       expect(mockExecuteDirectMessage).toHaveBeenCalledWith(
         expect.objectContaining({ chatId: 'group-chat-999' })
       );
+    });
+
+    test('skips group delivery when the agent is not an active group member', async () => {
+      const alert = makeAlert({
+        deliveryChannel: 'group',
+        deliveryChatId: 'someone-elses-chat',
+        condition: 'below',
+        threshold: 1.0,
+      });
+
+      mockDbSelectLimit.mockResolvedValueOnce([{ priceAlerts: [alert] }]);
+      mockDbSelectLimit.mockResolvedValueOnce([
+        { markPrice: 0.5, currentPrice: 0.5 },
+      ]);
+      // Membership check: no row
+      mockDbSelectLimit.mockResolvedValueOnce([]);
+
+      const result = await service.checkAlerts('agent-001');
+      expect(result).toBe(0);
+      expect(mockExecuteDirectMessage).not.toHaveBeenCalled();
     });
 
     test('falls back to team_chat when deliveryChannel=group but no deliveryChatId', async () => {
@@ -640,39 +672,45 @@ describe('PriceAlertService', () => {
     });
   });
 
-  // ═══ updateAlertTimestamp ══════════════════════════════════════════════
-  // The implementation uses an atomic SQL JSONB update (no SELECT needed).
+  // ═══ setAlertTriggerIfUnchanged ═════════════════════════════════════════
+  // Single conditional UPDATE (compare-and-swap on lastTriggeredAt).
 
-  describe('updateAlertTimestamp', () => {
-    test('issues atomic UPDATE with SQL expression', async () => {
-      await (service as unknown as ServicePrivate).updateAlertTimestamp(
-        'agent-001',
-        'a1'
-      );
+  describe('setAlertTriggerIfUnchanged', () => {
+    test('issues one conditional UPDATE and reports success', async () => {
+      const claimed = await (
+        service as unknown as ServicePrivate
+      ).setAlertTriggerIfUnchanged('agent-001', 'a1', null, 'now');
 
-      // Should call db.update().set().where() — single atomic operation, no SELECT
+      expect(claimed).toBe(true);
       expect(mockDbUpdateSet).toHaveBeenCalledTimes(1);
       expect(mockDbSelect).not.toHaveBeenCalled();
-
       const setArg = mockDbUpdateSet.mock.calls[0]![0] as Record<
         string,
         unknown
       >;
-      // priceAlerts is now a SQL template expression (not a plain array)
       expect(setArg.priceAlerts).toBeDefined();
       expect(setArg.updatedAt).toBeInstanceOf(Date);
     });
 
-    test('does not throw when no matching config exists', async () => {
-      // Atomic UPDATE on non-existent row simply affects 0 rows — no error
-      await expect(
-        (service as unknown as ServicePrivate).updateAlertTimestamp(
-          'nonexistent',
-          'a1'
-        )
-      ).resolves.toBeUndefined();
-
-      expect(mockDbUpdateSet).toHaveBeenCalledTimes(1);
+    test('reports a lost race when no row matched', async () => {
+      mockDbUpdateReturning.mockResolvedValueOnce([]);
+      const claimed = await (
+        service as unknown as ServicePrivate
+      ).setAlertTriggerIfUnchanged('agent-001', 'a1', null, 'now');
+      expect(claimed).toBe(false);
     });
+  });
+
+  test('checkAlerts does not send when another tick already claimed the alert', async () => {
+    mockDbSelectLimit.mockResolvedValueOnce([{ priceAlerts: [makeAlert()] }]);
+    mockDbSelectLimit.mockResolvedValueOnce([
+      { currentPrice: 0.5, markPrice: 0.5 },
+    ]);
+    mockDbSelectLimit.mockResolvedValueOnce([{ managedBy: 'owner-001' }]);
+    mockDbUpdateReturning.mockResolvedValueOnce([]);
+
+    const sent = await service.checkAlerts('agent-001');
+    expect(sent).toBe(0);
+    expect(mockExecuteDirectMessage).not.toHaveBeenCalled();
   });
 });

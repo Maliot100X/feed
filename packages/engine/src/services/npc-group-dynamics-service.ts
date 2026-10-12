@@ -58,7 +58,7 @@ import { autoJoinEmptyUsersToNpcGroupChats } from './npc-group-chat-onboarding-s
 import { NPCGroupDynamicsCalculations } from './npc-group-dynamics-calculations';
 import { sharedChatContextService } from './shared-chat-context-service';
 import { StaticDataRegistry } from './static-data-registry';
-import { getTierMessageGuidance } from './tier-config';
+import { assertTierLevel, getTierMessageGuidance } from './tier-config';
 import { TieredGroupService } from './tiered-group-service';
 
 // Singleton for NPC context
@@ -569,7 +569,7 @@ export class NPCGroupDynamicsService {
 
     for (const group of groupList) {
       // Tier is already available from the JOIN
-      const tier = group.tier as 1 | 2 | 3 | null;
+      const tier = group.tier === null ? null : assertTierLevel(group.tier);
 
       // Tier-based message frequency: T1=25%, T2=15%, T3=5%, legacy=25%
       const messageChance =

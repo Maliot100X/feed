@@ -161,29 +161,17 @@ const params = getPromptParams(newsPosts);
 
 ## Reality Grounding System
 
-**NEW**: Prevents LLM from generating outdated predictions based on old training data.
-
-### The Problem
-LLMs trained on 2023 data might generate:
-- ❌ "Will Bitcoin hit $35K?" (It's already at $95K in Nov 2025)
-- ❌ "Will iPhone 15 launch?" (iPhone 17 is current)
-- ❌ "President Biden announces..." (Trump is president in 2025)
-
-### The Solution
-Reality grounding provides current facts to every prompt:
+LLMs fall back on stale training-data facts unless the prompt states the
+current world. `generateWorldContext()` (see `world-context.ts`) builds the
+`realityGrounding` text that is substituted into prompts; its facts come from
+the runtime grounding source, not from this README, so check that module for
+what is currently included.
 
 ```typescript
 const worldContext = await generateWorldContext({
-  realityGroundingLevel: 'concise' // Default for most prompts
+  realityGroundingLevel: 'concise', // Default for most prompts
 });
-
-// worldContext.realityGrounding contains:
-// - Current date (November 16, 2025)
-// - Crypto prices (BTC: $95K, ETH: $3.2K, SOL: $140)
-// - Stock prices (NVDA: $190, META: $610, TSLA: $400-440)
-// - Political context (Trump president since Jan 2025)
-// - AI state (SMH-5.1, ClAIude 4.5, GeminAI 2.5)
-// - Pop culture (iPhone 17, Taylor Swift dominance)
+// worldContext.realityGrounding -> current-date and world-state summary
 ```
 
 ### Reality Grounding Levels
@@ -216,12 +204,11 @@ All prompts must follow these rules:
 3. **World Context** - Include `{{worldActors}}`, `{{currentMarkets}}`, etc. when available
 4. **Reality Grounding** - Include `{{realityGrounding}}` in all content generation prompts
 5. **XML Output** - Most prompts require XML-formatted responses
-6. **Post-processing** - All outputs are post-processed to replace any real names that slip through
+6. **Validate outputs** - Run `validateGeneratedContent()` on generated text; post-processing is not automatic for every call site
 
 ## Benefits
 
 - ✅ **Centralized** - All prompts in one place
-- ✅ **Type-safe** - TypeScript ensures correctness
 - ✅ **Versionable** - Track prompt changes over time
 - ✅ **Testable** - Easy to A/B test prompts
 - ✅ **Maintainable** - Separate concerns from code
@@ -232,6 +219,6 @@ All prompts must follow these rules:
 
 1. **Always use `getPromptParams()`** - Don't hardcode temperature/maxTokens
 2. **Include world context** - Spread `worldContext` into all renderPrompt calls
-3. **Post-process outputs** - Use `characterMappingService.transformText()` on all LLM outputs
+3. **Post-process outputs** - Use `characterMappingService.transformText()` where real names must be replaced
 4. **Update version** - Increment version when making significant changes
 5. **Document variables** - Comment what each variable does in the template

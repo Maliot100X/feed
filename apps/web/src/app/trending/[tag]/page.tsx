@@ -3,25 +3,12 @@
 export const dynamic = 'force-dynamic';
 
 import { logger } from '@feed/shared';
-import { ArrowLeft, TrendingUp } from 'lucide-react';
-import nextDynamic from 'next/dynamic';
-import { useParams, useRouter } from 'next/navigation';
-import { useCallback, useEffect, useState } from 'react';
+import { useParams } from 'next/navigation';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { PostCard } from '@/components/posts/PostCard';
-import { PageContainer } from '@/components/shared/PageContainer';
 import { Skeleton } from '@/components/shared/Skeleton';
 import { apiUrl } from '@/utils/api-url';
-
-const WidgetSidebar = nextDynamic(
-  () =>
-    import('@/components/shared/WidgetSidebar').then((m) => ({
-      default: m.WidgetSidebar,
-    })),
-  {
-    ssr: false,
-    loading: () => <div className="hidden w-96 flex-none xl:block" />,
-  }
-);
+import { TrendingFeedShell } from '../_components/TrendingFeedShell';
 
 interface PostData {
   id: string;
@@ -38,113 +25,171 @@ interface PostData {
   isShared?: boolean;
 }
 
+interface TagInfo {
+  name: string;
+  displayName: string;
+  category?: string | null;
+}
+
+interface TrendingTagResponse {
+  tag?: TagInfo;
+  posts?: PostData[];
+}
+
 const PAGE_SIZE = 20;
 
+type InitialState = 'loading' | 'ready' | 'not-found' | 'error';
+
 export default function TrendingTagPage() {
-  const params = useParams();
-  const router = useRouter();
-  const tag = params.tag as string;
+  const params = useParams<{ tag: string }>();
+  // Route params arrive URL-encoded; decode exactly once.
+  const tag = decodeURIComponent(params.tag);
+
   const [posts, setPosts] = useState<PostData[]>([]);
-  const [loading, setLoading] = useState(true);
-  const [tagInfo, setTagInfo] = useState<{
-    name: string;
-    displayName: string;
-    category?: string | null;
-  } | null>(null);
-  const [offset, setOffset] = useState(0);
-  const [hasMore, setHasMore] = useState(true);
+  const [tagInfo, setTagInfo] = useState<TagInfo | null>(null);
+  const [initialState, setInitialState] = useState<InitialState>('loading');
+  const [hasMore, setHasMore] = useState(false);
   const [loadingMore, setLoadingMore] = useState(false);
+  const [loadMoreFailed, setLoadMoreFailed] = useState(false);
+  const [reloadKey, setReloadKey] = useState(0);
 
-  const fetchPosts = useCallback(
-    async (requestOffset: number, append = false) => {
-      if (append) setLoadingMore(true);
-      else setLoading(true);
+  // Identifies the current tag/load generation; responses from an older
+  // generation (previous tag, superseded reload) are ignored.
+  const generationRef = useRef(0);
+  const offsetRef = useRef(0);
 
+  const fetchPage = useCallback(
+    async (requestOffset: number, signal?: AbortSignal) => {
+      const query = new URLSearchParams({
+        limit: String(PAGE_SIZE),
+        offset: String(requestOffset),
+      });
       const response = await fetch(
-        apiUrl(
-          `/api/trending/${encodeURIComponent(tag)}?limit=${PAGE_SIZE}&offset=${requestOffset}`
-        )
+        apiUrl(`/api/trending/${encodeURIComponent(tag)}?${query.toString()}`),
+        { signal }
       );
-
+      if (response.status === 404) {
+        logger.warn('Tag not found', { tag }, 'TrendingTagPage');
+        return { notFound: true as const };
+      }
       if (!response.ok) {
-        if (response.status === 404) {
-          logger.warn('Tag not found', { tag }, 'TrendingTagPage');
-        }
-        if (append) setHasMore(false);
-        if (append) setLoadingMore(false);
-        else setLoading(false);
-        return;
+        throw new Error(`HTTP ${response.status}`);
       }
-
-      const data = await response.json();
-
-      if (data.success) {
-        if (!append && data.tag) {
-          setTagInfo(data.tag);
-        }
-
-        const newPosts = data.posts || [];
-
-        setPosts((prev) => {
-          const combined = append ? [...prev, ...newPosts] : newPosts;
-          const unique = new Map<string, PostData>();
-          combined.forEach((post: PostData) => {
-            if (post?.id) {
-              unique.set(post.id, post);
-            }
-          });
-
-          const deduped = Array.from(unique.values()).sort((a, b) => {
-            const aTime = new Date(a.timestamp ?? 0).getTime();
-            const bTime = new Date(b.timestamp ?? 0).getTime();
-            return bTime - aTime;
-          });
-
-          return deduped;
-        });
-
-        setOffset(requestOffset + newPosts.length);
-
-        const moreAvailable = newPosts.length === PAGE_SIZE;
-        setHasMore(moreAvailable);
-      }
-
-      if (append) setLoadingMore(false);
-      else setLoading(false);
+      const data = (await response.json()) as TrendingTagResponse;
+      return { notFound: false as const, data };
     },
     [tag]
   );
 
+  // biome-ignore lint/correctness/useExhaustiveDependencies: reloadKey intentionally re-triggers the fetch
   useEffect(() => {
-    setOffset(0);
-    setHasMore(true);
-    fetchPosts(0, false);
-  }, [fetchPosts]);
+    const generation = ++generationRef.current;
+    const controller = new AbortController();
+
+    // Clear previous tag's data so it never shows under the new tag.
+    setPosts([]);
+    setTagInfo(null);
+    setHasMore(false);
+    setLoadMoreFailed(false);
+    setLoadingMore(false);
+    setInitialState('loading');
+    offsetRef.current = 0;
+
+    fetchPage(0, controller.signal)
+      .then((result) => {
+        if (generation !== generationRef.current) return;
+        if (result.notFound) {
+          setInitialState('not-found');
+          return;
+        }
+        const newPosts = result.data.posts ?? [];
+        setTagInfo(result.data.tag ?? null);
+        setPosts(newPosts);
+        offsetRef.current = newPosts.length;
+        setHasMore(newPosts.length === PAGE_SIZE);
+        setInitialState('ready');
+      })
+      .catch(() => {
+        if (generation !== generationRef.current) return;
+        setInitialState('error');
+      });
+
+    return () => controller.abort();
+  }, [fetchPage, reloadKey]);
 
   const handleLoadMore = () => {
-    if (!loading && !loadingMore && hasMore) {
-      fetchPosts(offset, true);
-    }
+    if (initialState !== 'ready' || loadingMore || !hasMore) return;
+    const generation = generationRef.current;
+    const requestOffset = offsetRef.current;
+    setLoadingMore(true);
+    setLoadMoreFailed(false);
+
+    fetchPage(requestOffset)
+      .then((result) => {
+        if (generation !== generationRef.current) return;
+        if (result.notFound) {
+          setHasMore(false);
+          return;
+        }
+        const newPosts = result.data.posts ?? [];
+        // Keep server order; drop any posts already shown.
+        setPosts((prev) => {
+          const seen = new Set(prev.map((p) => p.id));
+          return [...prev, ...newPosts.filter((p) => p?.id && !seen.has(p.id))];
+        });
+        offsetRef.current = requestOffset + newPosts.length;
+        setHasMore(newPosts.length === PAGE_SIZE);
+      })
+      .catch(() => {
+        if (generation !== generationRef.current) return;
+        // Keep hasMore so the user can retry.
+        setLoadMoreFailed(true);
+      })
+      .finally(() => {
+        if (generation !== generationRef.current) return;
+        setLoadingMore(false);
+      });
   };
 
-  const headerTitle = tagInfo?.displayName || decodeURIComponent(tag);
-  const headerCategory = tagInfo?.category || null;
+  const headerTitle = tagInfo?.displayName || tag;
+  const headerCategory = tagInfo?.category
+    ? `${tagInfo.category} · Trending`
+    : null;
 
-  const feedContent = (
-    <>
-      {loading ? (
+  return (
+    <TrendingFeedShell title={headerTitle} subtitle={headerCategory}>
+      {initialState === 'loading' ? (
         <div className="space-y-4 sm:px-4 sm:py-6">
           <Skeleton className="h-24 w-full" />
           <Skeleton className="h-24 w-full" />
           <Skeleton className="h-24 w-full" />
+        </div>
+      ) : initialState === 'error' ? (
+        <div className="flex flex-col items-center justify-center gap-3 py-12 text-center">
+          <h2 className="font-semibold text-xl">Couldn&apos;t load posts</h2>
+          <button
+            type="button"
+            onClick={() => setReloadKey((key) => key + 1)}
+            className="rounded-lg bg-primary px-6 py-2 text-primary-foreground transition-opacity hover:opacity-90"
+          >
+            Try again
+          </button>
+        </div>
+      ) : initialState === 'not-found' ? (
+        <div className="flex items-center justify-center py-12">
+          <div className="text-center">
+            <h2 className="mb-2 font-semibold text-xl">Topic not found</h2>
+            <p className="text-muted-foreground">
+              There is no trending topic &quot;{tag}&quot;.
+            </p>
+          </div>
         </div>
       ) : posts.length === 0 ? (
         <div className="flex items-center justify-center py-12">
           <div className="text-center">
             <h2 className="mb-2 font-semibold text-xl">No posts found</h2>
             <p className="text-muted-foreground">
-              No posts have been tagged with &quot;
-              {tagInfo?.displayName || tag}&quot; yet.
+              No posts have been tagged with &quot;{headerTitle}&quot; yet.
             </p>
           </div>
         </div>
@@ -154,104 +199,36 @@ export default function TrendingTagPage() {
             <PostCard key={post.id} post={post} showCommentInputBar={false} />
           ))}
 
-          {hasMore && (
+          {hasMore ? (
             <div className="py-4 text-center">
               {loadingMore ? (
                 <div className="text-muted-foreground text-sm">
                   Loading more posts...
                 </div>
               ) : (
-                <button
-                  onClick={handleLoadMore}
-                  className="rounded-lg bg-primary px-6 py-2 text-primary-foreground transition-opacity hover:opacity-90"
-                >
-                  Load More
-                </button>
+                <div className="flex flex-col items-center gap-2">
+                  {loadMoreFailed && (
+                    <p className="text-destructive text-sm" role="alert">
+                      Couldn&apos;t load more posts.
+                    </p>
+                  )}
+                  <button
+                    type="button"
+                    onClick={handleLoadMore}
+                    className="rounded-lg bg-primary px-6 py-2 text-primary-foreground transition-opacity hover:opacity-90"
+                  >
+                    {loadMoreFailed ? 'Try again' : 'Load More'}
+                  </button>
+                </div>
               )}
             </div>
-          )}
-
-          {!hasMore && posts.length > 0 && (
+          ) : (
             <div className="py-4 text-center text-muted-foreground text-xs">
               You&apos;re all caught up.
             </div>
           )}
         </div>
       )}
-
-      {/* Spacer for login bar */}
-      <div className="pb-24" />
-    </>
-  );
-
-  return (
-    <PageContainer noPadding className="flex w-full flex-col">
-      <div className="relative flex min-h-dvh flex-1 md:min-h-screen">
-        {/* Desktop: Content area */}
-        <div className="hidden min-w-0 flex-1 flex-col border-border lg:flex lg:border-r lg:border-l">
-          {/* Desktop header */}
-          <div className="sticky top-0 z-10 shrink-0 bg-background shadow-sm">
-            <div className="px-6 py-4">
-              <div className="flex items-center gap-4">
-                <button
-                  onClick={() => router.back()}
-                  className="rounded-full p-2 text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
-                  aria-label="Go back"
-                >
-                  <ArrowLeft size={20} />
-                </button>
-                <div className="flex items-center gap-2">
-                  <TrendingUp className="h-5 w-5 text-primary" />
-                  <h1 className="font-bold text-xl">{headerTitle}</h1>
-                </div>
-                {headerCategory && (
-                  <p className="ml-auto text-muted-foreground text-sm">
-                    {headerCategory} · Trending
-                  </p>
-                )}
-              </div>
-            </div>
-          </div>
-
-          {/* Feed content */}
-          <div className="flex-1 bg-background">
-            <div className="w-full lg:mx-auto lg:max-w-[700px]">
-              {feedContent}
-            </div>
-          </div>
-        </div>
-
-        {/* Widget sidebar - desktop only */}
-        <WidgetSidebar />
-
-        {/* Mobile/Tablet: Single column layout */}
-        <div className="flex flex-1 flex-col overflow-hidden lg:hidden">
-          {/* Mobile header */}
-          <div className="sticky top-0 z-10 shrink-0 border-border border-b bg-background">
-            <div className="flex items-center gap-4 px-4 py-3">
-              <button
-                onClick={() => router.back()}
-                className="rounded-full p-2 text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
-                aria-label="Go back"
-              >
-                <ArrowLeft size={20} />
-              </button>
-              <div className="flex items-center gap-2">
-                <TrendingUp className="h-5 w-5 text-primary" />
-                <h1 className="font-bold text-xl">{headerTitle}</h1>
-              </div>
-              {headerCategory && (
-                <p className="ml-auto text-muted-foreground text-sm">
-                  {headerCategory} · Trending
-                </p>
-              )}
-            </div>
-          </div>
-
-          {/* Mobile content */}
-          <div className="flex-1 overflow-y-auto">{feedContent}</div>
-        </div>
-      </div>
-    </PageContainer>
+    </TrendingFeedShell>
   );
 }

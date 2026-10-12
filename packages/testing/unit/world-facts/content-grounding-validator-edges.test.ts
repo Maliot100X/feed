@@ -17,31 +17,31 @@ import {
 // ─── validateGrounding: Edge Cases ──────────────────────────────────────────
 
 describe('validateGrounding — edge cases', () => {
-  test('empty source text passes (guard: no keywords to compare)', async () => {
-    const source = '';
-    const generated = 'Bitcoin price is going up';
-
-    const result = await validateGrounding(source, generated);
-    // Empty source → extractKeywords returns empty set → passes with overlap=1
-    expect(result.grounded).toBe(true);
+  test('empty source text is not grounded (insufficient evidence)', async () => {
+    const result = await validateGrounding('', 'Bitcoin price is going up');
+    expect(result.grounded).toBe(false);
+    expect(result.confidence).toBe(0);
+    expect(result.reasons[0]).toContain('source text is empty');
   });
 
-  test('empty generated text passes (guard: no keywords)', async () => {
-    const source = 'Bitcoin price surges past 100k';
-    const generated = '';
-
-    const result = await validateGrounding(source, generated);
-    expect(result.grounded).toBe(true);
+  test('empty generated text is not grounded (insufficient evidence)', async () => {
+    const result = await validateGrounding(
+      'Bitcoin price surges past 100k',
+      ''
+    );
+    expect(result.grounded).toBe(false);
+    expect(result.confidence).toBe(0);
+    expect(result.reasons[0]).toContain('generated text is empty');
   });
 
-  test('both empty passes gracefully', async () => {
+  test('both empty is not grounded', async () => {
     const result = await validateGrounding('', '');
-    expect(result.grounded).toBe(true);
+    expect(result.grounded).toBe(false);
   });
 
   test('whitespace-only text treated as empty', async () => {
     const result = await validateGrounding('   \n\t  ', '   \n  ');
-    expect(result.grounded).toBe(true);
+    expect(result.grounded).toBe(false);
   });
 
   test('stop-words-only text treated as empty (no content keywords)', async () => {
@@ -51,7 +51,7 @@ describe('validateGrounding — edge cases', () => {
       'the and but or not so yet both either neither each every';
 
     const result = await validateGrounding(source, generated);
-    // All words are stop words → empty keyword sets → passes with overlap=1
+    // All words are stop words → keyword check not applicable (non-blocking)
     expect(result.grounded).toBe(true);
   });
 

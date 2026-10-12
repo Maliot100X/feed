@@ -161,8 +161,13 @@ import { z } from 'zod';
 
 const CreateGroupSchema = z
   .object({
-    name: z.string().min(1).max(100),
-    memberIds: z.array(z.string()).optional().default([]),
+    name: z.string().trim().min(1).max(100),
+    memberIds: z
+      .array(z.string().trim().min(1).max(100))
+      .max(100)
+      .optional()
+      .default([])
+      .transform((ids) => [...new Set(ids)]),
     // Note: 'type' is intentionally NOT accepted from client.
     // User-created groups always get type: 'user'.
     // NPC groups (type: 'npc') are created by backend services.

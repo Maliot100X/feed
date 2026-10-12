@@ -112,9 +112,10 @@
  */
 
 import { requireAdmin, successResponse, withErrorHandling } from '@feed/api';
-import { and, db, desc, eq, reports, sql } from '@feed/db';
+import { and, asc, db, desc, eq, reports, sql } from '@feed/db';
 import { GetReportsSchema, logger } from '@feed/shared';
 import type { NextRequest } from 'next/server';
+import { parseStoredEvaluation } from './_evaluation';
 
 export const GET = withErrorHandling(async (request: NextRequest) => {
   // Require admin authentication
@@ -159,20 +160,22 @@ export const GET = withErrorHandling(async (request: NextRequest) => {
   const whereClause =
     whereConditions.length > 0 ? and(...whereConditions) : undefined;
 
-  // Build orderBy SQL
-  let orderByClause;
-  if (params.sortBy === 'created') {
-    orderByClause =
-      params.sortOrder === 'desc' ? desc(reports.createdAt) : reports.createdAt;
-  } else if (params.sortBy === 'updated') {
-    orderByClause =
-      params.sortOrder === 'desc' ? desc(reports.updatedAt) : reports.updatedAt;
-  } else if (params.sortBy === 'priority') {
-    orderByClause =
-      params.sortOrder === 'desc' ? desc(reports.priority) : reports.priority;
-  } else {
-    orderByClause = desc(reports.createdAt);
-  }
+  // Build orderBy SQL. Priority is ranked by severity (not lexically) and
+  // every ordering ends with id so offset pagination is stable.
+  const priorityRank = sql`CASE ${reports.priority}
+    WHEN 'critical' THEN 4
+    WHEN 'high' THEN 3
+    WHEN 'normal' THEN 2
+    WHEN 'low' THEN 1
+    ELSE 0 END`;
+  const direction = params.sortOrder === 'asc' ? asc : desc;
+  const sortColumn =
+    params.sortBy === 'updated'
+      ? reports.updatedAt
+      : params.sortBy === 'priority'
+        ? priorityRank
+        : reports.createdAt;
+  const orderByClauses = [direction(sortColumn), direction(reports.id)];
 
   // Use aliases for the multiple user joins
   const reporterAlias = sql`"reporter"`;
@@ -233,7 +236,7 @@ export const GET = withErrorHandling(async (request: NextRequest) => {
       sql`${reports.resolvedBy} = ${resolverAlias}."id"`
     )
     .where(whereClause)
-    .orderBy(orderByClause)
+    .orderBy(...orderByClauses)
     .limit(params.limit)
     .offset(params.offset);
 
@@ -246,18 +249,7 @@ export const GET = withErrorHandling(async (request: NextRequest) => {
 
   // Parse evaluation from resolution field and format response
   const reportsWithEvaluation = reportsQuery.map((report) => {
-    let evaluation = null;
-    if (report.resolution) {
-      // Check if it's valid JSON before parsing
-      const trimmed = report.resolution.trim();
-      if (trimmed.startsWith('{') || trimmed.startsWith('[')) {
-        const parsed = JSON.parse(report.resolution);
-        // Check if it's an evaluation object (has outcome, confidence, etc.)
-        if (parsed.outcome && typeof parsed.confidence === 'number') {
-          evaluation = parsed;
-        }
-      }
-    }
+    const evaluation = parseStoredEvaluation(report.resolution);
     return {
       id: report.id,
       reporterId: report.reporterId,

@@ -43,7 +43,7 @@ describe('Bonding Curve Pricing', () => {
       expect(price).toBeCloseTo(25, 1);
     });
 
-    it('should handle reserve depth = holdings (doubles price at n=2)', () => {
+    it('should handle reserve depth = holdings (quadruples price at n=2)', () => {
       // price = 100 * (1 + 100000/100000)^2 = 100 * 2^2 = 100 * 4 = 400
       const price = calculateBondingCurvePrice(basePrice, 100000, {
         EXPONENT: 2,
@@ -124,15 +124,22 @@ describe('Bonding Curve Pricing', () => {
       expect(price).toBeGreaterThanOrEqual(initialPrice * 0.05);
     });
 
-    it('should apply price ceiling limit (1000% of initial)', () => {
-      // Even with massive buys, price cannot exceed 10x initial
-      const price = calculatePriceFromHoldings(
-        initialPrice,
-        currentPrice,
-        10_000_000, // Massive buy pressure
-        PERP_MARKET_CONFIG
+    it('should apply the configured price ceiling (PRICE_CEILING_RATIO x initial)', () => {
+      // Walk the price up with massive buys; it must stop exactly at the
+      // configured ceiling, never above it.
+      let price = currentPrice;
+      for (let i = 0; i < 20; i++) {
+        price = calculatePriceFromHoldings(
+          initialPrice,
+          price,
+          10_000_000, // Massive buy pressure
+          PERP_MARKET_CONFIG
+        );
+      }
+      expect(price).toBeCloseTo(
+        initialPrice * PERP_MARKET_CONFIG.PRICE_CEILING_RATIO,
+        6
       );
-      expect(price).toBeLessThanOrEqual(initialPrice * 10);
     });
 
     it('should apply max change per trade limit (30%)', () => {
@@ -213,7 +220,7 @@ describe('Bonding Curve Pricing', () => {
       expect(price).toBeGreaterThanOrEqual(5); // 5% of 100 = absolute floor
     });
 
-    it('should allow 10x pump (to $1000)', () => {
+    it('should pump but stay within the configured ceiling', () => {
       let price = initialPrice;
       const massiveBuyPressure = 1_000_000;
 
@@ -224,9 +231,10 @@ describe('Bonding Curve Pricing', () => {
         PERP_MARKET_CONFIG
       );
 
-      // Should pump but not beyond 10x
       expect(price).toBeGreaterThan(initialPrice);
-      expect(price).toBeLessThanOrEqual(1000); // 10x of 100
+      expect(price).toBeLessThanOrEqual(
+        initialPrice * PERP_MARKET_CONFIG.PRICE_CEILING_RATIO
+      );
     });
 
     it('should create noticeable price impact from $10k trade', () => {

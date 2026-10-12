@@ -18,25 +18,27 @@ import type { NextRequest } from 'next/server';
 import { z } from 'zod';
 
 /**
- * Zod schema for validating Linear-synced feedback metadata.
- * Uses .catch() to provide safe defaults for missing/malformed fields.
+ * Linear sync fields stored in feedback metadata. Parsed strictly: a present
+ * but malformed linearIssueId is treated as corrupt (not as "never synced"),
+ * so a retry cannot create a duplicate issue.
  */
 const LinearSyncedMetadataSchema = z.object({
-  linearIssueId: z.string().optional().catch(undefined),
-  linearIssueIdentifier: z.string().optional().catch(undefined),
-  linearIssueUrl: z.string().optional().catch(undefined),
+  linearIssueId: z.string().min(1).optional(),
+  linearIssueIdentifier: z.string().optional(),
+  linearIssueUrl: z.string().optional(),
 });
 
 type LinearSyncedMetadata = z.infer<typeof LinearSyncedMetadataSchema>;
 
-/**
- * Safely parse feedback metadata from DB, returning validated Linear sync fields.
- * Returns a safe default object if parsing fails.
- */
-function parseLinearSyncedMetadata(rawMetadata: unknown): LinearSyncedMetadata {
-  const normalizedMetadata =
-    rawMetadata && typeof rawMetadata === 'object' ? rawMetadata : {};
-  return LinearSyncedMetadataSchema.parse(normalizedMetadata);
+function parseLinearSyncedMetadata(
+  rawMetadata: unknown
+): LinearSyncedMetadata | null {
+  if (rawMetadata === null || rawMetadata === undefined) return {};
+  if (typeof rawMetadata !== 'object' || Array.isArray(rawMetadata)) {
+    return null;
+  }
+  const parsed = LinearSyncedMetadataSchema.safeParse(rawMetadata);
+  return parsed.success ? parsed.data : null;
 }
 
 interface RouteContext {
@@ -71,6 +73,7 @@ export const POST = withErrorHandling(
         id: true,
         fromUserId: true,
         metadata: true,
+        interactionType: true,
       },
     });
 
@@ -78,8 +81,25 @@ export const POST = withErrorHandling(
       return errorResponse('Feedback not found', 'FEEDBACK_NOT_FOUND', 404);
     }
 
+    // Only general game feedback is synced to Linear (same population as the
+    // admin feedback list).
+    if (feedback.interactionType !== 'general_game_feedback') {
+      return errorResponse(
+        'Only general game feedback can be synced to Linear',
+        'NOT_GAME_FEEDBACK',
+        400
+      );
+    }
+
     // Check if already synced - validate metadata at runtime
     const metadata = parseLinearSyncedMetadata(feedback.metadata);
+    if (!metadata) {
+      return errorResponse(
+        'Feedback metadata is malformed; refusing to sync to avoid duplicate Linear issues',
+        'INVALID_METADATA',
+        409
+      );
+    }
     if (metadata.linearIssueId) {
       return successResponse({
         success: true,
@@ -131,6 +151,15 @@ export const POST = withErrorHandling(
       updatedFeedback?.metadata
     );
 
+    if (!updatedFeedback || !updatedMetadata?.linearIssueId) {
+      logger.warn('Manual Linear sync produced no issue', { feedbackId });
+      return errorResponse(
+        'Sync finished without a Linear issue being recorded',
+        'SYNC_INCOMPLETE',
+        502
+      );
+    }
+
     logger.info('Manual Linear sync completed', {
       feedbackId,
       linearIssueId: updatedMetadata.linearIssueId,
@@ -139,13 +168,11 @@ export const POST = withErrorHandling(
     return successResponse({
       success: true,
       alreadySynced: false,
-      linearIssue: updatedMetadata.linearIssueId
-        ? {
-            id: updatedMetadata.linearIssueId,
-            identifier: updatedMetadata.linearIssueIdentifier,
-            url: updatedMetadata.linearIssueUrl,
-          }
-        : null,
+      linearIssue: {
+        id: updatedMetadata.linearIssueId,
+        identifier: updatedMetadata.linearIssueIdentifier,
+        url: updatedMetadata.linearIssueUrl,
+      },
       message: 'Successfully synced to Linear',
     });
   }

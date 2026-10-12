@@ -78,6 +78,9 @@ import { db, eq, userAgentConfigs } from '@feed/db';
 import { logger } from '@feed/shared';
 import type { NextRequest } from 'next/server';
 import { NextResponse } from 'next/server';
+import { z } from 'zod';
+
+const ToggleSchema = z.object({ enabled: z.boolean() });
 
 export const POST = withErrorHandling(
   async (
@@ -86,20 +89,19 @@ export const POST = withErrorHandling(
   ) => {
     const admin = await requireAdmin(req);
     const { agentId } = await context.params;
-    const body = await req.json();
-    const { enabled } = body;
 
-    // Audit log the admin action
-    logAdminModify({
-      adminId: admin.userId,
-      ipAddress: getClientIp(req.headers) ?? undefined,
-      resourceType: 'agent',
-      resourceId: agentId,
-      metadata: { action: 'toggle_autonomous_mode', enabled },
-    });
+    const parsed = ToggleSchema.safeParse(await req.json());
+    if (!parsed.success) {
+      return NextResponse.json(
+        { error: 'enabled must be a boolean' },
+        { status: 400 }
+      );
+    }
+    const { enabled } = parsed.data;
+    const status = enabled ? 'running' : 'paused';
 
     // Toggle all autonomous features in agent config
-    await db
+    const updated = await db
       .update(userAgentConfigs)
       .set({
         autonomousTrading: enabled,
@@ -107,10 +109,26 @@ export const POST = withErrorHandling(
         autonomousCommenting: enabled,
         autonomousDMs: enabled,
         autonomousGroupChats: enabled,
-        status: enabled ? 'running' : 'paused',
+        status,
         updatedAt: new Date(),
       })
-      .where(eq(userAgentConfigs.userId, agentId));
+      .where(eq(userAgentConfigs.userId, agentId))
+      .returning({ userId: userAgentConfigs.userId });
+
+    if (updated.length === 0) {
+      return NextResponse.json(
+        { error: 'Agent config not found' },
+        { status: 404 }
+      );
+    }
+
+    await logAdminModify({
+      adminId: admin.userId,
+      ipAddress: getClientIp(req.headers) ?? undefined,
+      resourceType: 'agent',
+      resourceId: agentId,
+      metadata: { action: 'toggle_autonomous_mode', enabled },
+    });
 
     logger.info(
       `Agent ${agentId} autonomous mode ${enabled ? 'enabled' : 'disabled'}`,
@@ -121,6 +139,7 @@ export const POST = withErrorHandling(
     return NextResponse.json({
       success: true,
       message: `Agent ${enabled ? 'enabled' : 'paused'} successfully`,
+      data: { agentId, enabled, status },
     });
   }
 );

@@ -12,11 +12,6 @@ export {
 } from './npc-investment-manager';
 
 export {
-  NPCPortfolioStrategy,
-  type StrategyConfig,
-} from './npc-portfolio-strategy';
-
-export {
   buildFallbackMetricsByPool,
   type FallbackPerpRow,
   type FallbackPositionRow,

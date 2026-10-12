@@ -134,7 +134,17 @@ export const POST = withErrorHandling(async (request: NextRequest) => {
 
   const body = parsed;
 
-  const agent = await requireUserByIdentifier(body.agentId);
+  const agent = await requireUserByIdentifier(body.agentId, {
+    id: true,
+    isAgent: true,
+  });
+
+  if (!agent.isAgent) {
+    return NextResponse.json(
+      { success: false, error: 'AGENT_REQUIRED' },
+      { status: 400 }
+    );
+  }
 
   if (body.type === 'game') {
     const feedback = await generateGameCompletionFeedback(

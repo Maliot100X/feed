@@ -11,7 +11,7 @@
  */
 
 import { db, type NpcMemory } from '@feed/db';
-import { generateSnowflakeId } from '@feed/shared';
+import { generateSnowflakeId, logger } from '@feed/shared';
 import { SeededRandom } from '../utils/entropy';
 import { isDegenSpeaker } from '../utils/shared-utils';
 import { parseMemoriesSafe } from './jsonb-validators';
@@ -28,8 +28,6 @@ export interface RunningBitOptions {
   /** Max memories to keep (mirrors npc-memory-service cap) */
   maxMemories?: number;
 }
-
-type RunningBitEntry = { actorId: string; bit: string };
 
 function clampPositiveInt(value: number, fallback: number): number {
   if (!Number.isFinite(value)) return fallback;
@@ -160,6 +158,78 @@ Use this as an occasional callback or framing device. Do NOT force it into every
 ====================================`;
 }
 
+const MAX_RUNNING_BIT_WRITE_ATTEMPTS = 3;
+
+function findRunningBit(
+  recentMemories: unknown,
+  actorId: string,
+  periodKey: string
+): string | undefined {
+  const memories = parseMemoriesSafe(recentMemories, { actorId });
+  const existing = memories.find(
+    (m) => m.type === 'running_bit' && m.eventId === periodKey
+  );
+  const summary = existing?.summary.trim();
+  return summary ? summary : undefined;
+}
+
+/**
+ * Append a running bit with an optimistic lock on updatedAt. On contention the
+ * fresh row is re-read and the append retried, so concurrently written
+ * memories are never overwritten; if another writer already stored a bit for
+ * this period, that bit wins.
+ */
+async function persistRunningBit(
+  initial: { id: string; recentMemories: unknown; updatedAt: Date },
+  bit: string,
+  periodKey: string,
+  now: Date,
+  maxMemories: number
+): Promise<string> {
+  let state = initial;
+  for (let attempt = 0; attempt < MAX_RUNNING_BIT_WRITE_ATTEMPTS; attempt++) {
+    const existingMemories = parseMemoriesSafe(state.recentMemories, {
+      actorId: state.id,
+    });
+    const newMemory: NpcMemory = {
+      id: await generateSnowflakeId(),
+      type: 'running_bit',
+      timestamp: now.toISOString(),
+      summary: bit,
+      eventId: periodKey,
+      sentiment: 0,
+    };
+    const updateRes = await db.actorState.updateMany({
+      where: { id: state.id, updatedAt: state.updatedAt },
+      data: {
+        recentMemories: [...existingMemories, newMemory].slice(-maxMemories),
+        updatedAt: now,
+      },
+    });
+    if (updateRes.count > 0) return bit;
+
+    const fresh = await db.actorState.findFirst({
+      where: { id: state.id },
+      select: { id: true, recentMemories: true, updatedAt: true },
+    });
+    if (!fresh) return bit;
+    const concurrent = findRunningBit(
+      fresh.recentMemories,
+      fresh.id,
+      periodKey
+    );
+    if (concurrent) return concurrent;
+    state = fresh;
+  }
+
+  logger.warn(
+    'Running bit not persisted after optimistic-lock retries',
+    { actorId: state.id, periodKey },
+    'NpcRunningBit'
+  );
+  return bit;
+}
+
 /**
  * Ensure each actor has a persisted running bit memory for the current period key,
  * returning a map of actorId -> bit string (no headers).
@@ -169,102 +239,45 @@ export async function ensureRunningBits(
   options: RunningBitOptions
 ): Promise<Record<string, string>> {
   const maxMemories = clampPositiveInt(options.maxMemories ?? 50, 50);
-  if (actorIds.length === 0) return {};
+  const uniqueActorIds = [...new Set(actorIds)];
+  if (uniqueActorIds.length === 0) return {};
 
   const now = options.now;
   const periodKey = buildRunningBitKey(now, options.currentDay);
 
-  // Fetch actor states in one shot; missing rows are tolerated.
-  let states = await db.actorState.findMany({
-    where: { id: { in: actorIds } },
+  // Fetch actor states in one shot. Actors without an ActorState row are
+  // skipped: provisioning (balances, reputation) belongs to bootstrap, not to
+  // a content feature, so no financial state is minted here.
+  const states = await db.actorState.findMany({
+    where: { id: { in: uniqueActorIds } },
     select: { id: true, recentMemories: true, updatedAt: true },
   });
 
-  // Ensure ActorState rows exist so we can persist running bits.
-  // This keeps the feature robust even if bootstrap hasn't created state yet.
-  const foundIds = new Set(states.map((s) => s.id));
-  const missingIds = actorIds.filter((id) => !foundIds.has(id));
-  if (missingIds.length > 0) {
-    await Promise.allSettled(
-      missingIds.map((id) =>
-        db.actorState.create({
-          data: {
-            id,
-            tradingBalance: '10000',
-            reputationPoints: 10000,
-            hasPool: false,
-            postsToday: 0,
-            currentMood: '0',
-            recentMemories: [],
-            relationships: {},
-            createdAt: now,
-            updatedAt: now,
-          },
-        })
-      )
+  if (states.length < uniqueActorIds.length) {
+    const foundIds = new Set(states.map((s) => s.id));
+    logger.warn(
+      'Skipping running bits for actors without ActorState',
+      { missing: uniqueActorIds.filter((id) => !foundIds.has(id)) },
+      'NpcRunningBit'
     );
-
-    // Re-fetch (still bounded by actorIds) so the rest of the logic can persist bits.
-    states = await db.actorState.findMany({
-      where: { id: { in: actorIds } },
-      select: { id: true, recentMemories: true, updatedAt: true },
-    });
   }
 
   const result: Record<string, string> = {};
-  const toInsert: RunningBitEntry[] = [];
-  const stateById = new Map(states.map((s) => [s.id, s]));
 
   for (const state of states) {
-    const memories = parseMemoriesSafe(state.recentMemories, {
-      actorId: state.id,
-    });
-    const existing = memories.find(
-      (m) => m.type === 'running_bit' && m.eventId === periodKey
-    );
-
-    if (existing && existing.summary.trim().length > 0) {
-      result[state.id] = existing.summary.trim();
+    const existing = findRunningBit(state.recentMemories, state.id, periodKey);
+    if (existing) {
+      result[state.id] = existing;
       continue;
     }
 
-    const bit = generateRunningBit(state.id, periodKey);
-    result[state.id] = bit;
-    toInsert.push({ actorId: state.id, bit });
-  }
-
-  // Persist missing running bits (best-effort; don't fail the tick on write contention).
-  for (const entry of toInsert) {
-    const state = stateById.get(entry.actorId);
-    if (!state) continue;
-
-    const existingMemories = parseMemoriesSafe(state.recentMemories, {
-      actorId: entry.actorId,
-    });
-    const newMemory: NpcMemory = {
-      id: await generateSnowflakeId(),
-      type: 'running_bit',
-      timestamp: now.toISOString(),
-      summary: entry.bit,
-      eventId: periodKey,
-      sentiment: 0,
-    };
-
-    const updatedMemories = [...existingMemories, newMemory].slice(
-      -maxMemories
+    result[state.id] = await persistRunningBit(
+      state,
+      generateRunningBit(state.id, periodKey),
+      periodKey,
+      now,
+      maxMemories
     );
-    const updateRes = await db.actorState.updateMany({
-      where: { id: entry.actorId, updatedAt: state.updatedAt },
-      data: { recentMemories: updatedMemories, updatedAt: now },
-    });
-
-    if (updateRes.count === 0) {
-      // Fallback: update without optimistic lock (avoid spinning; this is not mission-critical)
-      await db.actorState.updateMany({
-        where: { id: entry.actorId },
-        data: { recentMemories: updatedMemories, updatedAt: now },
-      });
-    }
   }
 
   return result;

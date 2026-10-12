@@ -57,7 +57,6 @@ export function PerpsOrderEntryPanel({
   const { openPosition } = usePerpTrade({ getAccessToken });
 
   const [side, setSide] = useState<'long' | 'short'>(initialSide ?? 'long');
-  const [orderType, setOrderType] = useState<'market' | 'limit'>('market');
   const [size, setSize] = useState('100');
   const [leverage, setLeverage] = useState(10);
   const [submitting, setSubmitting] = useState(false);
@@ -70,8 +69,12 @@ export function PerpsOrderEntryPanel({
 
   const activePositions = useMemo(() => {
     if (!market) return [];
+    // Orders execute for the authenticated user, so only the user's own
+    // positions (not their agents') determine add/reduce/close/flip.
     return perpPositions.filter(
-      (p) => p.ticker.toLowerCase() === market.ticker.toLowerCase()
+      (p) =>
+        !p.isAgentPosition &&
+        p.ticker.toLowerCase() === market.ticker.toLowerCase()
     );
   }, [perpPositions, market]);
 
@@ -120,7 +123,6 @@ export function PerpsOrderEntryPanel({
     side,
     size: sizeNum,
     leverage: clampedLeverage,
-    enabled: orderType === 'market',
     getAccessToken,
   });
 
@@ -234,52 +236,58 @@ export function PerpsOrderEntryPanel({
     setSubmitting(true);
     setConfirmDialogOpen(false);
 
-    await openPosition({
+    const committed = await openPosition({
       ticker: market.ticker,
       side,
       size: sizeNum,
       leverage: clampedLeverage,
-    })
-      .then(async () => {
-        if (rebalanceInfo) {
-          const messages = {
-            add: {
-              title: 'Position increased!',
-              description: `Added ${formatPrice(sizeNum)} to your ${side.toUpperCase()} position`,
-            },
-            reduce: {
-              title: 'Position reduced!',
-              description: `Reduced your position by ${formatPrice(sizeNum)}`,
-            },
-            close: {
-              title: 'Position closed!',
-              description: `Closed your ${existingPosition?.side?.toUpperCase()} position`,
-            },
-            flip: {
-              title: 'Position flipped!',
-              description: `Flipped to ${clampedLeverage}x ${side.toUpperCase()} on ${market.ticker}`,
-            },
-          } as const;
-          const msg = messages[rebalanceInfo.type];
-          toast.success(msg.title, { description: msg.description });
-        } else {
-          toast.success('Position opened!', {
-            description: `Opened ${clampedLeverage}x ${side.toUpperCase()} on ${market.ticker}`,
-          });
-        }
-
-        invalidatePerpMarketsCache();
-        invalidateUserPositions();
-        invalidateWalletBalance();
-
-        await Promise.all([refreshUserPositions(), refreshWalletBalance()]);
-      })
-      .catch((error: Error) => {
+    }).then(
+      () => true,
+      (error: Error) => {
         toast.error(error.message);
-      })
-      .finally(() => {
-        setSubmitting(false);
+        return false;
+      }
+    );
+
+    if (!committed) {
+      setSubmitting(false);
+      return;
+    }
+
+    if (rebalanceInfo) {
+      const messages = {
+        add: {
+          title: 'Position increased!',
+          description: `Added ${formatPrice(sizeNum)} to your ${side.toUpperCase()} position`,
+        },
+        reduce: {
+          title: 'Position reduced!',
+          description: `Reduced your position by ${formatPrice(sizeNum)}`,
+        },
+        close: {
+          title: 'Position closed!',
+          description: `Closed your ${existingPosition?.side?.toUpperCase()} position`,
+        },
+        flip: {
+          title: 'Position flipped!',
+          description: `Flipped to ${clampedLeverage}x ${side.toUpperCase()} on ${market.ticker}`,
+        },
+      } as const;
+      const msg = messages[rebalanceInfo.type];
+      toast.success(msg.title, { description: msg.description });
+    } else {
+      toast.success('Position opened!', {
+        description: `Opened ${clampedLeverage}x ${side.toUpperCase()} on ${market.ticker}`,
       });
+    }
+
+    // The trade is committed; a failed post-trade refresh must not be shown
+    // as a trade failure. Stores are invalidated and will refetch.
+    invalidatePerpMarketsCache();
+    invalidateUserPositions();
+    invalidateWalletBalance();
+    await Promise.allSettled([refreshUserPositions(), refreshWalletBalance()]);
+    setSubmitting(false);
   }, [
     market,
     sizeNum,
@@ -401,35 +409,6 @@ export function PerpsOrderEntryPanel({
           >
             SHORT
           </button>
-        </div>
-
-        <div className="mt-4 flex gap-4 text-xs">
-          <label className="flex cursor-pointer items-center gap-2 text-muted-foreground hover:text-foreground">
-            <input
-              type="radio"
-              checked={orderType === 'market'}
-              onChange={() => setOrderType('market')}
-              className="accent-primary"
-            />
-            Market
-          </label>
-          <label
-            className="flex cursor-not-allowed items-center gap-2 text-muted-foreground/60"
-            aria-disabled="true"
-            title="Coming soon"
-          >
-            <input
-              type="radio"
-              checked={orderType === 'limit'}
-              onChange={() => setOrderType('limit')}
-              className="accent-primary"
-              disabled
-            />
-            Limit
-            <span className="ml-1 rounded bg-muted px-1.5 py-0.5 text-[10px] text-muted-foreground">
-              soon
-            </span>
-          </label>
         </div>
 
         <div className="mt-4 space-y-4">

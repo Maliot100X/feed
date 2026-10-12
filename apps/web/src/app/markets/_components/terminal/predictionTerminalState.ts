@@ -31,33 +31,55 @@ export function buildPredictionTerminalState(
     return null;
   }
 
+  const baseState: PredictionMarketTerminalState = base;
+
   if (!live || live.marketId !== base.id.toString()) {
-    return base as PredictionMarketTerminalState;
+    return baseState;
   }
 
-  return {
-    ...base,
+  // A settled snapshot (resolved/cancelled) is terminal: a non-resolution
+  // live update (e.g. a late trade event) must not reopen it.
+  if (base.status !== 'active' && !live.resolved) {
+    return baseState;
+  }
+
+  const merged: PredictionMarketTerminalState = {
+    ...baseState,
     yesShares: live.yesShares,
     noShares: live.noShares,
-    liquidity: live.liquidity,
+    liquidity: live.liquidity ?? baseState.liquidity,
     yesProbability: live.yesProbability,
     noProbability: live.noProbability,
-    resolved: live.resolved ?? base.status === 'resolved',
-    resolution: live.resolution ?? base.resolvedOutcome,
   };
+
+  if (live.resolved) {
+    merged.status = 'resolved';
+    merged.resolved = true;
+    merged.resolution = live.resolution ?? null;
+    if (typeof live.resolution === 'boolean') {
+      merged.resolvedOutcome = live.resolution;
+    }
+  }
+
+  return merged;
 }
 
 export function buildPredictionLiveStateFromTrade(
   event: PredictionTradeSSE,
   previous?: PredictionMarketLiveState | null
 ): PredictionMarketLiveState {
+  const sameMarket = previous?.marketId === event.marketId;
+  // Resolution is terminal: a delayed trade event for an already-resolved
+  // market must not drop the resolution.
+  if (sameMarket && previous?.resolved) {
+    return previous;
+  }
   return {
     marketId: event.marketId,
     yesShares: event.yesShares,
     noShares: event.noShares,
     liquidity:
-      event.liquidity ??
-      (previous?.marketId === event.marketId ? previous.liquidity : undefined),
+      event.liquidity ?? (sameMarket ? previous?.liquidity : undefined),
     yesProbability: event.yesPrice,
     noProbability: event.noPrice,
   };

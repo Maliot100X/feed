@@ -23,8 +23,19 @@ import {
   type PredictionUserPositionSnapshot,
 } from './_position-snapshot';
 
+/**
+ * Cached per-user positions are stored raw (independent of the requested
+ * page) and projected against the current page's markets on every response,
+ * so a cache primed by page 1 cannot hide positions on page 2 and valuations
+ * always use the current market snapshot.
+ */
+type CachedPredictionPosition = Pick<
+  PredictionPositionRecord,
+  'id' | 'userId' | 'marketId' | 'side' | 'shares' | 'avgPrice'
+>;
+
 function buildUserPositionsRecord(
-  positions: PredictionPositionRecord[],
+  positions: CachedPredictionPosition[],
   marketMap: Map<string, PredictionMarketRecord>
 ): Record<string, PredictionUserPositionSnapshot[]> {
   const userPositionsMap: Record<string, PredictionUserPositionSnapshot[]> = {};
@@ -146,17 +157,25 @@ export const GET = withErrorHandling(async (request: NextRequest) => {
   const userPositionsMap = new Map<string, PredictionUserPositionSnapshot[]>();
   if (userId && authUser?.userId === userId) {
     try {
-      const positionsRecord = await getCacheOrFetch(
+      const positions = await getCacheOrFetch(
         userId,
-        async () => {
-          const positions = await service.listUserPositions(userId);
-          return buildUserPositionsRecord(positions, marketMap);
+        async (): Promise<CachedPredictionPosition[]> => {
+          const rows = await service.listUserPositions(userId);
+          return rows.map((p) => ({
+            id: p.id,
+            userId: p.userId,
+            marketId: p.marketId,
+            side: p.side,
+            shares: p.shares,
+            avgPrice: p.avgPrice,
+          }));
         },
         {
           namespace: CACHE_KEYS.MARKETS_API_PREDICTIONS_POSITIONS,
           ttl: DEFAULT_TTLS.MARKETS_API_PREDICTIONS_POSITIONS,
         }
       );
+      const positionsRecord = buildUserPositionsRecord(positions, marketMap);
       for (const [k, v] of Object.entries(positionsRecord)) {
         userPositionsMap.set(k, v);
       }

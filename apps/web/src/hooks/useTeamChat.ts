@@ -115,7 +115,7 @@ interface ThinkingAgent {
 }
 
 /** Agent info in team chat */
-interface TeamChatAgent {
+export interface TeamChatAgent {
   id: string;
   username: string | null;
   displayName: string | null;
@@ -574,7 +574,7 @@ export function useTeamChat(): UseTeamChatReturn {
           'Content-Type': 'application/json',
           Authorization: `Bearer ${token}`,
         },
-        body: JSON.stringify({ isTyping }),
+        body: JSON.stringify({ isTyping, chatId: teamChat.chatId }),
       }).catch((err) => {
         // Log for debugging but don't block user experience
         logger.debug('Typing indicator failed', { error: err }, 'useTeamChat');
@@ -840,6 +840,7 @@ export function useTeamChat(): UseTeamChatReturn {
         },
         body: JSON.stringify({
           content,
+          chatId: teamChat.chatId,
           targetIds: targetAgentIds,
           ...(replyToMessage ? { replyToMessageId: replyToMessage.id } : {}),
         }),
@@ -883,10 +884,6 @@ export function useTeamChat(): UseTeamChatReturn {
         }
         return next;
       });
-
-      // Get user info for team chat context
-      const ownerName = getUserDisplayName(user, 'User');
-      const ownerUsername = user.username || '';
 
       // Create thinking message IDs for each agent (for tracking)
       const thinkingIds = new Map<string, string>();
@@ -934,8 +931,6 @@ export function useTeamChat(): UseTeamChatReturn {
               message: content,
               usePro,
               teamChatId: teamChat.chatId,
-              teamChatOwnerName: ownerName,
-              teamChatOwnerUsername: ownerUsername,
             }),
             signal: controller.signal,
           });

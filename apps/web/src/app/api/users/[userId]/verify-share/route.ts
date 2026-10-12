@@ -86,26 +86,18 @@ import {
 } from '@feed/shared';
 import type { NextRequest } from 'next/server';
 import { z } from 'zod';
+import {
+  normalizeUsername,
+  parseTwitterPostUrl,
+  sharedUrlMatches,
+  URL_IN_TEXT_PATTERN,
+} from './share-url';
 
 const VerifyShareRequestSchema = z.object({
   shareId: SnowflakeIdSchema,
   platform: z.enum(['twitter']),
   postUrl: z.string().url().optional(), // URL to the actual post for verification
 });
-
-const SUPPORTED_TWITTER_HOSTS = new Set([
-  'twitter.com',
-  'www.twitter.com',
-  'mobile.twitter.com',
-  'x.com',
-  'www.x.com',
-  'mobile.x.com',
-]);
-
-interface ParsedTwitterPostUrl {
-  tweetId: string;
-  tweetUsername: string | null;
-}
 
 interface TwitterLookupResponse {
   data?: {
@@ -121,65 +113,6 @@ interface TwitterLookupResponse {
       username?: string;
     }>;
   };
-}
-
-function normalizeUsername(username: string): string {
-  return username.toLowerCase().replace(/^@/, '');
-}
-
-function parseTwitterPostUrl(postUrl: string): ParsedTwitterPostUrl | null {
-  let parsedUrl: URL;
-  try {
-    parsedUrl = new URL(postUrl);
-  } catch {
-    return null;
-  }
-
-  if (!SUPPORTED_TWITTER_HOSTS.has(parsedUrl.hostname.toLowerCase())) {
-    return null;
-  }
-
-  const segments = parsedUrl.pathname.split('/').filter(Boolean);
-
-  // Supports: /username/status/:tweetId (common copy-link format)
-  if (
-    segments.length >= 3 &&
-    segments[1] === 'status' &&
-    /^\d+$/.test(segments[2] || '')
-  ) {
-    return {
-      tweetId: segments[2] || '',
-      tweetUsername: segments[0] || null,
-    };
-  }
-
-  // Supports mobile/app links like /i/web/status/:tweetId and /i/status/:tweetId
-  if (
-    segments.length >= 4 &&
-    segments[0] === 'i' &&
-    segments[1] === 'web' &&
-    segments[2] === 'status' &&
-    /^\d+$/.test(segments[3] || '')
-  ) {
-    return {
-      tweetId: segments[3] || '',
-      tweetUsername: null,
-    };
-  }
-
-  if (
-    segments.length >= 3 &&
-    segments[0] === 'i' &&
-    segments[1] === 'status' &&
-    /^\d+$/.test(segments[2] || '')
-  ) {
-    return {
-      tweetId: segments[2] || '',
-      tweetUsername: null,
-    };
-  }
-
-  return null;
 }
 
 /**
@@ -270,6 +203,15 @@ export const POST = withErrorHandling(
         'MISSING_POST_URL'
       );
     }
+
+    // Without a recorded shared link, any post by the user would "verify".
+    if (!shareAction.url) {
+      throw new BusinessLogicError(
+        'This share has no link to verify against',
+        'SHARE_URL_MISSING'
+      );
+    }
+    const sharedUrl = shareAction.url;
 
     // Verify the post based on platform
     let verified = false;
@@ -437,15 +379,15 @@ export const POST = withErrorHandling(
                   );
                 } else {
                   // VALIDATION 3: Tweet author must match the linked account.
-                  const isAuthorMatchById =
-                    !!userTwitterId &&
-                    !!tweetAuthorId &&
-                    userTwitterId === tweetAuthorId;
-                  const isAuthorMatchByUsername =
-                    !!normalizedTweetAuthorUsername &&
-                    userTwitterUsername === normalizedTweetAuthorUsername;
+                  // The immutable provider ID is authoritative when linked;
+                  // the mutable handle is only used for legacy links without
+                  // a stored ID.
+                  const isAuthorMatch = userTwitterId
+                    ? !!tweetAuthorId && userTwitterId === tweetAuthorId
+                    : !!normalizedTweetAuthorUsername &&
+                      userTwitterUsername === normalizedTweetAuthorUsername;
 
-                  if (!isAuthorMatchById && !isAuthorMatchByUsername) {
+                  if (!isAuthorMatch) {
                     verificationError =
                       'This tweet was not posted by your linked X account. Please paste a tweet from your own account.';
                     logger.warn(
@@ -462,27 +404,23 @@ export const POST = withErrorHandling(
                   } else {
                     // VALIDATION 4: Verify tweet contains the shared URL.
                     // Twitter converts URLs to t.co links, so we also check expanded URLs.
-                    const tweetText = (tweetData.data.text || '').toLowerCase();
-                    const sharedUrl = shareAction.url?.toLowerCase() || '';
+                    const tweetText = tweetData.data.text || '';
 
                     const expandedUrls = (tweetData.data.entities?.urls || [])
-                      .map((urlEntity) => urlEntity.expanded_url?.toLowerCase())
+                      .map((urlEntity) => urlEntity.expanded_url)
                       .filter((url): url is string => Boolean(url));
 
-                    const containsUrlInText =
-                      !!sharedUrl && tweetText.includes(sharedUrl);
-                    const containsUrlInEntities =
-                      !!sharedUrl &&
-                      expandedUrls.some(
-                        (expandedUrl) =>
-                          expandedUrl.includes(sharedUrl) ||
-                          sharedUrl.includes(expandedUrl)
-                      );
+                    const containsUrlInText = (
+                      tweetText.match(URL_IN_TEXT_PATTERN) ?? []
+                    ).some((textUrl) => sharedUrlMatches(sharedUrl, textUrl));
+                    const containsUrlInEntities = expandedUrls.some(
+                      (expandedUrl) => sharedUrlMatches(sharedUrl, expandedUrl)
+                    );
 
                     const containsUrl =
                       containsUrlInText || containsUrlInEntities;
 
-                    if (!containsUrl && sharedUrl) {
+                    if (!containsUrl) {
                       verificationError = `This tweet does not contain the shared link (${sharedUrl}). Please paste the tweet where you actually shared the link.`;
                       logger.warn(
                         `Tweet does not contain shared URL: ${shareId}`,

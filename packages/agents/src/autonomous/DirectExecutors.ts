@@ -1696,16 +1696,26 @@ export async function executeDirectMessage(
     };
   }
 
-  // Verify chat exists (if provided directly)
+  // A provided chat must exist AND the agent must be an active participant;
+  // otherwise an agent could post into any chat by ID.
   if (providedChatId) {
-    const [chat] = await db
-      .select({ id: chats.id })
-      .from(chats)
-      .where(eq(chats.id, chatId))
+    const [membership] = await db
+      .select({ chatId: chatParticipants.chatId })
+      .from(chatParticipants)
+      .where(
+        and(
+          eq(chatParticipants.chatId, chatId),
+          eq(chatParticipants.userId, agentUserId),
+          eq(chatParticipants.isActive, true)
+        )
+      )
       .limit(1);
 
-    if (!chat) {
-      return { success: false, error: `Chat not found: ${chatId}` };
+    if (!membership) {
+      return {
+        success: false,
+        error: `Chat not found or agent is not a member: ${chatId}`,
+      };
     }
   }
 
@@ -2770,49 +2780,4 @@ export async function executeDirectSendMoney(
     );
     return { success: false, error: errorMsg };
   }
-}
-
-// =============================================================================
-// Stubs for features being built by another agent
-// These will be replaced with full implementations
-// =============================================================================
-
-/** Stub: Share information with another agent (not yet implemented) */
-export async function executeDirectShareInformation(params: {
-  agentUserId: string;
-  recipientId: string;
-  keywords: string[];
-  context?: string;
-  askingPrice?: number;
-}): Promise<{
-  success: boolean;
-  error?: string;
-  matchCount: number;
-  sharedWithRecipient: boolean;
-  messageId: string | null;
-}> {
-  void params;
-  return {
-    success: false,
-    error: 'Not yet implemented',
-    matchCount: 0,
-    sharedWithRecipient: false,
-    messageId: null,
-  };
-}
-
-/** Stub: Request payment from another agent (not yet implemented) */
-export async function executeDirectRequestPayment(params: {
-  agentUserId: string;
-  recipientId: string;
-  amount: number;
-  reason: string;
-  deadline: number;
-}): Promise<{
-  success: boolean;
-  error?: string;
-  requestId: string | null;
-}> {
-  void params;
-  return { success: false, error: 'Not yet implemented', requestId: null };
 }

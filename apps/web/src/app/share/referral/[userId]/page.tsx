@@ -3,10 +3,10 @@
  * Shareable referral page with OG meta tags
  */
 
-import { getOrCreateReferralCode } from '@feed/api';
 import { db } from '@feed/db';
 import type { Metadata } from 'next';
-import { redirect } from 'next/navigation';
+import { cache } from 'react';
+import { ShareRedirect } from '../../_components/ShareRedirect';
 
 // Use Node.js runtime for database access
 export const runtime = 'nodejs';
@@ -16,6 +16,18 @@ interface PageProps {
     userId: string;
   }>;
 }
+
+/** Request-scoped read shared by metadata and page (read-only; no writes on GET). */
+const getReferrer = cache((userId: string) =>
+  db.user.findUnique({
+    where: { id: userId },
+    select: {
+      username: true,
+      displayName: true,
+      referralCode: true,
+    },
+  })
+);
 
 export async function generateMetadata({
   params,
@@ -27,14 +39,7 @@ export async function generateMetadata({
   const appUrl = process.env.NEXT_PUBLIC_APP_URL || 'https://feed.fun';
   const ogImageUrl = `${appUrl}/api/og/referral/${encodeURIComponent(userId)}`;
 
-  // Get user data
-  const user = await db.user.findUnique({
-    where: { id: userId },
-    select: {
-      username: true,
-      displayName: true,
-    },
-  });
+  const user = await getReferrer(userId);
 
   if (!user) {
     // User not found - return default metadata
@@ -76,19 +81,11 @@ export default async function ShareReferralPage({ params }: PageProps) {
   // Decode URL-encoded userId (colons in Privy DIDs are encoded as %3A)
   const userId = decodeURIComponent(rawUserId);
 
-  // Check if user exists
-  const user = await db.user.findUnique({
-    where: { id: userId },
-    select: { id: true },
-  });
+  const user = await getReferrer(userId);
+  // /api/users/me resolves `ref` by username first, then referralCode.
+  const code = user?.username || user?.referralCode;
+  const href = code ? `/?ref=${encodeURIComponent(code)}` : '/';
 
-  if (!user) {
-    redirect('/');
-  }
-
-  // Get or create referral code for the user
-  const referralCode = await getOrCreateReferralCode(userId);
-
-  // Redirect to home with referral code
-  redirect(`/?ref=${referralCode}`);
+  // Crawlers read the metadata above; browsers continue to sign-up.
+  return <ShareRedirect href={href} label="Continue to Feed" />;
 }

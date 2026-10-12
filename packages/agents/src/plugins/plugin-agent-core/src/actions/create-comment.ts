@@ -14,6 +14,7 @@ import type {
   State,
 } from '@elizaos/core';
 import { and, comments, db, eq, isNull, posts } from '@feed/db';
+import { CreateCommentSchema } from '@feed/shared';
 import { logger } from '../../../../shared/logger';
 import { generateSnowflakeId } from '../../../../shared/snowflake';
 
@@ -77,17 +78,22 @@ export const createCommentAction: Action = {
     _callback?: HandlerCallback
   ): Promise<ActionResult> => {
     const agentUserId = runtime.agentId;
-    const actionParams = state?.data?.actionParams as
-      | {
-          postId?: string;
-          parentCommentId?: string;
-          content?: string;
-        }
-      | undefined;
-
-    const postId = actionParams?.postId;
-    const parentCommentId = actionParams?.parentCommentId;
-    const content = actionParams?.content;
+    // Validate untyped action params with the same contract as the comments API.
+    const parsed = CreateCommentSchema.safeParse(
+      state?.data?.actionParams ?? {}
+    );
+    if (!parsed.success) {
+      return {
+        success: false,
+        text: `Invalid comment parameters: ${parsed.error.issues
+          .map(
+            (issue) => `${issue.path.join('.') || 'params'}: ${issue.message}`
+          )
+          .join('; ')}`,
+        error: 'Invalid parameters',
+      };
+    }
+    const { postId, parentCommentId, content } = parsed.data;
 
     // Validate required parameters
     if (!postId) {
@@ -95,14 +101,6 @@ export const createCommentAction: Action = {
         success: false,
         text: 'Missing postId parameter. Use CHECK_POST_DETAIL first to get the post ID.',
         error: 'Missing postId',
-      };
-    }
-
-    if (!content || content.trim().length === 0) {
-      return {
-        success: false,
-        text: 'Missing or empty content parameter. Please provide the comment text.',
-        error: 'Missing content',
       };
     }
 
@@ -156,7 +154,7 @@ export const createCommentAction: Action = {
 
       await db.insert(comments).values({
         id: commentId,
-        content: content.trim(),
+        content: content,
         postId,
         authorId: agentUserId,
         parentCommentId: parentCommentId || null,
@@ -184,7 +182,7 @@ export const createCommentAction: Action = {
           commentId,
           postId,
           parentCommentId: parentCommentId || null,
-          content: content.trim(),
+          content: content,
           isReply,
         },
         values: {

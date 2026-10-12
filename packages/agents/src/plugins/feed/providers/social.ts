@@ -1,7 +1,4 @@
-import {
-  requireContextArray,
-  trendingContextSchema,
-} from './context-contracts';
+import { requireContextArray } from './context-contracts';
 /**
  * Social Feed Provider
  * Provides access to social feed and posts via A2A protocol
@@ -14,7 +11,6 @@ import type {
   ProviderResult,
   State,
 } from '@elizaos/core';
-import { logger } from '../../../shared/logger';
 import type { FeedRuntime } from '../types';
 // import type { A2AFeedResponse, A2ATrendingTagsResponse } from '../../../types/a2a-responses' // Commented out - not needed
 
@@ -69,53 +65,5 @@ export const feedProvider: Provider = {
       .join('\n\n')}`;
 
     return { text: feedText };
-  },
-};
-
-/**
- * Provider: Trending Topics
- * Gets trending tags and topics via A2A
- */
-export const trendingProvider: Provider = {
-  name: 'FEED_TRENDING',
-  description: 'Get trending topics and tags on Feed via A2A protocol',
-
-  get: async (
-    runtime: IAgentRuntime,
-    _message: Memory,
-    _state: State
-  ): Promise<ProviderResult> => {
-    const feedRuntime = runtime as FeedRuntime;
-
-    // A2A is required
-    if (!feedRuntime.a2aClient?.isConnected()) {
-      throw new Error(
-        'A2A context unavailable: an active connection is required'
-      );
-    }
-
-    try {
-      const trendingResult = await feedRuntime.a2aClient.getTrendingTags(20);
-      const { tags } = trendingContextSchema.parse(trendingResult);
-
-      if (tags.length === 0) {
-        return { text: 'No trending tags available.' };
-      }
-
-      const trendingText = `Trending Topics:\n${tags
-        .map(
-          (t, idx) => `${idx + 1}. #${t.displayName || t.name} (ID: ${t.id})`
-        )
-        .join('\n')}`;
-
-      return { text: trendingText };
-    } catch (error) {
-      logger.error(
-        'Error fetching trending tags via A2A',
-        { error, agentId: runtime.agentId },
-        'TrendingProvider'
-      );
-      throw error;
-    }
   },
 };

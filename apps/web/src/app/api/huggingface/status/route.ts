@@ -2,11 +2,12 @@
  * HuggingFace Integration Status API
  *
  * @route GET /api/huggingface/status - Get HuggingFace status
- * @access Public
+ * @access Admin
  *
  * @description
  * Returns status and statistics for the HuggingFace integration system.
- * Useful for monitoring, debugging, and dashboard displays.
+ * Operational diagnostics (dataset/model configuration, readiness issues), so
+ * it is restricted to admins.
  *
  * @openapi
  * /api/huggingface/status:
@@ -14,7 +15,9 @@
  *     tags:
  *       - Integrations
  *     summary: Get HuggingFace status
- *     description: Returns HuggingFace integration status and statistics
+ *     description: Returns HuggingFace integration status and statistics (admin only)
+ *     security:
+ *       - BearerAuth: []
  *     responses:
  *       200:
  *         description: Status retrieved successfully
@@ -35,12 +38,15 @@
  * ```
  */
 
-import { withErrorHandling } from '@feed/api';
+import { requireAdmin, withErrorHandling } from '@feed/api';
 import { logger } from '@feed/shared';
 import { huggingFaceIntegration } from '@feed/training';
+import type { NextRequest } from 'next/server';
 import { NextResponse } from 'next/server';
 
-export const GET = withErrorHandling(async function GET() {
+export const GET = withErrorHandling(async function GET(request: NextRequest) {
+  await requireAdmin(request);
+
   logger.info(
     'Fetching HuggingFace integration status',
     undefined,
@@ -72,6 +78,5 @@ export const GET = withErrorHandling(async function GET() {
         process.env.HF_TRAJECTORY_DATASET_NAME || 'feedlabs/agent-trajectories',
       modelNamePrefix: process.env.HF_MODEL_NAME || 'feedlabs/feed-agent',
     },
-    nextScheduledRun: 'Sundays at 2 AM UTC',
   });
 });

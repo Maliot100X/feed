@@ -14,8 +14,7 @@
  *
  *
  * ⚠️ LIMITATION: This generator creates narrative history but does NOT simulate
- * market mechanics (trading, prices, volume). For full market history,
- * use the GameLoop to run a proper simulation.
+ * market mechanics (trading, prices, volume).
  *
  * ✅ OPTIMIZED: Batched LLM calls (90% reduction)
  * - Before: ~300 event calls + ~150 group message calls = 450 calls

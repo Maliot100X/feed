@@ -77,9 +77,30 @@ import {
   users,
 } from '@feed/db';
 import { StaticDataRegistry } from '@feed/engine';
-import { ChatQuerySchema, logger } from '@feed/shared';
+import { logger } from '@feed/shared';
 import type { NextRequest } from 'next/server';
+import { z } from 'zod';
 import { CHAT_PAGE_SIZE } from '@/lib/constants';
+
+const ChatHistoryQuerySchema = z
+  .object({
+    /** Message ID — loads messages OLDER than this message. */
+    cursor: z.string().min(1).max(128).optional(),
+    /** ISO timestamp — loads messages NEWER than this time. */
+    after: z.iso
+      .datetime({ offset: true })
+      .transform((value) => new Date(value))
+      .optional(),
+    limit: z
+      .string()
+      .regex(/^\d+$/, 'limit must be a positive integer')
+      .transform(Number)
+      .pipe(z.number().int().min(1).max(100))
+      .default(CHAT_PAGE_SIZE),
+  })
+  .refine((q) => !(q.cursor && q.after), {
+    message: 'cursor and after are mutually exclusive',
+  });
 
 /**
  * GET /api/chats/[id]
@@ -94,38 +115,18 @@ export const GET = withErrorHandling(
 
     // Validate query parameters
     const { searchParams } = new URL(request.url);
-    const query: Record<string, string> = {};
+    const { cursor, after, limit } = ChatHistoryQuerySchema.parse({
+      cursor: searchParams.get('cursor') ?? undefined,
+      after: searchParams.get('after') ?? undefined,
+      limit: searchParams.get('limit') ?? undefined,
+    });
+    const effectiveLimit = limit;
 
-    const all = searchParams.get('all');
-    const debug = searchParams.get('debug');
-    const cursor = searchParams.get('cursor'); // Cursor for pagination (message ID — loads OLDER messages)
-    const after = searchParams.get('after'); // ISO timestamp — loads NEWER messages since this time
-    const limitParam = searchParams.get('limit');
+    // Authenticate before touching the chat so existence is not disclosed to
+    // anonymous callers.
+    const authUser = await authenticate(request);
+    const userId = authUser.userId;
 
-    if (all) query.all = all;
-    if (debug) query.debug = debug;
-
-    const validatedQuery = ChatQuerySchema.parse(query);
-
-    // Parse pagination parameters
-    const limit = limitParam ? Number.parseInt(limitParam, 10) : CHAT_PAGE_SIZE;
-    const effectiveLimit = Math.min(Math.max(limit, 1), 100); // Between 1 and 100
-
-    // Check for debug mode (localhost access to game chats)
-    const debugMode = validatedQuery.debug === 'true';
-
-    logger.info(
-      'GET /api/chats/[id]',
-      {
-        chatId,
-        cursor,
-        limit: effectiveLimit,
-        debugMode,
-      },
-      'GET /api/chats/[id]'
-    );
-
-    // Get chat first to check if it's a game chat
     const [chat] = await asSystem(async (db) => {
       return await db.select().from(chats).where(eq(chats.id, chatId)).limit(1);
     }, 'get-chat-by-id');
@@ -134,43 +135,28 @@ export const GET = withErrorHandling(
       throw new NotFoundError('Chat', chatId);
     }
 
-    // Allow debug access to game chats without auth
     const isGameChat = chat.isGroup && chat.gameId === 'continuous';
-    let userId: string | undefined;
-    let authUser: Awaited<ReturnType<typeof authenticate>> | null = null;
 
-    if (isGameChat && debugMode) {
-      // Debug mode: skip authentication for game chats
-      logger.info(
-        `Debug mode access to game chat: ${chatId}`,
-        undefined,
-        'GET /api/chats/[id]'
-      );
-    } else {
-      // Normal mode: require authentication and membership
-      authUser = await authenticate(request);
-      userId = authUser.userId;
-
-      const [isMember] = await asUser(authUser, async (db) => {
-        return await db
-          .select()
-          .from(chatParticipants)
-          .where(
-            and(
-              eq(chatParticipants.chatId, chatId),
-              eq(chatParticipants.userId, authUser!.userId)
-            )
+    const [isMember] = await asUser(authUser, async (db) => {
+      return await db
+        .select({ id: chatParticipants.id })
+        .from(chatParticipants)
+        .where(
+          and(
+            eq(chatParticipants.chatId, chatId),
+            eq(chatParticipants.userId, userId),
+            eq(chatParticipants.isActive, true)
           )
-          .limit(1);
-      });
+        )
+        .limit(1);
+    });
 
-      if (!isMember) {
-        throw new AuthorizationError(
-          'You do not have access to this chat',
-          'chat',
-          'read'
-        );
-      }
+    if (!isMember) {
+      throw new AuthorizationError(
+        'You do not have access to this chat',
+        'chat',
+        'read'
+      );
     }
 
     // Get chat with messages
@@ -190,53 +176,42 @@ export const GET = withErrorHandling(
       let messagesList;
       if (after) {
         // Incremental sync: only messages after the given timestamp
-        const afterDate = new Date(after);
-        if (Number.isNaN(afterDate.getTime())) {
-          throw new BusinessLogicError(
-            'Invalid after timestamp',
-            'INVALID_AFTER_TIMESTAMP'
-          );
-        } else {
-          messagesList = await db
-            .select()
-            .from(messages)
-            .where(
-              and(
-                eq(messages.chatId, chatId),
-                gt(messages.createdAt, afterDate)
-              )
-            )
-            .orderBy(asc(messages.createdAt))
-            .limit(effectiveLimit);
-        }
+        messagesList = await db
+          .select()
+          .from(messages)
+          .where(
+            and(eq(messages.chatId, chatId), gt(messages.createdAt, after))
+          )
+          .orderBy(asc(messages.createdAt))
+          .limit(effectiveLimit);
       } else if (cursor) {
-        // Load older messages: get cursor's timestamp, then fetch before it
+        // Load older messages: get cursor's timestamp, then fetch before it.
+        // The cursor must belong to this chat; an unknown cursor is an error
+        // rather than a silent reset to the latest page.
         const [cursorMessage] = await db
           .select({ createdAt: messages.createdAt })
           .from(messages)
-          .where(eq(messages.id, cursor))
+          .where(and(eq(messages.id, cursor), eq(messages.chatId, chatId)))
           .limit(1);
 
-        if (cursorMessage) {
-          messagesList = await db
-            .select()
-            .from(messages)
-            .where(
-              and(
-                eq(messages.chatId, chatId),
-                lt(messages.createdAt, cursorMessage.createdAt)
-              )
-            )
-            .orderBy(desc(messages.createdAt))
-            .limit(effectiveLimit + 1);
-        } else {
-          messagesList = await db
-            .select()
-            .from(messages)
-            .where(eq(messages.chatId, chatId))
-            .orderBy(desc(messages.createdAt))
-            .limit(effectiveLimit + 1);
+        if (!cursorMessage) {
+          throw new BusinessLogicError(
+            'Invalid pagination cursor',
+            'INVALID_CURSOR'
+          );
         }
+
+        messagesList = await db
+          .select()
+          .from(messages)
+          .where(
+            and(
+              eq(messages.chatId, chatId),
+              lt(messages.createdAt, cursorMessage.createdAt)
+            )
+          )
+          .orderBy(desc(messages.createdAt))
+          .limit(effectiveLimit + 1);
       } else {
         // Initial load: latest messages
         messagesList = await db
@@ -250,9 +225,7 @@ export const GET = withErrorHandling(
       return { chat, participants: participantsList, messages: messagesList };
     };
 
-    const fullChat = authUser
-      ? await asUser(authUser, fetchChatData)
-      : await asSystem(fetchChatData, 'get-chat-with-messages-debug');
+    const fullChat = await asUser(authUser, fetchChatData);
 
     // Get participant details
     const fetchParticipantDetails = async (
@@ -293,9 +266,10 @@ export const GET = withErrorHandling(
       return { users: usersList, actors: actorsList };
     };
 
-    const { users: usersList, actors: actorsList } = authUser
-      ? await asUser(authUser, fetchParticipantDetails)
-      : await asSystem(fetchParticipantDetails, 'get-chat-participants-debug');
+    const { users: usersList, actors: actorsList } = await asUser(
+      authUser,
+      fetchParticipantDetails
+    );
 
     const usersMap = new Map(usersList.map((u) => [u.id, u]));
     const actorsMap = new Map(actorsList.map((a) => [a.id, a]));
@@ -346,7 +320,7 @@ export const GET = withErrorHandling(
       isAgent?: boolean;
       managedBy?: string | null;
     } | null = null;
-    if (!chat.isGroup && !chat.name && userId) {
+    if (!chat.isGroup && !chat.name) {
       const otherParticipant = fullChat.participants.find(
         (p) => p.userId !== userId
       );
@@ -406,22 +380,20 @@ export const GET = withErrorHandling(
             .where(inArray(messageReactions.messageId, messageIds))
             .groupBy(messageReactions.messageId, messageReactions.emoji);
         }, 'get-message-reaction-counts'),
-        authUser
-          ? asSystem(async (db) => {
-              return await db
-                .select({
-                  messageId: messageReactions.messageId,
-                  emoji: messageReactions.emoji,
-                })
-                .from(messageReactions)
-                .where(
-                  and(
-                    inArray(messageReactions.messageId, messageIds),
-                    eq(messageReactions.userId, authUser!.userId)
-                  )
-                );
-            }, 'get-message-reactions-mine')
-          : Promise.resolve([]),
+        asSystem(async (db) => {
+          return await db
+            .select({
+              messageId: messageReactions.messageId,
+              emoji: messageReactions.emoji,
+            })
+            .from(messageReactions)
+            .where(
+              and(
+                inArray(messageReactions.messageId, messageIds),
+                eq(messageReactions.userId, userId)
+              )
+            );
+        }, 'get-message-reactions-mine'),
       ]);
 
       const mineSet = new Set(mine.map((r) => `${r.messageId}:${r.emoji}`));
@@ -485,7 +457,6 @@ export const GET = withErrorHandling(
         chatId,
         isGameChat,
         isDM: !chat.isGroup,
-        debugMode,
         messagesReturned: messagesList.length,
         hasMore,
         nextCursor,

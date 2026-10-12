@@ -40,7 +40,7 @@
  * ```
  */
 
-import { withErrorHandling } from '@feed/api';
+import { NotFoundError, withErrorHandling } from '@feed/api';
 import { db } from '@feed/db';
 import { calculatePortfolioBreakdown } from '@feed/engine';
 import { ImageResponse } from 'next/og';
@@ -60,19 +60,23 @@ export const GET = withErrorHandling(async function GET(
 ) {
   const { userId } = await context.params;
 
-  const [user, pnlData] = await Promise.all([
-    db.user.findUnique({
-      where: { id: userId },
-      select: {
-        username: true,
-        displayName: true,
-        profileImageUrl: true,
-      },
-    }),
-    calculatePortfolioBreakdown(userId),
-  ]);
+  const user = await db.user.findUnique({
+    where: { id: userId },
+    select: {
+      username: true,
+      displayName: true,
+      profileImageUrl: true,
+    },
+  });
 
-  const displayName = user?.displayName || user?.username || 'Feed User';
+  // Never render a plausible-looking card with zero PnL for an unknown user.
+  if (!user) {
+    throw new NotFoundError('User', 'USER_NOT_FOUND');
+  }
+
+  const pnlData = await calculatePortfolioBreakdown(userId);
+
+  const displayName = user.displayName || user.username || 'Feed User';
   const totalPnL = pnlData?.totalPnL || 0;
   const totalAssets = pnlData?.totalAssets || 0;
   const availableBalance = pnlData?.available || 0;
@@ -114,7 +118,7 @@ export const GET = withErrorHandling(async function GET(
           marginBottom: 60,
         }}
       >
-        {user?.profileImageUrl && (
+        {user.profileImageUrl && (
           <img
             src={user.profileImageUrl}
             alt={displayName}
@@ -138,7 +142,7 @@ export const GET = withErrorHandling(async function GET(
         >
           {displayName}
         </div>
-        {user?.username && (
+        {user.username && (
           <div
             style={{
               fontSize: 24,

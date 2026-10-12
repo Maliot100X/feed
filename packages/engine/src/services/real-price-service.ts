@@ -19,7 +19,7 @@ interface CachedPrices {
 }
 
 interface PriceMapping {
-  /** Parody org file ID (matches the filename in data/organizations/) */
+  /** Parody organization ID (default pack: packages/pack-default/src/organizations/) */
   orgFileId: string;
   /** Source: 'coingecko' for live fetch, 'static' for hardcoded reference */
   source: 'coingecko' | 'static';

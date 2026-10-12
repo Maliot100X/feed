@@ -11,6 +11,7 @@ import {
 } from '@feed/api';
 import { logger } from '@feed/shared';
 import type { NextRequest } from 'next/server';
+import { z } from 'zod';
 
 // Force dynamic to prevent caching, use nodejs runtime for streaming support
 export const dynamic = 'force-dynamic';
@@ -25,15 +26,29 @@ const BLOCK_TIMEOUT_MS = 1000; // Block for 1 second waiting for new messages
 const HEARTBEAT_INTERVAL_MS = 15000; // Send heartbeat every 15 seconds
 const MAX_MESSAGES_PER_READ = 100; // Max messages to read per iteration
 
-interface CursorMap {
-  [channel: string]: string;
-}
+// Redis stream IDs look like "<ms>-<seq>" (or a bare "<ms>").
+const StreamIdSchema = z.string().regex(/^\d{1,20}(-\d{1,20})?$/);
+const CursorMapSchema = z
+  .record(z.string().min(1).max(200), StreamIdSchema)
+  .refine((cursor) => Object.keys(cursor).length <= MAX_CHANNELS, {
+    message: 'Too many cursor entries',
+  });
+type CursorMap = z.infer<typeof CursorMapSchema>;
 
-const parseCursor = (raw: string | null): CursorMap => {
+/**
+ * Parse the cursor query param. URLSearchParams has already percent-decoded
+ * it, so it must not be decoded again. Returns null when malformed.
+ */
+const parseCursor = (raw: string | null): CursorMap | null => {
   if (!raw) return {};
-  const decoded = decodeURIComponent(raw);
-  const parsed = JSON.parse(decoded) as CursorMap;
-  return parsed && typeof parsed === 'object' ? parsed : {};
+  let json: unknown;
+  try {
+    json = JSON.parse(raw);
+  } catch {
+    return null;
+  }
+  const parsed = CursorMapSchema.safeParse(json);
+  return parsed.success ? parsed.data : null;
 };
 
 export const GET = withErrorHandling(async function GET(request: NextRequest) {
@@ -72,8 +87,7 @@ export const GET = withErrorHandling(async function GET(request: NextRequest) {
 
   // If the client passed an explicit channels list, intersect with token-authorized channels.
   if (requestedChannelsParam) {
-    const decoded = decodeURIComponent(requestedChannelsParam);
-    const requested = decoded
+    const requested = requestedChannelsParam
       .split(',')
       .map((c) => c.trim())
       .filter(Boolean) as RealtimeChannel[];
@@ -89,9 +103,13 @@ export const GET = withErrorHandling(async function GET(request: NextRequest) {
     return new Response('Too many channels requested', { status: 400 });
   }
 
+  const cursors = parseCursor(cursorParam);
+  if (!cursors) {
+    return new Response('Invalid cursor', { status: 400 });
+  }
+
   const encoder = new TextEncoder();
   const connectionId = generateConnectionId();
-  const cursors = parseCursor(cursorParam);
   const streamKeys = allowedChannels.map(toStreamKey);
   const keyToChannel = new Map(
     streamKeys.map((k, idx) => [k, allowedChannels[idx]])

@@ -11,14 +11,20 @@ import { withErrorHandling } from '@feed/api';
 import { jwtVerify } from 'jose';
 import { cookies } from 'next/headers';
 import { NextRequest, NextResponse } from 'next/server';
+import { z } from 'zod';
 import { getStewardJwtSecret } from '@/lib/auth/steward-server';
+
+const SessionBodySchema = z.object({
+  token: z.string().min(1).max(8192),
+  refreshToken: z.string().max(8192).nullish(),
+});
 
 const THIRTY_DAYS = 60 * 60 * 24 * 30;
 
 export const POST = withErrorHandling(async (req: NextRequest) => {
-  let body: { token?: string; refreshToken?: string };
+  let body: unknown;
   try {
-    body = (await req.json()) as typeof body;
+    body = await req.json();
   } catch {
     return NextResponse.json(
       { error: 'Invalid request body' },
@@ -26,24 +32,30 @@ export const POST = withErrorHandling(async (req: NextRequest) => {
     );
   }
 
-  const { token, refreshToken } = body;
-  if (!token) {
+  const parsed = SessionBodySchema.safeParse(body);
+  if (!parsed.success) {
     return NextResponse.json({ error: 'token is required' }, { status: 400 });
   }
+  const { token, refreshToken } = parsed.data;
 
   // Verify the JWT locally before storing — rejects tampered or expired tokens
+  // Resolve the secret outside the verification try/catch so a server
+  // misconfiguration surfaces as a 500 rather than an invalid-token 401.
+  const secret = getStewardJwtSecret();
   let userId: string;
   try {
-    const { payload } = await jwtVerify(token, getStewardJwtSecret(), {
+    const { payload } = await jwtVerify(token, secret, {
       issuer: 'steward',
       algorithms: ['HS256'],
     });
-    userId = String(payload['userId'] ?? '');
-    if (!userId) throw new Error('missing userId claim');
-  } catch (err) {
-    const msg = err instanceof Error ? err.message : 'invalid token';
+    const claim = payload['userId'];
+    if (typeof claim !== 'string' || claim.length === 0) {
+      throw new Error('missing userId claim');
+    }
+    userId = claim;
+  } catch {
     return NextResponse.json(
-      { error: `Invalid Steward token: ${msg}` },
+      { error: 'Invalid Steward token' },
       { status: 401 }
     );
   }

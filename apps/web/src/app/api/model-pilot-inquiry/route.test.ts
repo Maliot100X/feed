@@ -1,5 +1,11 @@
 import { beforeEach, describe, expect, it, mock } from 'bun:test';
 import type { NextRequest } from 'next/server';
+import {
+  MODEL_PILOT_DELIVERABLES,
+  MODEL_PILOT_OUTPUTS,
+  MODEL_PILOT_REVIEW_LEVELS,
+  MODEL_PILOT_SCENARIOS,
+} from '../../../../../../packages/shared/src/model-pilot-inquiry';
 
 const mockCheckRateLimitAsync = mock();
 const mockGetClientIp = mock();
@@ -31,31 +37,10 @@ mock.module('@feed/api', () => ({
 }));
 
 mock.module('@feed/shared', () => ({
-  MODEL_PILOT_DELIVERABLES: [
-    'Behavioral data',
-    'Evaluation report',
-    'Labeled dataset',
-    'Fine-tuned model',
-    'Dataset + fine-tuned model',
-    'Ongoing retraining',
-  ],
-  MODEL_PILOT_SCENARIOS: [
-    'Market manipulation',
-    'Scam detection',
-    'Multi-agent coordination',
-    'Social engineering resistance',
-    'Narrative volatility',
-    'Custom scenarios',
-  ],
-  MODEL_PILOT_OUTPUTS: [
-    'Raw logs',
-    'Structured data',
-    'Labeled data',
-    'Evaluation report',
-    'Fine-tuned model',
-    'Hosted endpoint',
-  ],
-  MODEL_PILOT_REVIEW_LEVELS: ['Off', 'Light review', 'Full labeling support'],
+  MODEL_PILOT_DELIVERABLES,
+  MODEL_PILOT_OUTPUTS,
+  MODEL_PILOT_REVIEW_LEVELS,
+  MODEL_PILOT_SCENARIOS,
 }));
 
 const { POST } = await import('./route');
@@ -142,6 +127,17 @@ describe('POST /api/model-pilot-inquiry', () => {
 
     expect(response.status).toBe(400);
     expect(payload).toEqual({ error: 'invalid_request' });
+    expect(mockSendModelPilotInquiryEmails).not.toHaveBeenCalled();
+  });
+
+  it('rejects duplicate choices and missing terms consent before email delivery', async () => {
+    for (const body of [
+      { ...validBody, deliverables: ['Behavioral data', 'Behavioral data'] },
+      { ...validBody, agreedToTerms: false },
+    ]) {
+      const response = await POST(createRequest(body));
+      expect(response.status).toBe(400);
+    }
     expect(mockSendModelPilotInquiryEmails).not.toHaveBeenCalled();
   });
 

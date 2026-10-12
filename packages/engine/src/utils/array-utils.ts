@@ -146,7 +146,7 @@ export function isNonEmpty<T>(arr: readonly T[]): arr is readonly [T, ...T[]] {
  * ```
  */
 export function at<T>(arr: readonly T[], index: number): T | undefined {
-  // Handle negative indices
+  if (!Number.isInteger(index)) return undefined;
   const idx = index < 0 ? arr.length + index : index;
   if (idx < 0 || idx >= arr.length) return undefined;
   return arr[idx];
@@ -159,16 +159,15 @@ export function at<T>(arr: readonly T[], index: number): T | undefined {
  * @param index - Index to access (supports negative indices)
  * @param message - Optional custom error message
  * @returns The element at index (guaranteed non-undefined)
- * @throws Error if index is out of bounds
+ * @throws Error if index is not an integer or is out of bounds
  */
 export function atOrThrow<T>(
   arr: readonly T[],
   index: number,
   message?: string
 ): T {
-  // Normalize negative indices
   const normalized = index < 0 ? arr.length + index : index;
-  if (normalized < 0 || normalized >= arr.length) {
+  if (!Number.isInteger(index) || normalized < 0 || normalized >= arr.length) {
     throw new Error(
       message ??
         `Index ${index} out of bounds for array of length ${arr.length}`

@@ -32,11 +32,6 @@
  *     description: Returns paginated list of all registered users/agents with filtering and sorting options
  *     parameters:
  *       - in: query
- *         name: onChainOnly
- *         schema:
- *           type: boolean
- *         description: Filter for only on-chain registered users
- *       - in: query
  *         name: sortBy
  *         schema:
  *           type: string
@@ -125,9 +120,6 @@
  * const response = await fetch('/api/registry?limit=50&sortBy=reputationPoints');
  * const { users, pagination } = await response.json();
  *
- * // Get only on-chain users
- * const onChainUsers = await fetch('/api/registry?onChainOnly=true&sortBy=lifetimePnL');
- *
  * // Display top traders
  * users.forEach(user => {
  *   console.log(`${user.displayName}: ${user.lifetimePnL} PnL, Rep: ${user.reputation}`);
@@ -149,12 +141,22 @@ import type { DrizzleClient } from '@feed/db';
 import { asPublic, asUser } from '@feed/db';
 import { logger, RegistryQuerySchema } from '@feed/shared';
 import type { NextRequest } from 'next/server';
+import { NextResponse } from 'next/server';
 /**
  * GET /api/registry
  * Fetch all registered users with optional filtering
  */
 export const GET = withErrorHandling(async (request: NextRequest) => {
   const { searchParams } = new URL(request.url);
+
+  // The on-chain filter was removed with its column; reject it instead of
+  // returning unfiltered results as if they were verified on-chain users.
+  if (searchParams.get('onChainOnly') === 'true') {
+    return NextResponse.json(
+      { error: 'onChainOnly filter is no longer supported' },
+      { status: 400 }
+    );
+  }
 
   // Parse and validate query parameters
   const queryParams = {
@@ -174,7 +176,6 @@ export const GET = withErrorHandling(async (request: NextRequest) => {
   if (error) return error;
 
   // Build where clause
-  void filters.onChainOnly; // onChainOnly filter removed (column dropped)
   const where = {};
 
   // Build order by clause
@@ -263,7 +264,6 @@ export const GET = withErrorHandling(async (request: NextRequest) => {
     {
       total: totalCount,
       returned: usersWithReputation.length,
-      onChainOnly: filters.onChainOnly,
     },
     'GET /api/registry'
   );

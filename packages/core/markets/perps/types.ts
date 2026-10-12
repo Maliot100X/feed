@@ -122,6 +122,10 @@ export interface PerpDbPort {
       >
     >
   ): Promise<void>;
+  /**
+   * Close an open position. Returns false when the position was already
+   * closed (or does not exist), so callers can avoid double settlement.
+   */
   closePosition(
     positionId: string,
     updates: Partial<
@@ -134,7 +138,17 @@ export interface PerpDbPort {
         | 'unrealizedPnLPercent'
       >
     >
-  ): Promise<void>;
+  ): Promise<boolean>;
+  /**
+   * Atomically apply open-interest / 24h-volume deltas to a market snapshot
+   * (row-locked read-modify-write) and return the resulting values.
+   * Open interest is floored at 0. Use this instead of writing absolute
+   * values computed from a possibly stale market snapshot.
+   */
+  applyMarketDeltas(
+    ticker: string,
+    deltas: { openInterest?: number; volume24h?: number }
+  ): Promise<{ openInterest: number; volume24h: number }>;
   updateMarketStats(
     ticker: string,
     updates: Partial<

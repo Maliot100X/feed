@@ -13,15 +13,20 @@ mock.module('../storage-bridge', () => ({
   isSimulationMode: mockIsSimulationMode,
 }));
 
+// Rows returned when a query is awaited directly after `.where()`
+let mockWhereRows: Array<Record<string, unknown>> = [];
+
 // Mock DB to verify no calls are made
 const mockDbSelect = mock(() => ({
   from: mock(() => ({
-    where: mock(() => ({
-      orderBy: mock(() => ({
+    where: mock(() =>
+      Object.assign(Promise.resolve(mockWhereRows), {
+        orderBy: mock(() => ({
+          limit: mock(() => Promise.resolve([])),
+        })),
         limit: mock(() => Promise.resolve([])),
-      })),
-      limit: mock(() => Promise.resolve([])),
-    })),
+      })
+    ),
   })),
 }));
 
@@ -152,17 +157,34 @@ describe('RelationshipEvolutionEngine - Non-Simulation Mode', () => {
   });
 
   describe('getActorRelationships (static)', () => {
-    test('calls DB in non-simulation mode', async () => {
-      // This will throw because our mock doesn't return a proper array,
-      // but the important thing is that the DB SELECT was called
-      try {
-        await RelationshipEvolutionEngine.getActorRelationships('actor1');
-      } catch {
-        // Expected - mock doesn't return proper array
-      }
+    test('reads and maps relationships from DB in non-simulation mode', async () => {
+      const now = new Date('2025-01-01T00:00:00.000Z');
+      mockWhereRows = [
+        {
+          id: 'rel-1',
+          actor1Id: 'actor1',
+          actor2Id: 'actor2',
+          relationshipType: 'rivals',
+          strength: 0.7,
+          sentiment: -0.4,
+          isPublic: true,
+          history: null,
+          affects: null,
+          createdAt: now,
+          updatedAt: now,
+        },
+      ];
 
-      // DB should be called when not in simulation mode
+      const relationships =
+        await RelationshipEvolutionEngine.getActorRelationships('actor1');
+
       expect(mockDbSelect).toHaveBeenCalled();
+      expect(relationships).toHaveLength(1);
+      expect(relationships[0]?.id).toBe('rel-1');
+      expect(relationships[0]?.relationshipType).toBe('rivals');
+      expect(relationships[0]?.strength).toBe(0.7);
+      expect(relationships[0]?.history).toBeUndefined();
+      mockWhereRows = [];
     });
   });
 

@@ -23,13 +23,8 @@ interface FalImage {
   content_type?: string;
 }
 
-interface FalT2IResponse {
-  data: {
-    images: FalImage[];
-  };
-}
-
-interface FalEditResponse {
+/** Shared shape of fal text-to-image and edit responses. */
+interface FalImageResponse {
   data: {
     images: FalImage[];
   };
@@ -117,7 +112,7 @@ export async function generateAgentMonkeyProfileImage(
           limit_generations: true,
         },
         logs: false,
-      })) as FalEditResponse;
+      })) as FalImageResponse;
 
       const url = result.data.images[0]?.url;
       if (!url) {
@@ -139,7 +134,7 @@ export async function generateAgentMonkeyProfileImage(
         num_inference_steps: 4,
       },
       logs: false,
-    })) as FalT2IResponse;
+    })) as FalImageResponse;
 
     const url = result.data.images[0]?.url;
     if (!url) {

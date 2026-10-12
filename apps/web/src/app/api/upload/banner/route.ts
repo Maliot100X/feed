@@ -52,9 +52,20 @@ export const POST = withErrorHandling(async (request: NextRequest) => {
   }
 
   const formData = await request.formData();
-  const file = formData.get('file') as File;
-  const targetId = formData.get('targetId') as string | null;
-  const rawTargetType = (formData.get('targetType') as string) || 'user';
+  const fileEntry = formData.get('file');
+  const targetIdEntry = formData.get('targetId');
+  const targetTypeEntry = formData.get('targetType');
+  if (
+    (targetIdEntry !== null && typeof targetIdEntry !== 'string') ||
+    (targetTypeEntry !== null && typeof targetTypeEntry !== 'string')
+  ) {
+    return NextResponse.json(
+      { error: 'targetId and targetType must be string fields' },
+      { status: 400 }
+    );
+  }
+  const targetId = targetIdEntry || null;
+  const rawTargetType = targetTypeEntry || 'user';
 
   // Validate targetType against allowed values
   if (!VALID_TARGET_TYPES.includes(rawTargetType as TargetType)) {
@@ -67,9 +78,10 @@ export const POST = withErrorHandling(async (request: NextRequest) => {
   }
   const targetType = rawTargetType as TargetType;
 
-  if (!file) {
+  if (!(fileEntry instanceof File) || fileEntry.size === 0) {
     return NextResponse.json({ error: 'No file provided' }, { status: 400 });
   }
+  const file = fileEntry;
 
   // Require targetId when uploading for an agent
   if (targetType === 'agent' && !targetId) {

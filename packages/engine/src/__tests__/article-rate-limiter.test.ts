@@ -25,24 +25,25 @@ mock.module('@feed/db', () => ({
   and: (...args: unknown[]) => args,
   eq: (a: unknown, b: unknown) => [a, b],
   gte: (a: unknown, b: unknown) => [a, b],
+  lte: (a: unknown, b: unknown) => [a, b],
   isNull: (a: unknown) => [a],
   posts: { type: 'type', timestamp: 'timestamp', deletedAt: 'deletedAt' },
   sql: (strings: TemplateStringsArray) => strings.join(''),
 }));
 
-describe('ArticleRateLimiterService', () => {
-  beforeEach(() => {
-    // Reset mock call counts
-    mockDbCount = 0;
-    mockDb.select.mockClear();
-    mockDb.from.mockClear();
-    mockDb.where.mockClear();
-    // Default to 0 articles
-    mockDb.where.mockImplementation(() =>
-      Promise.resolve([{ count: mockDbCount }])
-    );
-  });
+// Top-level: every suite (including the breaking limiter suite) starts from a
+// clean mock that reads the current mockDbCount.
+beforeEach(() => {
+  mockDbCount = 0;
+  mockDb.select.mockClear();
+  mockDb.from.mockClear();
+  mockDb.where.mockClear();
+  mockDb.where.mockImplementation(() =>
+    Promise.resolve([{ count: mockDbCount }])
+  );
+});
 
+describe('ArticleRateLimiterService', () => {
   describe('constructor', () => {
     test('uses default config when no config provided', () => {
       const limiter = new ArticleRateLimiterService();
@@ -247,6 +248,53 @@ describe('createArticleRateLimiter', () => {
 
     expect(config.maxArticlesPerHour).toBe(1);
     expect(config.windowMs).toBe(1000);
+  });
+
+  test('rejects non-finite and fractional limits', () => {
+    expect(() =>
+      createArticleRateLimiter({ maxArticlesPerHour: Number.NaN })
+    ).toThrow('maxArticlesPerHour must be a finite integer');
+    expect(() =>
+      createArticleRateLimiter({
+        maxArticlesPerHour: Number.POSITIVE_INFINITY,
+      })
+    ).toThrow('maxArticlesPerHour must be a finite integer');
+    expect(() => createArticleRateLimiter({ maxArticlesPerHour: 1.5 })).toThrow(
+      'maxArticlesPerHour must be a finite integer'
+    );
+    expect(() =>
+      createArticleRateLimiter({ windowMs: Number.POSITIVE_INFINITY })
+    ).toThrow('windowMs must be finite');
+  });
+
+  test('direct construction validates config too', () => {
+    expect(
+      () => new ArticleRateLimiterService({ maxArticlesPerHour: 0 })
+    ).toThrow('maxArticlesPerHour must be a positive number');
+    expect(
+      () => new BreakingArticleRateLimiterService({ maxArticlesPerHour: 2.5 })
+    ).toThrow('maxArticlesPerHour must be a finite integer');
+    expect(
+      () => new BreakingArticleRateLimiterService({ windowMs: -1 })
+    ).toThrow('windowMs must be a positive number');
+  });
+
+  test('malformed BREAKING_RATE_LIMIT_PER_HOUR fails instead of truncating', () => {
+    const previous = process.env.BREAKING_RATE_LIMIT_PER_HOUR;
+    try {
+      process.env.BREAKING_RATE_LIMIT_PER_HOUR = '5abc';
+      expect(() => new BreakingArticleRateLimiterService()).toThrow(
+        'Invalid BREAKING_RATE_LIMIT_PER_HOUR'
+      );
+      process.env.BREAKING_RATE_LIMIT_PER_HOUR = ' 4 ';
+      expect(
+        new BreakingArticleRateLimiterService().getConfig().maxArticlesPerHour
+      ).toBe(4);
+    } finally {
+      if (previous === undefined)
+        delete process.env.BREAKING_RATE_LIMIT_PER_HOUR;
+      else process.env.BREAKING_RATE_LIMIT_PER_HOUR = previous;
+    }
   });
 
   test('allows undefined values (uses defaults)', () => {
@@ -477,25 +525,6 @@ describe('BreakingArticleRateLimiterService', () => {
     });
   });
 
-  describe('recordBreakingArticle', () => {
-    test('is a no-op (DB-backed counting)', async () => {
-      mockDbCount = 0;
-      const limiter = new BreakingArticleRateLimiterService();
-      limiter.recordBreakingArticle();
-
-      // recordBreakingArticle is a no-op, count comes from DB
-      expect(await limiter.getRecentArticleCount()).toBe(0);
-    });
-
-    test('count reflects DB state, not recordBreakingArticle calls', async () => {
-      mockDbCount = 3;
-      const limiter = new BreakingArticleRateLimiterService();
-      limiter.recordBreakingArticle();
-
-      expect(await limiter.getRecentArticleCount()).toBe(3);
-    });
-  });
-
   describe('getRemainingSlots', () => {
     test('returns correct remaining slots', async () => {
       mockDbCount = 1;
@@ -521,29 +550,6 @@ describe('BreakingArticleRateLimiterService', () => {
       expect(await limiter.getRecentArticleCount()).toBe(2);
 
       limiter.reset();
-
-      expect(await limiter.getRecentArticleCount()).toBe(0);
-    });
-  });
-
-  describe('window boundary behavior', () => {
-    test('DB articles within window are counted', async () => {
-      mockDbCount = 1;
-      const limiter = new BreakingArticleRateLimiterService({
-        windowMs: 60000, // 1 minute
-        maxArticlesPerHour: 2,
-      });
-
-      expect(await limiter.getRecentArticleCount()).toBe(1);
-    });
-
-    test('DB articles outside window are not counted (handled by DB query)', async () => {
-      // The DB query uses windowMs to filter, so if DB returns 0, count is 0
-      mockDbCount = 0;
-      const limiter = new BreakingArticleRateLimiterService({
-        windowMs: 60000, // 1 minute
-        maxArticlesPerHour: 2,
-      });
 
       expect(await limiter.getRecentArticleCount()).toBe(0);
     });

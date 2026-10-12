@@ -257,6 +257,12 @@ export async function handlePlayerTrade(
   side: 'long' | 'short',
   size: number
 ): Promise<void> {
+  // NaN would slip past the `<` threshold check below; reject it explicitly.
+  if (!Number.isFinite(size) || size < 0) {
+    throw new RangeError(
+      `Trade size must be a finite non-negative number, got ${size}`
+    );
+  }
   // Only process significant trades
   if (size < SIGNIFICANT_TRADE_THRESHOLD) {
     return;

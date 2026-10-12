@@ -166,7 +166,7 @@ export const GET = withErrorHandling(
       id: market.id,
       text: market.question,
       question: market.question,
-      status: market.resolved ? 'resolved' : 'active',
+      status: market.status ?? (market.resolved ? 'resolved' : 'active'),
       resolution: market.resolution ?? null,
       resolved: market.resolved,
       resolutionDate: toISOOrNull(market.endDate),

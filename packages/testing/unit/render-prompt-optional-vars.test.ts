@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'bun:test';
-import { renderPrompt } from '@feed/engine';
+import { type JsonValue, renderPrompt } from '@feed/engine';
 
 const testPrompt = {
   id: 'test-prompt',
@@ -65,12 +65,13 @@ describe('renderPrompt optional variable cleanup', () => {
 
 describe('required prompt context integrity', () => {
   it('rejects omitted, null, empty and non-finite required values', () => {
-    for (const variables of [
+    const cases: Array<Record<string, JsonValue>> = [
       {},
       { name: null },
       { name: ' ' },
       { name: Number.NaN },
-    ]) {
+    ];
+    for (const variables of cases) {
       expect(() =>
         renderPrompt({ ...testPrompt, template: '{{name}}' }, variables)
       ).toThrow();

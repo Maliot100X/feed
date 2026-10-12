@@ -1,4 +1,5 @@
 import {
+  and,
   type DailyTopic,
   type DailyTopicSourceType,
   dailyTopics,
@@ -7,6 +8,7 @@ import {
   eq,
   generateSnowflakeId,
   gte,
+  lt,
   parodyHeadlines,
   rssHeadlines,
 } from '@feed/db';
@@ -366,21 +368,33 @@ export function buildMultiTopicPromptContext(
   ].join('\n');
 }
 
+const DAY_MS = 24 * 60 * 60 * 1000;
+
 export class DailyTopicService {
-  private async getRecentRssHeadlines(since: Date) {
+  private async getRecentRssHeadlines(since: Date, until: Date) {
     return db
       .select()
       .from(rssHeadlines)
-      .where(gte(rssHeadlines.publishedAt, since))
+      .where(
+        and(
+          gte(rssHeadlines.publishedAt, since),
+          lt(rssHeadlines.publishedAt, until)
+        )
+      )
       .orderBy(desc(rssHeadlines.publishedAt))
       .limit(50);
   }
 
-  private async getRecentParodies(since: Date) {
+  private async getRecentParodies(since: Date, until: Date) {
     return db
       .select()
       .from(parodyHeadlines)
-      .where(gte(parodyHeadlines.generatedAt, since))
+      .where(
+        and(
+          gte(parodyHeadlines.generatedAt, since),
+          lt(parodyHeadlines.generatedAt, until)
+        )
+      )
       .orderBy(desc(parodyHeadlines.generatedAt))
       .limit(25);
   }
@@ -403,10 +417,13 @@ export class DailyTopicService {
     limit = 8
   ): Promise<DailyTopicCandidate[]> {
     const normalizedDate = normalizeTopicDate(date);
-    const since = new Date(normalizedDate.getTime() - 24 * 60 * 60 * 1000);
+    const since = new Date(normalizedDate.getTime() - DAY_MS);
+    // Exclude news published after the requested day so historical
+    // selections never see future headlines.
+    const until = new Date(normalizedDate.getTime() + DAY_MS);
     const [headlines, parodies] = await Promise.all([
-      this.getRecentRssHeadlines(since),
-      this.getRecentParodies(since),
+      this.getRecentRssHeadlines(since, until),
+      this.getRecentParodies(since, until),
     ]);
 
     const candidateMap = new Map<string, DailyTopicCandidate>();
@@ -493,14 +510,17 @@ export class DailyTopicService {
   }
 
   /**
-   * Get topicKeys used in the last N days, for rotation penalty.
+   * Get topicKeys used in the N days before `asOf`, for rotation penalty.
    */
-  private async getRecentTopicKeys(days: number): Promise<Set<string>> {
-    const cutoff = new Date(Date.now() - days * 24 * 60 * 60 * 1000);
+  private async getRecentTopicKeys(
+    asOf: Date,
+    days: number
+  ): Promise<Set<string>> {
+    const cutoff = new Date(asOf.getTime() - days * DAY_MS);
     const recent = await db
       .selectDistinct({ topicKey: dailyTopics.topicKey })
       .from(dailyTopics)
-      .where(gte(dailyTopics.date, cutoff));
+      .where(and(gte(dailyTopics.date, cutoff), lt(dailyTopics.date, asOf)));
     return new Set(recent.map((r) => r.topicKey));
   }
 
@@ -511,9 +531,20 @@ export class DailyTopicService {
       return existing;
     }
 
+    return this.storeAutomaticTopic(
+      await this.selectAutomaticTopic(normalizedDate)
+    );
+  }
+
+  /**
+   * Pick the automatic topic for a (normalized) date without writing it.
+   */
+  private async selectAutomaticTopic(
+    normalizedDate: Date
+  ): Promise<Omit<DailyTopicContext, 'id'>> {
     // Fetch more candidates than needed, then penalize recently-used topics
     const candidates = await this.listCandidates(normalizedDate, 10);
-    const recentKeys = await this.getRecentTopicKeys(3);
+    const recentKeys = await this.getRecentTopicKeys(normalizedDate, 3);
 
     // Apply 80% score penalty to topics used in the last 3 days
     const penalized = candidates
@@ -526,7 +557,7 @@ export class DailyTopicService {
     const bestCandidate = penalized[0];
 
     if (bestCandidate) {
-      return this.upsertTopic({
+      return {
         date: normalizedDate,
         topicKey: bestCandidate.topicKey,
         topicLabel: bestCandidate.topicLabel,
@@ -535,7 +566,7 @@ export class DailyTopicService {
         sourceHeadlineIds: bestCandidate.sourceHeadlineIds,
         selectionReason: bestCandidate.selectionReason,
         isLocked: false,
-      });
+      };
     }
 
     const previousTopic = await db.dailyTopic.findFirst({
@@ -549,7 +580,7 @@ export class DailyTopicService {
         { date: normalizedDate.toISOString() },
         'DailyTopicService'
       );
-      return this.upsertTopic({
+      return {
         date: normalizedDate,
         topicKey: 'general',
         topicLabel: 'General',
@@ -559,10 +590,10 @@ export class DailyTopicService {
         selectionReason:
           'Default topic used because no candidates or previous topics were available',
         isLocked: false,
-      });
+      };
     }
 
-    return this.upsertTopic({
+    return {
       date: normalizedDate,
       topicKey: previousTopic.topicKey,
       topicLabel: previousTopic.topicLabel,
@@ -571,7 +602,7 @@ export class DailyTopicService {
       sourceHeadlineIds: previousTopic.sourceHeadlineIds ?? [],
       selectionReason: `Reused topic from ${previousTopic.date.toISOString().slice(0, 10)}`,
       isLocked: false,
-    });
+    };
   }
 
   /**
@@ -583,6 +614,11 @@ export class DailyTopicService {
     date: Date,
     count = 3
   ): Promise<DailyTopicContext[]> {
+    if (!Number.isInteger(count) || count < 1) {
+      throw new Error(
+        `Topic candidate count must be a positive integer: ${count}`
+      );
+    }
     const normalizedDate = normalizeTopicDate(date);
 
     // Ensure the primary topic exists
@@ -619,11 +655,11 @@ export class DailyTopicService {
       return existing;
     }
 
-    if (existing?.id) {
-      await db.delete(dailyTopics).where(eq(dailyTopics.id, existing.id));
-    }
-
-    return this.ensureTopicForDate(normalizedDate);
+    // Select first, then replace in place: a selection failure keeps the
+    // prior row, and a concurrent manual lock is never overwritten.
+    return this.storeAutomaticTopic(
+      await this.selectAutomaticTopic(normalizedDate)
+    );
   }
 
   async setManualTopic(input: {
@@ -634,34 +670,70 @@ export class DailyTopicService {
   }): Promise<DailyTopicContext> {
     const normalizedDate = normalizeTopicDate(input.date ?? new Date());
     const topicLabel = input.topicLabel.trim();
+    if (!topicLabel) {
+      throw new Error('Manual daily topic label cannot be empty');
+    }
     const summary = (input.summary?.trim() || topicLabel).slice(0, 500);
     const topicKey = normalizeTopicKey(topicLabel) || 'manual-topic';
 
-    return this.upsertTopic({
-      date: normalizedDate,
-      topicKey,
-      topicLabel,
-      summary,
-      sourceType: 'manual_override',
-      sourceHeadlineIds: [],
-      selectionReason: input.selectionReason ?? 'Manually overridden in admin',
-      isLocked: true,
-    });
+    return this.upsertTopic(
+      {
+        date: normalizedDate,
+        topicKey,
+        topicLabel,
+        summary,
+        sourceType: 'manual_override',
+        sourceHeadlineIds: [],
+        selectionReason:
+          input.selectionReason ?? 'Manually overridden in admin',
+        isLocked: true,
+      },
+      { overwriteLocked: true }
+    );
   }
 
+  /**
+   * Explicitly clear a manual override: the recomputed automatic topic
+   * replaces the row (keeping its ID) even if it was locked.
+   */
   async clearOverride(date: Date): Promise<DailyTopicContext | null> {
     const normalizedDate = normalizeTopicDate(date);
-    const existing = await this.getTopicForDate(normalizedDate);
-    if (existing?.id) {
-      await db.delete(dailyTopics).where(eq(dailyTopics.id, existing.id));
-    }
+    const selected = await this.selectAutomaticTopic(normalizedDate);
+    return this.upsertTopic(selected, { overwriteLocked: true });
+  }
 
-    return this.ensureTopicForDate(normalizedDate);
+  /**
+   * Store an automatically selected topic. Never overwrites a locked
+   * (manual) topic; returns the locked topic instead.
+   */
+  private async storeAutomaticTopic(
+    input: Omit<DailyTopicContext, 'id'>
+  ): Promise<DailyTopicContext> {
+    const stored = await this.upsertTopic(input, { overwriteLocked: false });
+    if (stored) {
+      return stored;
+    }
+    const locked = await this.getTopicForDate(input.date);
+    if (!locked) {
+      throw new Error(
+        `Daily topic for ${input.date.toISOString()} conflicted but could not be read`
+      );
+    }
+    return locked;
   }
 
   private async upsertTopic(
-    input: Omit<DailyTopicContext, 'id'>
-  ): Promise<DailyTopicContext> {
+    input: Omit<DailyTopicContext, 'id'>,
+    options: { overwriteLocked: true }
+  ): Promise<DailyTopicContext>;
+  private async upsertTopic(
+    input: Omit<DailyTopicContext, 'id'>,
+    options: { overwriteLocked: false }
+  ): Promise<DailyTopicContext | null>;
+  private async upsertTopic(
+    input: Omit<DailyTopicContext, 'id'>,
+    options: { overwriteLocked: boolean }
+  ): Promise<DailyTopicContext | null> {
     const updatedAt = new Date();
     const [topic] = await db
       .insert(dailyTopics)
@@ -689,10 +761,17 @@ export class DailyTopicService {
           isLocked: input.isLocked,
           updatedAt,
         },
+        ...(options.overwriteLocked
+          ? {}
+          : { setWhere: eq(dailyTopics.isLocked, false) }),
       })
       .returning();
 
     if (!topic) {
+      if (!options.overwriteLocked) {
+        // Conflict with a locked topic: leave it untouched.
+        return null;
+      }
       throw new Error(
         `Failed to store daily topic for ${input.date.toISOString()}`
       );

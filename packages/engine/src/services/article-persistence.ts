@@ -132,6 +132,8 @@ export async function persistArticle(
   const articleId = article.id || (await generateSnowflakeId());
   const now = new Date();
 
+  // Only the insert itself is guarded: once it commits, later scheduling
+  // problems must not be reported as a persistence failure.
   try {
     // Insert article into posts table
     await db.insert(posts).values({
@@ -153,89 +155,6 @@ export async function persistArticle(
       createdAt: now,
       relatedQuestion: article.relatedQuestion,
     });
-
-    logger.debug(
-      'Article persisted successfully',
-      {
-        articleId,
-        authorOrgId: article.authorOrgId,
-        title: article.title.slice(0, 50),
-        gameId: article.gameId,
-      },
-      'ArticlePersistence'
-    );
-
-    // Fire-and-forget image generation
-    if (generateImage && !article.imageUrl) {
-      runInBackground(
-        generateArticleImageWithRetry({
-          title: article.title,
-          summary: article.summary,
-          category: article.category || 'news',
-        })
-          .then(async (imageUrl) => {
-            if (imageUrl) {
-              try {
-                await db
-                  .update(posts)
-                  .set({ imageUrl })
-                  .where(eq(posts.id, articleId));
-                logger.debug(
-                  'Article image updated',
-                  { articleId, imageUrl: imageUrl.slice(0, 50) },
-                  'ArticlePersistence'
-                );
-              } catch (updateError) {
-                logger.warn(
-                  'Failed to update article with image URL',
-                  {
-                    articleId,
-                    error: formatError(updateError),
-                  },
-                  'ArticlePersistence'
-                );
-              }
-            }
-          })
-          .catch((err) => {
-            logger.debug(
-              'Image generation failed (non-blocking)',
-              {
-                articleId,
-                error: formatError(err),
-              },
-              'ArticlePersistence'
-            );
-          })
-      );
-    }
-
-    // Fire-and-forget tag generation and storage
-    runInBackground(
-      generateTagsFromPost(article.summary)
-        .then(async (generatedTags) => {
-          if (generatedTags.length > 0) {
-            await storeTagsForPost(articleId, generatedTags);
-            logger.debug(
-              'Article tags stored',
-              { articleId, tagCount: generatedTags.length },
-              'ArticlePersistence'
-            );
-          }
-        })
-        .catch((tagError) => {
-          logger.warn(
-            'Failed to generate/store article tags (non-blocking)',
-            {
-              articleId,
-              error: formatError(tagError),
-            },
-            'ArticlePersistence'
-          );
-        })
-    );
-
-    return { success: true, articleId };
   } catch (error) {
     const errorMessage = formatError(error);
     logger.error(
@@ -249,4 +168,87 @@ export async function persistArticle(
     );
     return { success: false, error: errorMessage };
   }
+
+  logger.debug(
+    'Article persisted successfully',
+    {
+      articleId,
+      authorOrgId: article.authorOrgId,
+      title: article.title.slice(0, 50),
+      gameId: article.gameId,
+    },
+    'ArticlePersistence'
+  );
+
+  // Fire-and-forget image generation
+  if (generateImage && !article.imageUrl) {
+    runInBackground(
+      generateArticleImageWithRetry({
+        title: article.title,
+        summary: article.summary,
+        category: article.category || 'news',
+      })
+        .then(async (imageUrl) => {
+          if (imageUrl) {
+            try {
+              await db
+                .update(posts)
+                .set({ imageUrl })
+                .where(eq(posts.id, articleId));
+              logger.debug(
+                'Article image updated',
+                { articleId, imageUrl: imageUrl.slice(0, 50) },
+                'ArticlePersistence'
+              );
+            } catch (updateError) {
+              logger.warn(
+                'Failed to update article with image URL',
+                {
+                  articleId,
+                  error: formatError(updateError),
+                },
+                'ArticlePersistence'
+              );
+            }
+          }
+        })
+        .catch((err) => {
+          logger.debug(
+            'Image generation failed (non-blocking)',
+            {
+              articleId,
+              error: formatError(err),
+            },
+            'ArticlePersistence'
+          );
+        })
+    );
+  }
+
+  // Fire-and-forget tag generation and storage
+  runInBackground(
+    generateTagsFromPost(article.summary)
+      .then(async (generatedTags) => {
+        if (generatedTags.length > 0) {
+          await storeTagsForPost(articleId, generatedTags);
+          logger.debug(
+            'Article tags stored',
+            { articleId, tagCount: generatedTags.length },
+            'ArticlePersistence'
+          );
+        }
+      })
+      .catch((tagError) => {
+        logger.warn(
+          'Failed to generate/store article tags (non-blocking)',
+          {
+            articleId,
+            error: formatError(tagError),
+          },
+          'ArticlePersistence'
+        );
+      })
+  );
+
+  return { success: true, articleId };
 }

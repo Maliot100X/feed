@@ -11,7 +11,7 @@ import type { JsonValue } from '@feed/shared';
 import { logger } from '@feed/shared';
 import { FEE_CONFIG } from '../config/fees';
 import { broadcastToChannel } from './realtime-broadcaster';
-import { WalletService } from './wallet-service';
+import { createUserWalletAdapter } from './user-wallet-adapter';
 
 export type PriceUpdateSource =
   | 'user_trade'
@@ -66,28 +66,7 @@ export class PriceUpdateService {
 
     const perpService = new PerpMarketService({
       db: new PerpDbAdapter(),
-      wallet: {
-        debit: ({ userId, amount, reason, description, relatedId }) =>
-          WalletService.debit(
-            userId,
-            amount,
-            reason,
-            description ?? '',
-            relatedId
-          ),
-        credit: ({ userId, amount, reason, description, relatedId }) =>
-          WalletService.credit(
-            userId,
-            amount,
-            reason,
-            description ?? '',
-            relatedId
-          ),
-        recordPnL: async ({ userId, pnl, reason, relatedId }) => {
-          await WalletService.recordPnL(userId, pnl, reason, relatedId);
-        },
-        getBalance: (userId: string) => WalletService.getBalance(userId),
-      },
+      wallet: createUserWalletAdapter(),
       fees: {
         tradingFeeRate: FEE_CONFIG.TRADING_FEE_RATE,
         platformShare: FEE_CONFIG.PLATFORM_SHARE,
@@ -100,6 +79,7 @@ export class PriceUpdateService {
     const now = new Date();
 
     for (const update of updates) {
+      // Price sanity check — must be positive and finite (AMM handles bounds)
       if (!Number.isFinite(update.newPrice) || update.newPrice <= 0) {
         logger.warn(
           'Skipping invalid price update',
@@ -110,6 +90,7 @@ export class PriceUpdateService {
       }
 
       const orgId = update.organizationId;
+      const newPrice = update.newPrice;
 
       // Prefer OrganizationState as the source of truth for dynamic pricing.
       // The `Organization` table is not guaranteed to be seeded in all envs.
@@ -142,30 +123,21 @@ export class PriceUpdateService {
           organization?.initialPrice
         ) ?? 100;
 
-      // Price sanity check — must be positive and finite (AMM handles bounds)
-      const clampedNewPrice = update.newPrice;
-      if (!Number.isFinite(clampedNewPrice) || clampedNewPrice <= 0) {
-        logger.warn(
-          'Invalid price update value, skipping',
-          { orgId, newPrice: update.newPrice },
-          'PriceUpdateService'
-        );
-        continue;
-      }
-
-      const oldPriceCandidate =
-        organization?.currentPrice ??
+      // OrganizationState is the canonical dynamic price (see above); the
+      // Organization row is only a best-effort mirror.
+      const oldPrice = Number(
         state?.currentPrice ??
-        state?.basePrice ??
-        clampedNewPrice;
-      const oldPrice = Number(oldPriceCandidate ?? clampedNewPrice);
-      const change = clampedNewPrice - oldPrice;
+          organization?.currentPrice ??
+          state?.basePrice ??
+          newPrice
+      );
+      const change = newPrice - oldPrice;
       const changePercent = oldPrice === 0 ? 0 : (change / oldPrice) * 100;
 
       if (organization) {
         await db
           .update(organizations)
-          .set({ currentPrice: clampedNewPrice, updatedAt: now })
+          .set({ currentPrice: newPrice, updatedAt: now })
           .where(eq(organizations.id, organization.id));
       }
 
@@ -175,14 +147,14 @@ export class PriceUpdateService {
         .insert(organizationState)
         .values({
           id: orgId,
-          currentPrice: clampedNewPrice,
+          currentPrice: newPrice,
           basePrice: resolvedBasePrice,
           updatedAt: now,
         })
         .onConflictDoUpdate({
           target: organizationState.id,
           set: {
-            currentPrice: clampedNewPrice,
+            currentPrice: newPrice,
             basePrice: resolvedBasePrice,
             updatedAt: now,
           },
@@ -190,17 +162,17 @@ export class PriceUpdateService {
 
       await getDbInstance().recordPriceUpdate(
         orgId,
-        clampedNewPrice,
+        newPrice,
         change,
         changePercent
       );
 
-      priceMap.set(orgId, clampedNewPrice);
+      priceMap.set(orgId, newPrice);
 
       appliedUpdates.push({
         organizationId: orgId,
         oldPrice,
-        newPrice: clampedNewPrice,
+        newPrice,
         change,
         changePercent,
         source: update.source,
@@ -344,8 +316,13 @@ export class PriceUpdateService {
             updates: perpUpdates,
           });
         }
-      } catch {
-        // Broadcast is optional - engine can work without it
+      } catch (error) {
+        // Broadcast is optional - prices are already persisted
+        logger.warn(
+          'Failed to broadcast price updates',
+          { error: error instanceof Error ? error.message : String(error) },
+          'PriceUpdateService'
+        );
       }
 
       logger.info(

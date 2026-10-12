@@ -31,6 +31,17 @@ function calculateDynamicThresholds(
   participantCount: number,
   windowDays = 7
 ): KickThresholds {
+  if (
+    !Number.isSafeInteger(totalMessages) ||
+    totalMessages < 0 ||
+    !Number.isSafeInteger(participantCount) ||
+    participantCount < 0
+  ) {
+    throw new Error('Group activity counts must be non-negative integers');
+  }
+  if (!Number.isFinite(windowDays) || windowDays <= 0) {
+    throw new Error('windowDays must be a positive finite number');
+  }
   // Fair share = total messages / participants (what each would have if equal)
   const fairShare = participantCount > 0 ? totalMessages / participantCount : 0;
 
@@ -39,8 +50,8 @@ function calculateDynamicThresholds(
   const idealMin = Math.max(1, Math.floor(fairShare * 0.5));
   const idealMax = Math.max(5, Math.ceil(fairShare * 1.5));
 
-  // Spam threshold: more than 3x fair share OR more than 20 messages/day
-  // The higher of these two catches both relative and absolute spammers
+  // Spam threshold: more than 3x fair share OR more than 20 messages/day.
+  // Uses the LOWER of the two so exceeding either limit flags spam.
   const maxMessagesPerDay = 20;
   const absoluteSpamThreshold = maxMessagesPerDay * windowDays;
   const relativeSpamThreshold = Math.max(10, Math.ceil(fairShare * 3));

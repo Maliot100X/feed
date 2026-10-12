@@ -14,38 +14,29 @@
  *   4. Client POSTs to /api/auth/session to set httpOnly cookie
  */
 
-import { createHmac } from 'node:crypto';
 import { withErrorHandling } from '@feed/api';
 import { db, eq, users } from '@feed/db';
 import { generateSnowflakeId } from '@feed/shared';
 import { SignJWT } from 'jose';
 import { NextRequest, NextResponse } from 'next/server';
+import { z } from 'zod';
 
 import {
   ensureStewardUser,
   getStewardJwtSecret,
 } from '@/lib/auth/steward-server';
+import { verifyTelegramInitData } from '@/lib/auth/telegram-init-data';
 
-function verifyTelegramInitData(initData: string, botToken: string): boolean {
-  const params = new URLSearchParams(initData);
-  const hash = params.get('hash');
-  if (!hash) return false;
+/**
+ * Maximum age of signed launch data accepted for minting a session token.
+ * Launch data is re-issued every time the Mini App opens; stale data must
+ * not be replayable indefinitely.
+ */
+const MAX_INIT_DATA_AGE_SECONDS = 60 * 60;
 
-  params.delete('hash');
-
-  const dataCheckString = [...params.entries()]
-    .sort(([a], [b]) => a.localeCompare(b))
-    .map(([k, v]) => `${k}=${v}`)
-    .join('\n');
-
-  const secretKey = createHmac('sha256', 'WebAppData')
-    .update(botToken)
-    .digest();
-  const computed = createHmac('sha256', secretKey)
-    .update(dataCheckString)
-    .digest('hex');
-  return computed === hash;
-}
+const RequestSchema = z.object({
+  initData: z.string().min(1),
+});
 
 async function mintToken(
   stewardUserId: string,
@@ -68,9 +59,9 @@ export const POST = withErrorHandling(async (req: NextRequest) => {
     );
   }
 
-  let body: { initData?: string };
+  let body: unknown;
   try {
-    body = (await req.json()) as typeof body;
+    body = await req.json();
   } catch {
     return NextResponse.json(
       { ok: false, error: 'Invalid request body' },
@@ -78,41 +69,25 @@ export const POST = withErrorHandling(async (req: NextRequest) => {
     );
   }
 
-  const { initData } = body;
-  if (!initData) {
+  const parsed = RequestSchema.safeParse(body);
+  if (!parsed.success) {
     return NextResponse.json(
       { ok: false, error: 'initData is required' },
       { status: 400 }
     );
   }
 
-  if (!verifyTelegramInitData(initData, BOT_TOKEN)) {
+  const verification = verifyTelegramInitData(parsed.data.initData, BOT_TOKEN, {
+    maxAgeSeconds: MAX_INIT_DATA_AGE_SECONDS,
+  });
+  if (!verification.valid) {
     return NextResponse.json(
-      { ok: false, error: 'Invalid Telegram initData signature' },
-      { status: 401 }
+      { ok: false, error: 'Invalid Telegram initData' },
+      { status: 401, headers: { 'Cache-Control': 'no-store' } }
     );
   }
 
-  // Parse Telegram user from initData
-  const params = new URLSearchParams(initData);
-  const userParam = params.get('user');
-  if (!userParam) {
-    return NextResponse.json(
-      { ok: false, error: 'No user data in initData' },
-      { status: 400 }
-    );
-  }
-
-  let telegramUser: { id: number; username?: string; first_name?: string };
-  try {
-    telegramUser = JSON.parse(userParam) as typeof telegramUser;
-  } catch {
-    return NextResponse.json(
-      { ok: false, error: 'Failed to parse user data' },
-      { status: 400 }
-    );
-  }
-
+  const telegramUser = verification.data.user;
   const telegramId = String(telegramUser.id);
 
   // Look up Feed user by Telegram ID
@@ -154,5 +129,8 @@ export const POST = withErrorHandling(async (req: NextRequest) => {
   }
 
   const token = await mintToken(stewardUserId, telegramId);
-  return NextResponse.json({ ok: true, token });
+  return NextResponse.json(
+    { ok: true, token },
+    { headers: { 'Cache-Control': 'no-store' } }
+  );
 });

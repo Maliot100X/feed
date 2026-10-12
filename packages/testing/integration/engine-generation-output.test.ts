@@ -34,12 +34,7 @@ import {
 } from 'bun:test';
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
-import {
-  GameGenerator,
-  type GameResult,
-  GameSimulator,
-  type GeneratedGame,
-} from '@feed/engine';
+import { GameGenerator, type GeneratedGame } from '@feed/engine';
 import { logger } from '@feed/shared';
 import { resolveLiveLlmTestConfig } from './helpers/live-runtime';
 
@@ -336,7 +331,6 @@ function validateEvent(event: {
 
 describe('Engine Generation Output Tests', () => {
   let game: GeneratedGame | null = null;
-  let simulatorResult: GameResult | null = null;
 
   function requireGeneratedGame(): GeneratedGame {
     if (!game) {
@@ -377,81 +371,6 @@ describe('Engine Generation Output Tests', () => {
       undefined,
       'EngineTest'
     );
-  });
-
-  describe('GameSimulator (No LLM)', () => {
-    test('runs complete simulation without LLM', async () => {
-      testResults.testsRun++;
-
-      const simulator = new GameSimulator({
-        outcome: true,
-        numAgents: 10,
-        duration: 30,
-        seed: 12345, // Fixed seed for reproducibility
-      });
-
-      simulatorResult = await simulator.runCompleteGame();
-
-      expect(simulatorResult).toBeDefined();
-      expect(simulatorResult.id).toBeDefined();
-      expect(simulatorResult.outcome).toBe(true);
-      expect(simulatorResult.agents.length).toBe(10);
-      expect(simulatorResult.events.length).toBeGreaterThan(0);
-
-      // Write output
-      writeOutput('simulator-result', {
-        id: simulatorResult.id,
-        question: simulatorResult.question,
-        outcome: simulatorResult.outcome,
-        duration: simulatorResult.duration,
-        totalBets: simulatorResult.totalBets,
-        agentCount: simulatorResult.agents.length,
-        eventCount: simulatorResult.events.length,
-        winners: simulatorResult.winners,
-        losers: simulatorResult.losers,
-        market: simulatorResult.market,
-        agents: simulatorResult.agents,
-        reputationChanges: simulatorResult.reputationChanges,
-      });
-
-      testResults.testsPassed++;
-    });
-
-    test('simulator agents have valid data', async () => {
-      testResults.testsRun++;
-
-      expect(simulatorResult).toBeDefined();
-
-      const agentValidation = {
-        totalAgents: simulatorResult!.agents.length,
-        validAgents: 0,
-        invalidAgents: 0,
-        issues: [] as { agentId: string; issues: string[] }[],
-      };
-
-      for (const agent of simulatorResult!.agents) {
-        const issues: string[] = [];
-
-        if (!agent.id) issues.push('Missing id');
-        if (!agent.name) issues.push('Missing name');
-        if (typeof agent.balance !== 'number') issues.push('Invalid balance');
-        if (typeof agent.isInsider !== 'boolean')
-          issues.push('Invalid isInsider');
-        if (!agent.strategy) issues.push('Missing strategy');
-
-        if (issues.length > 0) {
-          agentValidation.invalidAgents++;
-          agentValidation.issues.push({ agentId: agent.id, issues });
-        } else {
-          agentValidation.validAgents++;
-        }
-      }
-
-      writeOutput('simulator-agents-validation', agentValidation);
-
-      expect(agentValidation.invalidAgents).toBe(0);
-      testResults.testsPassed++;
-    });
   });
 
   describe('GameGenerator (With LLM)', () => {

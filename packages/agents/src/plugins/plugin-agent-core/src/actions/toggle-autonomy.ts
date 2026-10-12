@@ -2,7 +2,8 @@
  * Toggle Autonomy Action
  *
  * Allows the agent to enable/disable autonomous features via chat.
- * Uses agentService.updateAgent() for proper logging and cache management.
+ * Upserts the agent's own config row and writes an audit log entry in a
+ * single transaction.
  */
 
 import type {
@@ -146,6 +147,14 @@ export const toggleAutonomyAction: Action = {
 
     const { feature, enabled } = actionParams;
 
+    if (typeof enabled !== 'boolean') {
+      return {
+        success: false,
+        text: 'Invalid "enabled" parameter: must be true or false.',
+        error: 'Invalid enabled parameter',
+      };
+    }
+
     // Validate feature
     const validFeatures: AutonomyFeature[] = [
       'trading',
@@ -195,28 +204,32 @@ export const toggleAutonomyAction: Action = {
 
       const now = new Date();
 
-      // Atomic upsert config row with autonomy fields
-      await db
-        .insert(userAgentConfigs)
-        .values({
-          id: await generateSnowflakeId(),
-          userId: agentUserId,
-          ...updates,
-          updatedAt: now,
-        })
-        .onConflictDoUpdate({
-          target: userAgentConfigs.userId,
-          set: { ...updates, updatedAt: now },
-        });
+      // Config upsert and audit log commit together so the log never
+      // describes a change that did not persist (or vice versa).
+      const configId = await generateSnowflakeId();
+      const logId = await generateSnowflakeId();
+      await db.transaction(async (tx) => {
+        await tx
+          .insert(userAgentConfigs)
+          .values({
+            id: configId,
+            userId: agentUserId,
+            ...updates,
+            updatedAt: now,
+          })
+          .onConflictDoUpdate({
+            target: userAgentConfigs.userId,
+            set: { ...updates, updatedAt: now },
+          });
 
-      // Log the change for observability
-      await db.insert(agentLogs).values({
-        id: await generateSnowflakeId(),
-        agentUserId,
-        type: 'system',
-        level: 'info',
-        message: 'Autonomy configuration updated',
-        metadata: { feature, enabled },
+        await tx.insert(agentLogs).values({
+          id: logId,
+          agentUserId,
+          type: 'system',
+          level: 'info',
+          message: 'Autonomy configuration updated',
+          metadata: { feature, enabled },
+        });
       });
 
       const featureDisplay =

@@ -66,6 +66,12 @@ import { getPostsByTag, StaticDataRegistry } from '@feed/engine';
 import { toISO } from '@feed/shared';
 import type { NextRequest } from 'next/server';
 import { NextResponse } from 'next/server';
+import { z } from 'zod';
+
+const TagPostsQuerySchema = z.object({
+  limit: z.coerce.number().int().min(1).max(100).default(20),
+  offset: z.coerce.number().int().min(0).max(10_000).default(0),
+});
 
 export const GET = withErrorHandling(async function GET(
   request: NextRequest,
@@ -80,8 +86,21 @@ export const GET = withErrorHandling(async function GET(
 
   const { tag } = await params;
   const url = new URL(request.url);
-  const limit = Number.parseInt(url.searchParams.get('limit') || '20');
-  const offset = Number.parseInt(url.searchParams.get('offset') || '0');
+  const query = TagPostsQuerySchema.safeParse({
+    limit: url.searchParams.get('limit') ?? undefined,
+    offset: url.searchParams.get('offset') ?? undefined,
+  });
+  if (!query.success) {
+    return NextResponse.json(
+      {
+        success: false,
+        error:
+          'limit must be an integer 1-100 and offset a non-negative integer',
+      },
+      { status: 400 }
+    );
+  }
+  const { limit, offset } = query.data;
 
   if (!tag) {
     return NextResponse.json(

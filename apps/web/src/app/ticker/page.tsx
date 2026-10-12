@@ -1,4 +1,5 @@
 import type { Metadata } from 'next';
+import { parseTickerParams } from './params';
 import { TickerClient } from './TickerClient';
 
 export const metadata: Metadata = {
@@ -12,10 +13,15 @@ export const metadata: Metadata = {
  * Ticker embed page – minimal layout (no nav/sidebar), iframe-friendly.
  * Query params: streams, theme, speed, height (see TickerClient).
  */
-export default function TickerPage() {
+export default async function TickerPage({
+  searchParams,
+}: {
+  searchParams: Promise<Record<string, string | string[] | undefined>>;
+}) {
+  const params = parseTickerParams(await searchParams);
   return (
-    <div className="min-h-dvh w-full md:min-h-screen">
-      <TickerClient />
+    <div className="w-full">
+      <TickerClient {...params} />
     </div>
   );
 }

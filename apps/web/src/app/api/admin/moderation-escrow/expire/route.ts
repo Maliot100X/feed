@@ -2,7 +2,7 @@
  * Admin Moderation Escrow Expire API
  *
  * @route POST /api/admin/moderation-escrow/expire - Expire old payments
- * @access Admin
+ * @access Admin with manage_escrow permission (SUPER_ADMIN by default)
  *
  * @description
  * Marks expired escrow payments as expired. Can be called by cron job or
@@ -42,14 +42,14 @@
  * ```
  */
 
-import { requireAdmin, withErrorHandling } from '@feed/api';
+import { requirePermission, withErrorHandling } from '@feed/api';
 import { db } from '@feed/db';
 import { logger } from '@feed/shared';
 import type { NextRequest } from 'next/server';
 import { NextResponse } from 'next/server';
 
 export const POST = withErrorHandling(async function POST(req: NextRequest) {
-  await requireAdmin(req);
+  await requirePermission(req, 'manage_escrow');
 
   const now = new Date();
 

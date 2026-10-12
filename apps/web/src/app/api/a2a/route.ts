@@ -88,6 +88,7 @@ import { withErrorHandling } from '@feed/api';
 import { logger } from '@feed/shared';
 import type { NextRequest } from 'next/server';
 import { NextResponse } from 'next/server';
+import { parseJsonRpcEnvelope } from '@/lib/a2a/jsonrpc-guard';
 import { checkApiKey } from '@/lib/api/check-api-key';
 
 // Initialize A2A protocol components with Redis-backed persistence
@@ -137,6 +138,11 @@ export const POST = withErrorHandling(async function POST(
       { status: 400 }
     );
   }
+
+  // Validate the envelope before reading from it: null, primitive or array
+  // bodies (and non-object params) get a JSON-RPC error instead of a 500.
+  const envelopeCheck = parseJsonRpcEnvelope(body);
+  if (envelopeCheck.errorResponse) return envelopeCheck.errorResponse;
 
   logger.info('Official A2A request', {
     method: body.method,

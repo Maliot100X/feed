@@ -12,7 +12,17 @@ import type {
   Memory,
   State,
 } from '@elizaos/core';
-import { comments, db, desc, eq, inArray, posts, users } from '@feed/db';
+import {
+  and,
+  comments,
+  db,
+  desc,
+  eq,
+  inArray,
+  isNull,
+  posts,
+  users,
+} from '@feed/db';
 import { getTimeAgo } from '@feed/shared';
 import { logger } from '../../../../shared/logger';
 
@@ -44,10 +54,12 @@ async function buildThread(
   maxDepth = 5
 ): Promise<ThreadMessage[]> {
   const thread: ThreadMessage[] = [];
+  const visited = new Set<string>();
   let currentId: string | null = commentId;
   let depth = 0;
 
-  while (currentId && depth < maxDepth) {
+  while (currentId && depth < maxDepth && !visited.has(currentId)) {
+    visited.add(currentId);
     const [comment] = await db
       .select({
         id: comments.id,
@@ -59,7 +71,7 @@ async function buildThread(
       })
       .from(comments)
       .leftJoin(users, eq(comments.authorId, users.id))
-      .where(eq(comments.id, currentId))
+      .where(and(eq(comments.id, currentId), isNull(comments.deletedAt)))
       .limit(1);
 
     if (!comment) break;
@@ -136,13 +148,33 @@ export const checkRecentCommentsAction: Action = {
     _callback?: HandlerCallback
   ): Promise<ActionResult> => {
     const actionParams = state?.data?.actionParams as
-      | { userId?: string; limit?: number }
+      | { userId?: unknown; limit?: unknown }
       | undefined;
 
     // Use provided userId or default to agent's own ID
-    const targetUserId = actionParams?.userId || runtime.agentId;
+    const rawUserId = actionParams?.userId;
+    if (rawUserId !== undefined && typeof rawUserId !== 'string') {
+      return {
+        success: false,
+        text: 'userId must be a string user ID.',
+        error: 'Invalid userId',
+      };
+    }
+    const targetUserId = rawUserId?.trim() || runtime.agentId;
     const isSelf = targetUserId === runtime.agentId;
-    const limit = Math.min(Math.max(actionParams?.limit ?? 5, 1), 10);
+    const rawLimit = actionParams?.limit ?? 5;
+    const parsedLimit =
+      typeof rawLimit === 'string' && /^\d+$/.test(rawLimit.trim())
+        ? Number(rawLimit.trim())
+        : rawLimit;
+    if (typeof parsedLimit !== 'number' || !Number.isSafeInteger(parsedLimit)) {
+      return {
+        success: false,
+        text: 'limit must be an integer between 1 and 10.',
+        error: 'Invalid limit',
+      };
+    }
+    const limit = Math.min(Math.max(parsedLimit, 1), 10);
 
     try {
       // Get user info if checking someone else
@@ -177,7 +209,9 @@ export const checkRecentCommentsAction: Action = {
           parentCommentId: comments.parentCommentId,
         })
         .from(comments)
-        .where(eq(comments.authorId, targetUserId))
+        .where(
+          and(eq(comments.authorId, targetUserId), isNull(comments.deletedAt))
+        )
         .orderBy(desc(comments.createdAt))
         .limit(limit);
 
@@ -204,7 +238,7 @@ export const checkRecentCommentsAction: Action = {
         })
         .from(posts)
         .leftJoin(users, eq(posts.authorId, users.id))
-        .where(inArray(posts.id, postIds));
+        .where(and(inArray(posts.id, postIds), isNull(posts.deletedAt)));
 
       const postMap = new Map(postsData.map((p) => [p.id, p]));
 

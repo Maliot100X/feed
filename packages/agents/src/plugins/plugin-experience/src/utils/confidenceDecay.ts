@@ -17,13 +17,29 @@ export class ConfidenceDecayManager {
 
   constructor(config: Partial<DecayConfig> = {}) {
     this.config = { ...DEFAULT_DECAY_CONFIG, ...config };
+    if (!Number.isFinite(this.config.halfLife) || this.config.halfLife <= 0) {
+      throw new Error('DecayConfig.halfLife must be a finite positive number');
+    }
+    if (
+      !Number.isFinite(this.config.decayStartDelay) ||
+      this.config.decayStartDelay < 0
+    ) {
+      throw new Error(
+        'DecayConfig.decayStartDelay must be a finite non-negative number'
+      );
+    }
   }
 
   /**
-   * Calculate the decayed confidence for an experience
+   * Calculate the decayed confidence for an experience.
+   *
+   * Decay never increases confidence: the floor is capped at the experience's
+   * original confidence.
    */
-  getDecayedConfidence(experience: Experience): number {
-    const now = Date.now();
+  getDecayedConfidence(
+    experience: Experience,
+    now: number = Date.now()
+  ): number {
     const age = now - experience.createdAt;
     const specificConfig = this.getDomainSpecificDecay(experience);
 
@@ -37,34 +53,10 @@ export class ConfidenceDecayManager {
     const halfLives = decayTime / specificConfig.halfLife;
     const decayFactor = Math.pow(0.5, halfLives);
 
-    // Apply decay but respect minimum
+    // Apply decay but respect minimum (which can never exceed the original)
     const decayedConfidence = experience.confidence * decayFactor;
-    return Math.max(specificConfig.minConfidence, decayedConfidence);
-  }
-
-  /**
-   * Get experiences that need reinforcement (low confidence due to decay)
-   */
-  getExperiencesNeedingReinforcement(
-    experiences: Experience[],
-    threshold: number = 0.3
-  ): Experience[] {
-    return experiences.filter((exp) => {
-      const decayed = this.getDecayedConfidence(exp);
-      return decayed < threshold && decayed > this.config.minConfidence;
-    });
-  }
-
-  /**
-   * Calculate reinforcement boost when an experience is validated
-   */
-  calculateReinforcementBoost(
-    experience: Experience,
-    validationStrength: number = 1.0
-  ): number {
-    const currentConfidence = this.getDecayedConfidence(experience);
-    const boost = (1 - currentConfidence) * validationStrength * 0.5;
-    return Math.min(1, currentConfidence + boost);
+    const floor = Math.min(specificConfig.minConfidence, experience.confidence);
+    return Math.max(floor, decayedConfidence);
   }
 
   /**
@@ -100,41 +92,5 @@ export class ConfidenceDecayManager {
     }
 
     return config;
-  }
-
-  /**
-   * Get confidence trend for an experience over time
-   */
-  getConfidenceTrend(
-    experience: Experience,
-    points: number = 10
-  ): Array<{ timestamp: number; confidence: number }> {
-    const trend: Array<{ timestamp: number; confidence: number }> = [];
-    const now = Date.now();
-    const totalTime = now - experience.createdAt;
-    const interval = totalTime / (points - 1);
-    const specificConfig = this.getDomainSpecificDecay(experience);
-
-    for (let i = 0; i < points; i++) {
-      const timestamp = experience.createdAt + interval * i;
-      const age = timestamp - experience.createdAt;
-
-      let confidence: number;
-      if (age < specificConfig.decayStartDelay) {
-        confidence = experience.confidence;
-      } else {
-        const decayTime = age - specificConfig.decayStartDelay;
-        const halfLives = decayTime / specificConfig.halfLife;
-        const decayFactor = Math.pow(0.5, halfLives);
-        confidence = Math.max(
-          specificConfig.minConfidence,
-          experience.confidence * decayFactor
-        );
-      }
-
-      trend.push({ timestamp, confidence });
-    }
-
-    return trend;
   }
 }

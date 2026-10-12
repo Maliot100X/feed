@@ -269,9 +269,11 @@ export class PredictionDbAdapter implements PredictionDbPort {
         liquidity:
           updates.liquidity != null ? String(updates.liquidity) : undefined,
         resolved: updates.resolved ?? undefined,
-        resolution: updates.resolution ?? undefined,
-        resolutionProofUrl: updates.resolutionProofUrl ?? undefined,
-        resolutionDescription: updates.resolutionDescription ?? undefined,
+        // Nullable columns: undefined leaves the column unchanged, an explicit
+        // null clears it.
+        resolution: updates.resolution,
+        resolutionProofUrl: updates.resolutionProofUrl,
+        resolutionDescription: updates.resolutionDescription,
         updatedAt: new Date(),
       })
       .where(eq(markets.id, marketId))

@@ -8,17 +8,11 @@
 import {
   db,
   eq,
-  type User,
   type UserAgentConfig,
   userAgentConfigs,
   users,
 } from '@feed/db';
 import { generateSnowflakeId } from './snowflake';
-
-/** User with agent configuration attached */
-export type UserWithAgentConfig = User & {
-  agentConfig: UserAgentConfig | null;
-};
 
 /**
  * Get agent config for a user
@@ -69,75 +63,33 @@ export async function getAgentConfig(
 }
 
 /**
- * Get user with their agent config
- */
-export async function getUserWithAgentConfig(
-  userId: string
-): Promise<UserWithAgentConfig | null> {
-  const userResult = await db
-    .select()
-    .from(users)
-    .where(eq(users.id, userId))
-    .limit(1);
-
-  const user = userResult[0];
-  if (!user) return null;
-
-  const config = await getAgentConfig(userId);
-  return { ...user, agentConfig: config };
-}
-
-/**
- * Get multiple users with their agent configs
- */
-export async function getUsersWithAgentConfigs(
-  userIds: string[]
-): Promise<UserWithAgentConfig[]> {
-  if (userIds.length === 0) return [];
-
-  const results = await Promise.all(
-    userIds.map((id) => getUserWithAgentConfig(id))
-  );
-
-  return results.filter((r): r is UserWithAgentConfig => r !== null);
-}
-
-/**
- * Create or update agent config
+ * Create or update agent config in one statement (insert-on-conflict-update),
+ * so concurrent callers cannot race between a read and an insert.
  */
 export async function upsertAgentConfig(
   userId: string,
   config: Partial<Omit<UserAgentConfig, 'id' | 'userId' | 'createdAt'>>
 ): Promise<UserAgentConfig> {
-  const existing = await getAgentConfig(userId);
-
-  if (existing) {
-    const result = await db
-      .update(userAgentConfigs)
-      .set({
-        ...config,
-        updatedAt: new Date(),
-      })
-      .where(eq(userAgentConfigs.userId, userId))
-      .returning();
-    return result[0]!;
-  }
-
-  // Generate a new ID using snowflake for consistency
-  const id = await generateSnowflakeId();
   const now = new Date();
-  const result = await db
+  const [result] = await db
     .insert(userAgentConfigs)
     .values({
-      id,
+      id: await generateSnowflakeId(),
       userId,
       ...config,
       createdAt: now,
       updatedAt: now,
     })
+    .onConflictDoUpdate({
+      target: userAgentConfigs.userId,
+      set: { ...config, updatedAt: now },
+    })
     .returning();
 
-  return result[0]!;
+  if (!result) {
+    throw new Error(`Failed to upsert agent config for user ${userId}`);
+  }
+  return result;
 }
 
 // Legacy config helpers (getSystemPrompt, getStyle, getMessageExamples, etc.) removed.
@@ -242,7 +194,7 @@ export function getModelTier(config: UserAgentConfig | null): string {
 }
 
 export function getAlignment(
-  config: UserAgentConfig | null
+  config: Pick<UserAgentConfig, 'alignment'> | null
 ): 'good' | 'neutral' | 'evil' {
   const val = config?.alignment;
   if (val === 'good' || val === 'evil') return val;
@@ -250,7 +202,7 @@ export function getAlignment(
 }
 
 export function getTeam(
-  config: UserAgentConfig | null
+  config: Pick<UserAgentConfig, 'team'> | null
 ): 'red' | 'blue' | 'gray' {
   const val = config?.team;
   if (val === 'red' || val === 'blue') return val;

@@ -133,21 +133,16 @@ export const GET = withErrorHandling(async (request: NextRequest) => {
       pid: process.pid,
     },
 
-    // Health indicators
-    health: {
-      database:
-        slowQueryRate < 5
-          ? 'healthy'
-          : slowQueryRate < 15
-            ? 'warning'
-            : 'critical',
-      memory: !memUsage
-        ? 'unavailable'
-        : memUsage.heapUsed / memUsage.heapTotal < 0.9
-          ? 'healthy'
-          : 'warning',
-      overall: determineOverallHealth(slowQueryRate, memUsage),
-    },
+    // Health indicators. One threshold set is shared by component and
+    // overall status. Database health is 'unknown' when no queries were
+    // observed in the window (zero queries is not evidence of health).
+    // Memory health is the V8 heap used/total ratio of this process, not
+    // host memory pressure, and 'unknown' on Workers (no process metrics).
+    health: (() => {
+      const database = classifySlowQueryRate(totalQueries, slowQueryRate);
+      const memory = classifyHeapRatio(memUsage);
+      return { database, memory, overall: worstHealth(database, memory) };
+    })(),
   });
 });
 
@@ -169,24 +164,37 @@ function formatUptime(seconds: number): string {
   return parts.join(' ');
 }
 
-/**
- * Determine overall system health
- */
-function determineOverallHealth(
-  slowQueryRate: number,
-  memUsage: NodeJS.MemoryUsage | null
-): 'healthy' | 'warning' | 'critical' {
-  const memoryUsagePercent = memUsage
-    ? (memUsage.heapUsed / memUsage.heapTotal) * 100
-    : 0;
+type Health = 'healthy' | 'warning' | 'critical' | 'unknown';
 
-  if (slowQueryRate > 15 || memoryUsagePercent > 95) {
-    return 'critical';
-  }
+const SLOW_QUERY_RATE_WARNING = 5;
+const SLOW_QUERY_RATE_CRITICAL = 15;
+const HEAP_RATIO_WARNING = 0.85;
+const HEAP_RATIO_CRITICAL = 0.95;
 
-  if (slowQueryRate > 5 || memoryUsagePercent > 85) {
-    return 'warning';
-  }
-
+function classifySlowQueryRate(totalQueries: number, rate: number): Health {
+  if (totalQueries === 0) return 'unknown';
+  if (rate > SLOW_QUERY_RATE_CRITICAL) return 'critical';
+  if (rate > SLOW_QUERY_RATE_WARNING) return 'warning';
   return 'healthy';
+}
+
+function classifyHeapRatio(memUsage: NodeJS.MemoryUsage | null): Health {
+  if (!memUsage || memUsage.heapTotal <= 0) return 'unknown';
+  const ratio = memUsage.heapUsed / memUsage.heapTotal;
+  if (ratio > HEAP_RATIO_CRITICAL) return 'critical';
+  if (ratio > HEAP_RATIO_WARNING) return 'warning';
+  return 'healthy';
+}
+
+const HEALTH_SEVERITY: Record<Health, number> = {
+  healthy: 0,
+  unknown: 1,
+  warning: 2,
+  critical: 3,
+};
+
+function worstHealth(...statuses: Health[]): Health {
+  return statuses.reduce((worst, status) =>
+    HEALTH_SEVERITY[status] > HEALTH_SEVERITY[worst] ? status : worst
+  );
 }

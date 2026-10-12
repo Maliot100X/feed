@@ -133,6 +133,11 @@ import {
 import { asSystem, asUser } from '@feed/db';
 import { generateSnowflakeId, logger } from '@feed/shared';
 import type { NextRequest } from 'next/server';
+import { z } from 'zod';
+
+const AddParticipantsSchema = z.object({
+  userIds: z.array(z.string().min(1).max(128)).min(1).max(50),
+});
 
 async function loadChatWithParticipants(
   user: Awaited<ReturnType<typeof authenticate>>,
@@ -183,21 +188,20 @@ export const POST = withErrorHandling(
     }
 
     // Validate request body
-    const body = await request.json();
-    const { userIds } = body;
-
-    if (!userIds || !Array.isArray(userIds) || userIds.length === 0) {
+    const parsedBody = AddParticipantsSchema.safeParse(await request.json());
+    if (!parsedBody.success) {
       throw new BusinessLogicError(
-        'At least one user ID is required',
+        'userIds must be a non-empty array of user IDs (max 50)',
         'USER_IDS_REQUIRED'
       );
     }
+    const userIds = [...new Set(parsedBody.data.userIds)];
 
-    // Check if chat exists and user is a participant
+    // Check if chat exists and user is an active participant
     const chat = await loadChatWithParticipants(user, chatId);
 
     const isParticipant = (chat.participants || []).some(
-      (p) => p.userId === user.userId
+      (p) => p.userId === user.userId && p.isActive
     );
 
     if (!isParticipant) {
@@ -281,14 +285,6 @@ export const POST = withErrorHandling(
       });
 
       // Send notifications to invited users
-      const inviterUser = await db.user.findUnique({
-        where: { id: user.userId },
-        select: {
-          displayName: true,
-          username: true,
-        },
-      });
-
       await Promise.all(
         newUsers.map((newUser) =>
           notifyGroupChatInvite(
@@ -310,12 +306,7 @@ export const POST = withErrorHandling(
         'POST /api/chats/[id]/participants'
       );
 
-      return {
-        addedUsers: newUsers,
-        inviterName:
-          inviterUser?.displayName || inviterUser?.username || 'Someone',
-        chatName: updatedChat?.name || 'Group Chat',
-      };
+      return { addedUsers: newUsers };
     });
 
     return successResponse({
@@ -352,7 +343,7 @@ export const GET = withErrorHandling(
     // Get chat participants
     const chat = await loadChatWithParticipants(user, chatId);
     const isParticipant = (chat.participants || []).some(
-      (p) => p.userId === user.userId
+      (p) => p.userId === user.userId && p.isActive
     );
 
     if (!isParticipant) {

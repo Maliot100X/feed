@@ -76,13 +76,11 @@ export {
   formatError,
   formatErrorWithStack,
   handleNonCritical,
-  handleNonCriticalWithDefault,
   hasErrorCode,
   isTransientError,
   logAndRethrow,
   logError,
   logWarning,
-  safeExecute,
   withRetry,
 } from './error-utils';
 // Feed diversity utilities (TikTok-inspired clustering prevention)

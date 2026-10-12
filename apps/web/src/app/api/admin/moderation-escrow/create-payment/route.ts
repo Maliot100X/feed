@@ -2,7 +2,7 @@
  * Admin Moderation Escrow Create Payment API
  *
  * @route POST /api/admin/moderation-escrow/create-payment - Create escrow payment
- * @access Admin
+ * @access Admin with manage_escrow permission (SUPER_ADMIN by default)
  *
  * @description
  * Creates a moderation escrow payment request using X402 escrow system.
@@ -69,7 +69,7 @@
  */
 
 import { createEscrowPayment, escrowErrorHttpStatus } from '@feed/a2a';
-import { requireAdmin, withErrorHandling } from '@feed/api';
+import { requirePermission, withErrorHandling } from '@feed/api';
 import { logger, toISO } from '@feed/shared';
 import type { NextRequest } from 'next/server';
 import { NextResponse } from 'next/server';
@@ -85,7 +85,7 @@ const CreateEscrowPaymentSchema = z.object({
 });
 
 export const POST = withErrorHandling(async function POST(req: NextRequest) {
-  const _adminUser = await requireAdmin(req);
+  const _adminUser = await requirePermission(req, 'manage_escrow');
   const adminId = _adminUser.userId;
 
   const body = await req.json();

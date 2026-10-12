@@ -4,24 +4,18 @@ export default async function PredictionMarketRedirectPage({
   params,
   searchParams,
 }: {
-  params: Promise<{ id?: string | string[] }>;
-  searchParams: Promise<Record<string, string | string[] | undefined>>;
+  params: Promise<{ id: string }>;
+  searchParams: Promise<{ side?: string | string[] }>;
 }) {
-  const resolvedParams = await params;
-  const resolvedSearchParams = await searchParams;
+  const [{ id }, { side }] = await Promise.all([params, searchParams]);
 
-  const idParam = resolvedParams.id;
-  const id = Array.isArray(idParam) ? idParam[0] : idParam;
-
-  const query = new URLSearchParams();
-  query.set('filter', 'prediction');
-  query.set('marketKind', 'prediction');
-  if (id) query.set('marketId', id);
-
-  const side = resolvedSearchParams.side;
-  const sideValue = Array.isArray(side) ? side[0] : side;
-  if (sideValue === 'yes' || sideValue === 'no') {
-    query.set('side', sideValue);
+  const query = new URLSearchParams({
+    filter: 'prediction',
+    marketKind: 'prediction',
+    marketId: id,
+  });
+  if (side === 'yes' || side === 'no') {
+    query.set('side', side);
   }
 
   redirect(`/markets?${query.toString()}`);

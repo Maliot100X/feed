@@ -100,7 +100,12 @@ export const GET = withErrorHandling(async (request: NextRequest) => {
   const endDate = parseDateParam(searchParams.get('endDate'));
   const includeTimeSeries = searchParams.get('includeTimeSeries') === 'true';
 
-  const dateRangeError = validateDateRange(startDate, endDate);
+  // A lone startDate is bounded by now, so inverted (future) or over-long
+  // ranges are rejected instead of slipping past validation.
+  const dateRangeError = validateDateRange(
+    startDate,
+    endDate ?? (startDate ? new Date() : null)
+  );
   if (dateRangeError) {
     return successResponse(
       { error: dateRangeError, maxDays: MAX_DATE_RANGE_DAYS },
@@ -510,7 +515,9 @@ export const GET = withErrorHandling(async (request: NextRequest) => {
       )
       SELECT 
         ds.day as date,
-        COUNT(DISTINCT da.user_id)::text as wau
+        -- Count only users that pass the eligibility join (counting
+        -- da.user_id kept actors/agents/banned users in the series)
+        COUNT(DISTINCT u.id)::text as wau
       FROM date_series ds
       LEFT JOIN daily_active da ON ds.day = da.day
       LEFT JOIN "User" u ON da.user_id = u.id AND u."isActor" = false AND u."isAgent" = false AND u."isBanned" = false

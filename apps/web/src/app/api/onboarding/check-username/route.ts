@@ -22,9 +22,10 @@
  * - Leading @ symbol removed
  *
  * **Suggestion Algorithm:**
- * 1. Check base username
- * 2. If taken, try username1, username2, ... username9999
- * 3. If all taken, append random 4-digit suffix
+ * 1. Check base username (after sanitization)
+ * 2. If taken, check a bounded batch of numbered candidates (<= 20 chars)
+ *    in one query and suggest the first free one
+ * 3. If all candidates are taken, no suggestion is returned
  *
  * @openapi
  * /api/onboarding/check-username:
@@ -101,10 +102,17 @@ import {
   successResponse,
   withErrorHandling,
 } from '@feed/api';
-import type { DrizzleClient } from '@feed/db';
-import { asPublic, asUser } from '@feed/db';
-import { logger, sanitizeOnboardingUsername } from '@feed/shared';
+import { db, inArray, users } from '@feed/db';
+import {
+  isValidOnboardingUsername,
+  sanitizeOnboardingUsername,
+} from '@feed/shared';
 import type { NextRequest } from 'next/server';
+
+const USERNAME_MAX_LENGTH = 20;
+/** Bound on raw input before sanitization (sanitization truncates to 20). */
+const RAW_USERNAME_MAX_LENGTH = 64;
+const SUGGESTION_CANDIDATES = 25;
 
 interface UsernameCheckResult {
   available: boolean;
@@ -112,67 +120,45 @@ interface UsernameCheckResult {
   suggestion?: string;
 }
 
-/**
- * Check if a username is available and suggest an alternative if not
- */
-async function checkUsernameAvailability(
-  baseUsername: string,
-  db: DrizzleClient
-): Promise<UsernameCheckResult> {
-  const cleanUsername = sanitizeOnboardingUsername(baseUsername);
-
-  // Check if base username is available
-  const existingUser = await db.user.findUnique({
-    where: { username: cleanUsername },
-    select: { id: true },
-  });
-
-  if (!existingUser) {
-    return {
-      available: true,
-      username: cleanUsername,
-    };
+function buildSuggestionCandidates(cleanUsername: string): string[] {
+  const candidates: string[] = [];
+  for (let n = 1; n <= SUGGESTION_CANDIDATES; n++) {
+    const suffix = String(n);
+    candidates.push(
+      `${cleanUsername.slice(0, USERNAME_MAX_LENGTH - suffix.length)}${suffix}`
+    );
   }
-
-  // Username taken, find an available one by adding numbers
-  let attempt = 1;
-  let suggestedUsername = `${cleanUsername}${attempt}`;
-
-  // Keep incrementing until we find an available username
-  while (attempt < 9999) {
-    const exists = await db.user.findUnique({
-      where: { username: suggestedUsername },
-      select: { id: true },
-    });
-
-    if (!exists) {
-      return {
-        available: false,
-        username: cleanUsername,
-        suggestion: suggestedUsername,
-      };
-    }
-
-    attempt++;
-    suggestedUsername = `${cleanUsername}${attempt}`;
-  }
-
-  // If we somehow exhausted all numbers, add a random suffix
-  const randomSuffix = Math.floor(Math.random() * 10000);
-  suggestedUsername = `${cleanUsername.slice(0, 15)}_${randomSuffix}`;
-
-  return {
-    available: false,
-    username: cleanUsername,
-    suggestion: suggestedUsername,
-  };
+  return candidates;
 }
 
 /**
- * GET /api/onboarding/check-username
- * Check username availability
- * Query params: username (required)
+ * Check availability of a sanitized username and suggest a free alternative.
+ * Uses at most two bounded queries. Signup uniqueness remains authoritative.
  */
+async function checkUsernameAvailability(
+  cleanUsername: string
+): Promise<UsernameCheckResult> {
+  const candidates = buildSuggestionCandidates(cleanUsername);
+  const taken = await db
+    .select({ username: users.username })
+    .from(users)
+    .where(inArray(users.username, [cleanUsername, ...candidates]));
+  const takenSet = new Set(taken.map((row) => row.username));
+
+  if (!takenSet.has(cleanUsername)) {
+    return { available: true, username: cleanUsername };
+  }
+
+  const suggestion = candidates.find(
+    (candidate) => candidate !== cleanUsername && !takenSet.has(candidate)
+  );
+  return {
+    available: false,
+    username: cleanUsername,
+    ...(suggestion ? { suggestion } : {}),
+  };
+}
+
 export const GET = withErrorHandling(async function GET(request: NextRequest) {
   const { searchParams } = new URL(request.url);
   const username = searchParams.get('username');
@@ -181,44 +167,24 @@ export const GET = withErrorHandling(async function GET(request: NextRequest) {
     return errorResponse('Username is required', 'VALIDATION_ERROR', 400);
   }
 
-  if (username.length < 3) {
+  if (username.length > RAW_USERNAME_MAX_LENGTH) {
+    return errorResponse('Username is too long', 'VALIDATION_ERROR', 400);
+  }
+
+  // Normalize first, then validate the normalized value (what signup stores).
+  const cleanUsername = sanitizeOnboardingUsername(username);
+  if (!isValidOnboardingUsername(cleanUsername)) {
     return errorResponse(
-      'Username must be at least 3 characters',
+      'Username must be at least 3 characters (letters, numbers, underscores)',
       'VALIDATION_ERROR',
       400
     );
   }
 
-  if (username.length > 20) {
-    return errorResponse(
-      'Username must be 20 characters or less',
-      'VALIDATION_ERROR',
-      400
-    );
-  }
-
-  const {
-    error,
-    user: authUser,
-    rateLimitInfo,
-  } = await publicRateLimit(request);
+  const { error, rateLimitInfo } = await publicRateLimit(request);
   if (error) return error;
 
-  // Check username availability with RLS (public or user context)
-  const result =
-    authUser && authUser.userId
-      ? await asUser(authUser, async (db) => {
-          return await checkUsernameAvailability(username, db);
-        })
-      : await asPublic(async (db) => {
-          return await checkUsernameAvailability(username, db);
-        });
-
-  logger.info(
-    'Username check result',
-    result,
-    'GET /api/onboarding/check-username'
-  );
+  const result = await checkUsernameAvailability(cleanUsername);
 
   const res = successResponse(result);
   if (rateLimitInfo) addPublicReadHeaders(res, rateLimitInfo);

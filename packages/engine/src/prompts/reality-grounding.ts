@@ -94,10 +94,9 @@ ${realityGroundingContent}
 /**
  * Validate generated text for reality-grounding violations.
  *
- * Checks for the most egregious issues: real-world names leaking through
- * instead of parody names, and prices that are wildly off from current
- * reality. Does NOT hard-code specific years or political figures because
- * those become stale — instead enforces structural rules.
+ * Checks for the most egregious issue: real-world names leaking through
+ * instead of parody names. Does NOT hard-code prices, years or political
+ * figures because those become stale — instead enforces structural rules.
  */
 export function checkRealityGrounding(text: string): string[] {
   const warnings: string[] = [];
@@ -135,13 +134,6 @@ export function checkRealityGrounding(text: string): string[] {
     if (pattern.test(text)) {
       warnings.push(message);
     }
-  }
-
-  // Check for wildly outdated crypto prices (orders of magnitude off)
-  if (/Bitcoin|BTC/i.test(text) && /\$[1-4]\d{0,3}(?:\s|,|$)/i.test(text)) {
-    warnings.push(
-      'Content may reference outdated Bitcoin price (current ~$78k)'
-    );
   }
 
   return warnings;

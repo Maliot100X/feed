@@ -36,7 +36,6 @@ interface GameState {
   uptimeMs: number;
   uptimeMinutes: number;
   uptimeHours: number;
-  estimatedTotalTicks: number;
 }
 
 /**
@@ -389,14 +388,6 @@ export function GameControlTab() {
           <div>
             <div className="mb-1 text-muted-foreground text-xs">Game Day</div>
             <div className="font-semibold">Day {gameState.currentDay}</div>
-          </div>
-          <div>
-            <div className="mb-1 text-muted-foreground text-xs">
-              Total Ticks
-            </div>
-            <div className="font-semibold">
-              {formatNumber(gameState.estimatedTotalTicks)}
-            </div>
           </div>
           <div>
             <div className="mb-1 text-muted-foreground text-xs">Last Tick</div>

@@ -25,6 +25,8 @@ export interface TrustExperimentModelProfile {
 
 export interface TrustExperimentAgentSpec {
   instanceId: string;
+  /** Canonical roster character this variant was derived from */
+  archetypeId: string;
   variantIndex: number;
   modelProfile: TrustExperimentModelProfile;
   sheet: FeedCharacterSheet;
@@ -137,43 +139,100 @@ export const TRUST_EXPERIMENT_MODEL_PROFILES: Record<
   },
 };
 
+const MAX_TRUST_EXPERIMENT_AGENTS = 10_000;
+const USERNAME_MAX_LENGTH = 32;
+
+function resolveModelSizes(
+  modelSizes: TrustExperimentModelSize[] | undefined
+): TrustExperimentModelSize[] {
+  const sizes =
+    modelSizes ??
+    (Object.keys(
+      TRUST_EXPERIMENT_MODEL_PROFILES
+    ) as TrustExperimentModelSize[]);
+  if (sizes.length === 0) {
+    throw new Error('Trust experiment requires at least one model size');
+  }
+  if (new Set(sizes).size !== sizes.length) {
+    throw new Error('Trust experiment model sizes must be unique');
+  }
+  for (const size of sizes) {
+    if (!Object.hasOwn(TRUST_EXPERIMENT_MODEL_PROFILES, size)) {
+      throw new Error(`Unknown trust experiment model size: ${size}`);
+    }
+  }
+  return sizes;
+}
+
+function requirePositiveInteger(
+  value: number,
+  name: string,
+  max: number
+): number {
+  if (!Number.isSafeInteger(value) || value < 1 || value > max) {
+    throw new Error(`${name} must be an integer between 1 and ${max}`);
+  }
+  return value;
+}
+
+/**
+ * Build the experiment roster.
+ *
+ * Order is the archetype x model cross product: in round `r` archetype `a`
+ * is paired with model `(a + r) % modelCount`, so every archetype spans every
+ * model cohort before any (archetype, model) pair repeats with a new variant.
+ */
 export function buildTrustExperimentAgents(
   options: TrustExperimentOptions = {}
 ): TrustExperimentAgentSpec[] {
   const canonicalRoster = buildCanonicalSimulationRoster();
   const archetypeCount = Math.min(
-    options.archetypeCount ?? 30,
+    requirePositiveInteger(
+      options.archetypeCount ?? 30,
+      'archetypeCount',
+      Number.MAX_SAFE_INTEGER
+    ),
     canonicalRoster.length
   );
   const archetypes = canonicalRoster.slice(0, archetypeCount);
-  const modelSizes =
-    options.modelSizes ??
-    (Object.keys(
-      TRUST_EXPERIMENT_MODEL_PROFILES
-    ) as TrustExperimentModelSize[]);
-  const agentCount = options.agentCount ?? 100;
+  if (archetypes.length === 0) {
+    throw new Error('Canonical simulation roster is empty');
+  }
+  const modelSizes = resolveModelSizes(options.modelSizes);
+  const agentCount = requirePositiveInteger(
+    options.agentCount ?? 100,
+    'agentCount',
+    MAX_TRUST_EXPERIMENT_AGENTS
+  );
 
   const agents: TrustExperimentAgentSpec[] = [];
-  let index = 0;
+  const usernames = new Set<string>();
 
-  while (agents.length < agentCount) {
-    const baseSheet = archetypes[index % archetypes.length]!;
-    const modelSize = modelSizes[index % modelSizes.length]!;
-    const variantIndex = Math.floor(index / archetypes.length) + 1;
+  for (let index = 0; index < agentCount; index++) {
+    const archetypeIndex = index % archetypes.length;
+    const round = Math.floor(index / archetypes.length);
+    const baseSheet = archetypes[archetypeIndex]!;
+    const modelSize = modelSizes[(archetypeIndex + round) % modelSizes.length]!;
+    const variantIndex = Math.floor(round / modelSizes.length) + 1;
     const modelProfile = TRUST_EXPERIMENT_MODEL_PROFILES[modelSize];
 
+    const sheet = buildExperimentCharacterSheet(
+      baseSheet,
+      modelProfile,
+      variantIndex
+    );
+    if (usernames.has(sheet.username)) {
+      throw new Error(`Duplicate trust experiment username: ${sheet.username}`);
+    }
+    usernames.add(sheet.username);
+
     agents.push({
-      instanceId: `${baseSheet.id}-${modelProfile.id}-v${variantIndex}`,
+      instanceId: sheet.id,
+      archetypeId: baseSheet.id,
       variantIndex,
       modelProfile,
-      sheet: buildExperimentCharacterSheet(
-        baseSheet,
-        modelProfile,
-        variantIndex
-      ),
+      sheet,
     });
-
-    index += 1;
   }
 
   return agents;
@@ -197,12 +256,8 @@ export function buildTrustExperimentManifest(
     generatedAt: new Date().toISOString(),
     agentTargetCount: agents.length,
     npcTargetCount: options.npcTargetCount ?? 150,
-    archetypeCount: Math.min(options.archetypeCount ?? 30, 30),
-    modelSizes:
-      options.modelSizes ??
-      (Object.keys(
-        TRUST_EXPERIMENT_MODEL_PROFILES
-      ) as TrustExperimentModelSize[]),
+    archetypeCount: new Set(agents.map((agent) => agent.archetypeId)).size,
+    modelSizes: resolveModelSizes(options.modelSizes),
     modelBreakdown,
     teamBreakdown,
     agents: agents.map((agent) => ({
@@ -245,8 +300,9 @@ function buildExperimentCharacterSheet(
   modelProfile: TrustExperimentModelProfile,
   variantIndex: number
 ): FeedCharacterSheet {
-  const suffix = `${modelProfile.id.replace('.', '_')}v${variantIndex}`;
-  const username = `${baseSheet.username}_${suffix}`.slice(0, 32);
+  const suffix = `_${modelProfile.id.replace('.', '_')}v${variantIndex}`;
+  // Reserve room for the identifying suffix so truncation never drops it.
+  const username = `${baseSheet.username.slice(0, Math.max(0, USERNAME_MAX_LENGTH - suffix.length))}${suffix}`;
 
   return {
     ...baseSheet,

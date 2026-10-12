@@ -129,7 +129,7 @@ export const SIMULATION_STRATEGIES: readonly SimulationStrategy[] = [
 
 /**
  * Default perpetual market prices for simulation mode.
- * Used across GameLoop, MarketContextService, and tests.
+ * Used across MarketContextService and tests.
  */
 export const SIMULATION_DEFAULT_PRICES = {
   BTCAI: 120000,

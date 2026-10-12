@@ -24,13 +24,12 @@ import {
   groupMembers,
   groups,
   gte,
-  or,
+  sql,
   userInteractions,
 } from '@feed/db';
 import { GROUP_CONFIG, logger, type TierLevel } from '@feed/shared';
 import {
   ALPHA_GROUP_CONFIG,
-  calculateNextEligibleDate,
   shouldResetDeclineCount,
 } from '../config/alpha-group-config';
 import { NPCInteractionTracker } from './npc-interaction-tracker';
@@ -73,6 +72,18 @@ interface InviteDecayStatus {
   declineCount: number;
   nextEligibleAt: Date | null;
   reason?: string;
+}
+
+/**
+ * Combine a normally-earned tier with a fast-track tier, keeping whichever
+ * grants more access (lower tier number). Fast-track never downgrades.
+ */
+export function mostAccessibleTier(
+  normalTier: TierLevel | null,
+  fastTrackTier: TierLevel
+): TierLevel {
+  if (normalTier === null) return fastTrackTier;
+  return normalTier < fastTrackTier ? normalTier : fastTrackTier;
 }
 
 export class AlphaGroupInviteService {
@@ -295,19 +306,18 @@ export class AlphaGroupInviteService {
     npcId: string,
     qualifiesForFastTrack: boolean
   ): TierLevel | null {
-    // Fast-track users can skip to Tier 2 with reduced threshold
-    if (qualifiesForFastTrack) {
-      const tier2Config = getEffectiveTierConfig(2, npcId);
-      // Fast-track users only need 50% of Tier 2 threshold
-      if (engagementScore >= tier2Config.minEngagementScore * 0.5) {
-        return 2;
-      }
-      // Fall back to Tier 3 if not quite meeting reduced Tier 2
-      return 3;
+    // Normal tier calculation with NPC-specific thresholds
+    const normalTier = getTierForEngagementScoreWithNpc(engagementScore, npcId);
+    if (!qualifiesForFastTrack) {
+      return normalTier;
     }
 
-    // Normal tier calculation with NPC-specific thresholds
-    return getTierForEngagementScoreWithNpc(engagementScore, npcId);
+    // Fast-track is a floor on access, never a downgrade: users only need
+    // 50% of the Tier 2 threshold for Tier 2, otherwise Tier 3.
+    const tier2Config = getEffectiveTierConfig(2, npcId);
+    const fastTrackTier: TierLevel =
+      engagementScore >= tier2Config.minEngagementScore * 0.5 ? 2 : 3;
+    return mostAccessibleTier(normalTier, fastTrackTier);
   }
 
   /**
@@ -478,18 +488,15 @@ export class AlphaGroupInviteService {
   ): Promise<boolean> {
     const oneWeekAgo = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000);
 
-    // Count invites (pending or accepted) sent to this user in the last week
+    // Count every invite sent to this user in the last week, whatever its
+    // status, so declined invites cannot bypass the weekly sent cap.
     const [result] = await db
       .select({ count: count() })
       .from(groupInvites)
       .where(
         and(
           eq(groupInvites.invitedUserId, userId),
-          gte(groupInvites.invitedAt, oneWeekAgo),
-          or(
-            eq(groupInvites.status, 'pending'),
-            eq(groupInvites.status, 'accepted')
-          )
+          gte(groupInvites.invitedAt, oneWeekAgo)
         )
       );
 
@@ -553,53 +560,6 @@ export class AlphaGroupInviteService {
   }
 
   /**
-   * Record that a user declined an invite.
-   * Updates the invite record with decay tracking.
-   */
-  static async recordDecline(inviteId: string): Promise<void> {
-    const [invite] = await db
-      .select({
-        declineCount: groupInvites.declineCount,
-      })
-      .from(groupInvites)
-      .where(eq(groupInvites.id, inviteId))
-      .limit(1);
-
-    if (!invite) {
-      logger.warn(
-        'Invite not found for decline recording',
-        { inviteId },
-        'AlphaGroupInviteService'
-      );
-      return;
-    }
-
-    const newDeclineCount = (invite.declineCount ?? 0) + 1;
-    const nextEligibleAt = calculateNextEligibleDate(newDeclineCount);
-
-    await db
-      .update(groupInvites)
-      .set({
-        status: 'declined',
-        respondedAt: new Date(),
-        declineCount: newDeclineCount,
-        lastDeclinedAt: new Date(),
-        nextEligibleAt,
-      })
-      .where(eq(groupInvites.id, inviteId));
-
-    logger.info(
-      'Invite declined with decay tracking',
-      {
-        inviteId,
-        declineCount: newDeclineCount,
-        nextEligibleAt: nextEligibleAt.toISOString(),
-      },
-      'AlphaGroupInviteService'
-    );
-  }
-
-  /**
    * Get invite statistics for monitoring and analysis.
    */
   static async getInviteStats(): Promise<{
@@ -612,17 +572,20 @@ export class AlphaGroupInviteService {
 
     const [totalResult] = await db
       .select({ count: count() })
-      .from(groupMembers);
+      .from(groupInvites);
 
+    // Distinct groups with at least one active member
     const [activeResult] = await db
-      .select({ count: count() })
+      .select({
+        count: sql<number>`count(distinct ${groupMembers.groupId})::int`,
+      })
       .from(groupMembers)
       .where(eq(groupMembers.isActive, true));
 
     const [recentResult] = await db
       .select({ count: count() })
-      .from(groupMembers)
-      .where(gte(groupMembers.joinedAt, oneDayAgo));
+      .from(groupInvites)
+      .where(gte(groupInvites.invitedAt, oneDayAgo));
 
     // Get tier breakdown
     const tierCounts = await db
@@ -646,57 +609,6 @@ export class AlphaGroupInviteService {
       activeGroups: activeResult?.count ?? 0,
       invitesLast24h: recentResult?.count ?? 0,
       tierBreakdown,
-    };
-  }
-
-  /**
-   * Get detailed analytics for alpha group invites.
-   */
-  static async getDetailedAnalytics(): Promise<{
-    inviteStats: Awaited<
-      ReturnType<typeof AlphaGroupInviteService.getInviteStats>
-    >;
-    declineStats: {
-      totalDeclined: number;
-      avgDeclineCount: number;
-      usersAtMaxDeclines: number;
-    };
-    configSnapshot: typeof ALPHA_GROUP_CONFIG;
-  }> {
-    const inviteStats = await this.getInviteStats();
-
-    // Get decline statistics
-    const [declineResult] = await db
-      .select({
-        count: count(),
-      })
-      .from(groupInvites)
-      .where(eq(groupInvites.status, 'declined'));
-
-    const [maxDeclinesResult] = await db
-      .select({ count: count() })
-      .from(groupInvites)
-      .where(
-        and(
-          eq(groupInvites.status, 'declined'),
-          gte(
-            groupInvites.declineCount,
-            ALPHA_GROUP_CONFIG.inviteDecayMaxDeclines
-          )
-        )
-      );
-
-    // Note: Average decline count would require more complex query
-    // For now, just return totals
-
-    return {
-      inviteStats,
-      declineStats: {
-        totalDeclined: declineResult?.count ?? 0,
-        avgDeclineCount: 0, // Would need aggregation
-        usersAtMaxDeclines: maxDeclinesResult?.count ?? 0,
-      },
-      configSnapshot: ALPHA_GROUP_CONFIG,
     };
   }
 }

@@ -246,10 +246,32 @@ export class RSSFeedService {
 
     let fetched = 0;
     let stored = 0;
-    const errors = 0;
+    let errors = 0;
 
     for (const source of sources) {
-      const feed = await this.fetchFeed(source.feedUrl);
+      // A failing source (network/HTTP/parse, after fetchFeed's retries) must
+      // not abort the sweep for the remaining independent sources. Record the
+      // failure on the source and continue; DB errors below still propagate.
+      let feed: ParsedFeed;
+      try {
+        feed = await this.fetchFeed(source.feedUrl);
+      } catch (error) {
+        errors++;
+        logger.warn(
+          'RSS source fetch failed; continuing with remaining sources',
+          {
+            sourceId: source.id,
+            feedUrl: source.feedUrl,
+            error: error instanceof Error ? error.message : String(error),
+          },
+          'RSSFeedService'
+        );
+        await db
+          .update(rssFeedSources)
+          .set({ fetchErrors: sql`${rssFeedSources.fetchErrors} + 1` })
+          .where(eq(rssFeedSources.id, source.id));
+        continue;
+      }
       fetched++;
 
       // Store new headlines (check by link to avoid duplicates)
@@ -281,7 +303,12 @@ export class RSSFeedService {
 
         if (existing) continue;
 
-        const publishedAt = item.pubDate ? new Date(item.pubDate) : new Date();
+        // An unparseable pubDate must not abort storage of the whole feed.
+        const parsedPubDate = item.pubDate ? new Date(item.pubDate) : null;
+        const publishedAt =
+          parsedPubDate && !Number.isNaN(parsedPubDate.getTime())
+            ? parsedPubDate
+            : new Date();
 
         await db.insert(rssHeadlines).values({
           id: await generateSnowflakeId(),

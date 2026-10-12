@@ -23,6 +23,7 @@ mock.module('@feed/db', () => ({
   and: (...args: unknown[]) => args,
   eq: (a: unknown, b: unknown) => [a, b],
   gte: (a: unknown, b: unknown) => [a, b],
+  lte: (a: unknown, b: unknown) => [a, b],
   isNull: (a: unknown) => [a],
   posts: { type: 'type', timestamp: 'timestamp', deletedAt: 'deletedAt' },
   sql: (strings: TemplateStringsArray) => strings.join(''),

@@ -14,6 +14,7 @@ import {
   gte,
   inArray,
   isNull,
+  lte,
   or,
   parodyHeadlines,
 } from '@feed/db';
@@ -31,6 +32,23 @@ import { StaticDataRegistry } from './static-data-registry';
 export const MIN_QUALITY_SCORE = 0.15;
 /** Temperature for retry attempts when initial generation fails quality gate */
 const RETRY_TEMPERATURE = 0.7;
+/** Upper bound on parodies returned for prompt/context use */
+const MAX_RECENT_PARODIES = 200;
+const DEFAULT_MAX_ENTITY_MENTIONS = 3;
+
+/**
+ * PARODY_MAX_ENTITY_MENTIONS: missing => default; malformed => error.
+ */
+function parseMaxEntityMentions(): number {
+  const raw = process.env.PARODY_MAX_ENTITY_MENTIONS?.trim();
+  if (!raw) return DEFAULT_MAX_ENTITY_MENTIONS;
+  if (!/^\d+$/.test(raw) || Number(raw) <= 0) {
+    throw new Error(
+      `Invalid PARODY_MAX_ENTITY_MENTIONS: "${raw}" must be a positive integer`
+    );
+  }
+  return Number(raw);
+}
 
 /**
  * Generated parody content
@@ -244,11 +262,29 @@ Generate the parody now.`;
 
     // Track entity frequency to prevent single-entity dominance in parody output
     const entityMentions = new Map<string, number>();
-    const MAX_ENTITY_MENTIONS_PER_BATCH = Number(
-      process.env.PARODY_MAX_ENTITY_MENTIONS || 3
+    const MAX_ENTITY_MENTIONS_PER_BATCH = parseMaxEntityMentions();
+
+    // Skip headlines that already have a parody (originalHeadlineId is
+    // unique) instead of paying for generation and failing on insert.
+    const headlineIds = [...new Set(headlines.map((h) => h.id))];
+    const alreadyParodied = new Set(
+      headlineIds.length === 0
+        ? []
+        : (
+            await db
+              .select({ id: parodyHeadlines.originalHeadlineId })
+              .from(parodyHeadlines)
+              .where(inArray(parodyHeadlines.originalHeadlineId, headlineIds))
+          ).map((row) => row.id)
     );
 
     for (const headline of headlines) {
+      if (alreadyParodied.has(headline.id)) {
+        skipCount++;
+        continue;
+      }
+      alreadyParodied.add(headline.id);
+
       // First attempt at normal temperature
       let parody = await this.generateParody(
         headline.title,
@@ -307,7 +343,10 @@ Generate the parody now.`;
       }
 
       // Entity diversity check: skip if any mentioned character is over-represented
-      const mentionedEntities = Object.values(parody.characterMappings);
+      // (deduplicated so aliases mapping to one character count once)
+      const mentionedEntities = [
+        ...new Set(Object.values(parody.characterMappings)),
+      ];
       const isOverRepresented = mentionedEntities.some(
         (e) => (entityMentions.get(e) ?? 0) >= MAX_ENTITY_MENTIONS_PER_BATCH
       );
@@ -385,15 +424,19 @@ Generate the parody now.`;
    * Returns parodies from the last 7 days
    */
   async getRecentParodies(daysBack = 7): Promise<ParodyHeadline[]> {
-    const sevenDaysAgo = new Date();
-    sevenDaysAgo.setDate(sevenDaysAgo.getDate() - daysBack);
+    if (!Number.isFinite(daysBack) || daysBack <= 0) {
+      throw new Error(`daysBack must be a positive number: ${daysBack}`);
+    }
+    const now = new Date();
+    const since = new Date(now.getTime() - daysBack * 24 * 60 * 60 * 1000);
 
     return db
       .select()
       .from(parodyHeadlines)
       .where(
         and(
-          gte(parodyHeadlines.generatedAt, sevenDaysAgo),
+          gte(parodyHeadlines.generatedAt, since),
+          lte(parodyHeadlines.generatedAt, now),
           // Pre-migration records (null) are presumed OK; reject only scored failures
           or(
             isNull(parodyHeadlines.qualityScore),
@@ -401,13 +444,15 @@ Generate the parody now.`;
           )
         )
       )
-      .orderBy(desc(parodyHeadlines.generatedAt));
+      .orderBy(desc(parodyHeadlines.generatedAt))
+      .limit(MAX_RECENT_PARODIES);
   }
 
   /**
    * Mark parody headlines as used in game context
    */
   async markAsUsed(parodyIds: string[]): Promise<void> {
+    if (parodyIds.length === 0) return;
     await db
       .update(parodyHeadlines)
       .set({
@@ -458,8 +503,8 @@ Generate the parody now.`;
 }
 
 /**
- * Create instance with game tick LLM client
- * Priority: Groq > Claude > OpenAI
+ * Create instance with the game-tick LLM client
+ * (provider selection is owned by FeedLLMClient.forGameTick()).
  */
 export function createParodyHeadlineGenerator(): ParodyHeadlineGenerator {
   const llm = FeedLLMClient.forGameTick();

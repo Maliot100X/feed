@@ -25,10 +25,13 @@ import { logger } from '@feed/shared';
 import type { NextRequest } from 'next/server';
 import { z } from 'zod';
 
+type AlphaConfigKey = keyof typeof ALPHA_GROUP_CONFIG;
+
 /**
- * Configuration value descriptions for documentation.
+ * Configuration value descriptions for documentation. Typed against the
+ * engine config so every key must be described (no silent gaps).
  */
-const CONFIG_DESCRIPTIONS: Record<string, string> = {
+const CONFIG_DESCRIPTIONS: Record<AlphaConfigKey, string> = {
   inviteProbabilityMultiplier:
     'Global multiplier for all tier invite probabilities (1.0 = default)',
   maxInvitesPerTick: 'Maximum invites sent per game tick across all NPCs',
@@ -53,6 +56,14 @@ const CONFIG_DESCRIPTIONS: Record<string, string> = {
   inviteDecayMaxDeclines: 'Maximum declines before temporary exclusion',
   inviteDecayResetDays: 'Days of inactivity before decline count resets',
   inviteCooldownHours: 'Hours after joining before eligible for next invite',
+  maxInvitesPerUserPerWeek:
+    'Maximum invites a single user can receive per week (across all NPCs)',
+  requireRecentActivity: 'Require recent activity for invite eligibility',
+  recentActivityDays: 'Days to look back for recent activity',
+  tieredInviteProbability:
+    'Invite probability per eligible user per tick in the tiered system',
+  inviteUserChance:
+    'User invite chance per group per tick for NPC group dynamics',
   perNpcCustomizationEnabled: 'Enable per-NPC tier threshold customization',
   grandfatheringEnabled: 'Protect existing members during threshold changes',
   replyWeight: 'Weight for replies in engagement score calculation',
@@ -67,9 +78,10 @@ const CONFIG_DESCRIPTIONS: Record<string, string> = {
 };
 
 /**
- * Environment variable names for each config key.
+ * Environment variable names for each config key (must match
+ * packages/engine/src/config/alpha-group-config.ts).
  */
-const CONFIG_ENV_VARS: Record<string, string> = {
+const CONFIG_ENV_VARS: Record<AlphaConfigKey, string> = {
   inviteProbabilityMultiplier: 'ALPHA_INVITE_PROBABILITY_MULTIPLIER',
   maxInvitesPerTick: 'ALPHA_MAX_INVITES_PER_TICK',
   topUsersToConsider: 'ALPHA_TOP_USERS_TO_CONSIDER',
@@ -92,6 +104,11 @@ const CONFIG_ENV_VARS: Record<string, string> = {
   inviteDecayMaxDeclines: 'ALPHA_INVITE_DECAY_MAX_DECLINES',
   inviteDecayResetDays: 'ALPHA_INVITE_DECAY_RESET_DAYS',
   inviteCooldownHours: 'ALPHA_INVITE_COOLDOWN_HOURS',
+  maxInvitesPerUserPerWeek: 'ALPHA_MAX_INVITES_PER_USER_PER_WEEK',
+  requireRecentActivity: 'ALPHA_REQUIRE_RECENT_ACTIVITY',
+  recentActivityDays: 'ALPHA_RECENT_ACTIVITY_DAYS',
+  tieredInviteProbability: 'ALPHA_TIERED_INVITE_PROBABILITY',
+  inviteUserChance: 'ALPHA_INVITE_USER_CHANCE',
   perNpcCustomizationEnabled: 'ALPHA_PER_NPC_CUSTOMIZATION_ENABLED',
   grandfatheringEnabled: 'ALPHA_GRANDFATHERING_ENABLED',
   replyWeight: 'ALPHA_REPLY_WEIGHT',
@@ -121,15 +138,15 @@ export const GET = withErrorHandling(async (request: NextRequest) => {
   );
 
   // Build config response with metadata
-  const configWithMeta = Object.entries(ALPHA_GROUP_CONFIG).map(
-    ([key, value]) => ({
-      key,
-      value,
-      description: CONFIG_DESCRIPTIONS[key] || 'No description available',
-      envVar: CONFIG_ENV_VARS[key] || `ALPHA_${key.toUpperCase()}`,
-      type: typeof value,
-    })
-  );
+  const configWithMeta = (
+    Object.keys(ALPHA_GROUP_CONFIG) as AlphaConfigKey[]
+  ).map((key) => ({
+    key,
+    value: ALPHA_GROUP_CONFIG[key],
+    description: CONFIG_DESCRIPTIONS[key],
+    envVar: CONFIG_ENV_VARS[key],
+    type: typeof ALPHA_GROUP_CONFIG[key],
+  }));
 
   return successResponse({
     success: true,
@@ -181,31 +198,74 @@ export const GET = withErrorHandling(async (request: NextRequest) => {
 /**
  * Schema for PATCH request body validation.
  */
-const ConfigUpdateSchema = z.object({
-  inviteProbabilityMultiplier: z.number().min(0).max(10).optional(),
-  maxInvitesPerTick: z.number().int().min(1).max(100).optional(),
-  topUsersToConsider: z.number().int().min(1).max(100).optional(),
-  minReplies: z.number().int().min(0).max(100).optional(),
-  minLikes: z.number().int().min(0).max(100).optional(),
-  minTotalInteractions: z.number().int().min(0).max(500).optional(),
-  minQualityScore: z.number().min(0).max(1).optional(),
-  maxInteractionsPerDay: z.number().int().min(1).max(1000).optional(),
-  tradeWeight: z.number().min(0).max(100).optional(),
-  profitableTradeBonus: z.number().min(0).max(100).optional(),
-  includeTradingActivity: z.boolean().optional(),
-  fastTrackEnabled: z.boolean().optional(),
-  fastTrackMinTrades: z.number().int().min(1).max(1000).optional(),
-  fastTrackMinPnL: z.number().min(0).optional(),
-  fastTrackMinWinRate: z.number().min(0).max(1).optional(),
-  inviteDecayEnabled: z.boolean().optional(),
-  inviteDecayBaseHours: z.number().int().min(1).max(720).optional(),
-  inviteDecayMaxHours: z.number().int().min(1).max(8760).optional(),
-  inviteDecayMaxDeclines: z.number().int().min(1).max(100).optional(),
-  inviteDecayResetDays: z.number().int().min(1).max(365).optional(),
-  inviteCooldownHours: z.number().int().min(0).max(168).optional(),
-  perNpcCustomizationEnabled: z.boolean().optional(),
-  grandfatheringEnabled: z.boolean().optional(),
-});
+const ConfigUpdateSchema = z
+  .object({
+    inviteProbabilityMultiplier: z.number().min(0).max(10).optional(),
+    maxInvitesPerTick: z.number().int().min(1).max(100).optional(),
+    topUsersToConsider: z.number().int().min(1).max(100).optional(),
+    minReplies: z.number().int().min(0).max(100).optional(),
+    minLikes: z.number().int().min(0).max(100).optional(),
+    minTotalInteractions: z.number().int().min(0).max(500).optional(),
+    minQualityScore: z.number().min(0).max(1).optional(),
+    maxInteractionsPerDay: z.number().int().min(1).max(1000).optional(),
+    tradeWeight: z.number().min(0).max(100).optional(),
+    profitableTradeBonus: z.number().min(0).max(100).optional(),
+    includeTradingActivity: z.boolean().optional(),
+    fastTrackEnabled: z.boolean().optional(),
+    fastTrackMinTrades: z.number().int().min(1).max(1000).optional(),
+    fastTrackMinPnL: z.number().min(0).optional(),
+    fastTrackMinWinRate: z.number().min(0).max(1).optional(),
+    inviteDecayEnabled: z.boolean().optional(),
+    inviteDecayBaseHours: z.number().int().min(1).max(720).optional(),
+    inviteDecayMaxHours: z.number().int().min(1).max(8760).optional(),
+    inviteDecayMaxDeclines: z.number().int().min(1).max(100).optional(),
+    inviteDecayResetDays: z.number().int().min(1).max(365).optional(),
+    inviteCooldownHours: z.number().int().min(0).max(168).optional(),
+    maxInvitesPerUserPerWeek: z.number().int().min(1).max(100).optional(),
+    requireRecentActivity: z.boolean().optional(),
+    recentActivityDays: z.number().int().min(1).max(365).optional(),
+    tieredInviteProbability: z.number().min(0).max(1).optional(),
+    inviteUserChance: z.number().min(0).max(1).optional(),
+    fastTrackTargetTier: z.union([z.literal(2), z.literal(3)]).optional(),
+    perNpcCustomizationEnabled: z.boolean().optional(),
+    grandfatheringEnabled: z.boolean().optional(),
+    replyWeight: z.number().min(0).max(100).optional(),
+    likeWeight: z.number().min(0).max(100).optional(),
+    shareWeight: z.number().min(0).max(100).optional(),
+    maxExpectedSocialScore: z.number().positive().max(100_000).optional(),
+    maxExpectedTradingScore: z.number().positive().max(100_000).optional(),
+    qualityMultiplier: z.number().min(0).max(10).optional(),
+    qualityThreshold: z.number().min(0).max(1).optional(),
+    defaultSocialWeight: z.number().min(0).max(1).optional(),
+    defaultTradingWeight: z.number().min(0).max(1).optional(),
+  })
+  // Unknown keys are rejected instead of silently stripped.
+  .strict()
+  .superRefine((proposed, ctx) => {
+    const baseHours =
+      proposed.inviteDecayBaseHours ?? ALPHA_GROUP_CONFIG.inviteDecayBaseHours;
+    const maxHours =
+      proposed.inviteDecayMaxHours ?? ALPHA_GROUP_CONFIG.inviteDecayMaxHours;
+    if (maxHours < baseHours) {
+      ctx.addIssue({
+        code: 'custom',
+        path: ['inviteDecayMaxHours'],
+        message: 'inviteDecayMaxHours must be >= inviteDecayBaseHours',
+      });
+    }
+    const social =
+      proposed.defaultSocialWeight ?? ALPHA_GROUP_CONFIG.defaultSocialWeight;
+    const trading =
+      proposed.defaultTradingWeight ?? ALPHA_GROUP_CONFIG.defaultTradingWeight;
+    // The engine normalizes by social + trading, so the sum must be > 0.
+    if (social + trading <= 0) {
+      ctx.addIssue({
+        code: 'custom',
+        path: ['defaultSocialWeight'],
+        message: 'defaultSocialWeight + defaultTradingWeight must be > 0',
+      });
+    }
+  });
 
 /**
  * PATCH /api/admin/alpha-groups/config
@@ -234,15 +294,15 @@ export const PATCH = withErrorHandling(async (request: NextRequest) => {
     envVar: string;
   }> = [];
 
-  for (const [key, proposedValue] of Object.entries(proposed)) {
-    const currentValue =
-      ALPHA_GROUP_CONFIG[key as keyof typeof ALPHA_GROUP_CONFIG];
-    if (currentValue !== proposedValue) {
+  for (const key of Object.keys(proposed) as (keyof typeof proposed)[]) {
+    const proposedValue = proposed[key];
+    const currentValue = ALPHA_GROUP_CONFIG[key];
+    if (proposedValue !== undefined && currentValue !== proposedValue) {
       changes.push({
         key,
         currentValue,
         proposedValue,
-        envVar: CONFIG_ENV_VARS[key] || `ALPHA_${key.toUpperCase()}`,
+        envVar: CONFIG_ENV_VARS[key],
       });
     }
   }

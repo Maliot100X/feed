@@ -44,8 +44,25 @@ export interface SimulationContext {
   isTraining?: boolean;
 }
 
-/** Calculate signal ratio from phase targets */
-const ratio = (correct: number, wrong: number) => correct / (correct + wrong);
+/**
+ * Calculate the correct-signal ratio from phase targets.
+ * Throws on invalid targets rather than persisting NaN (0/0) ratios.
+ */
+export function phaseSignalRatio(correct: number, wrong: number): number {
+  if (
+    !Number.isFinite(correct) ||
+    !Number.isFinite(wrong) ||
+    correct < 0 ||
+    wrong < 0 ||
+    correct + wrong === 0
+  ) {
+    throw new Error(
+      `Invalid arc phase signal targets: correct=${correct}, wrong=${wrong}`
+    );
+  }
+  return correct / (correct + wrong);
+}
+const ratio = phaseSignalRatio;
 
 /** Save arc plan for a question */
 export async function saveArcPlan(
@@ -142,7 +159,7 @@ export function getSignalDirection(
   questionOutcome: boolean,
   rng: RngFunction = Math.random
 ): {
-  direction: 'YES' | 'NO' | 'NEUTRAL';
+  direction: 'YES' | 'NO';
   reason: 'insider' | 'deceiver' | 'phase';
 } {
   const insiderIds = arcPlan.insiderActorIds ?? [];
@@ -159,14 +176,20 @@ export function getSignalDirection(
   }
 
   // Regular NPCs/events follow phase distribution
-  // phaseRatios contains the ratio of correct signals for each phase
-  const phaseRatios = arcPlan.phaseRatios ?? {
-    early: 0.43,
-    middle: 0.55,
-    late: 0.78,
-    climax: 1.0,
-  };
-  const correctSignalRatio = phaseRatios[phase];
+  // phaseRatios contains the ratio of correct signals for each phase.
+  // A missing/invalid stored ratio is a corrupt plan: fail instead of
+  // silently emitting a wrong-direction signal on every call.
+  const correctSignalRatio = arcPlan.phaseRatios?.[phase];
+  if (
+    typeof correctSignalRatio !== 'number' ||
+    !Number.isFinite(correctSignalRatio) ||
+    correctSignalRatio < 0 ||
+    correctSignalRatio > 1
+  ) {
+    throw new Error(
+      `Arc plan ${arcPlan.id} has invalid phase ratio for "${phase}": ${String(correctSignalRatio)}`
+    );
+  }
 
   // Use provided RNG for reproducibility in training/simulation
   const shouldBeCorrect = rng() < correctSignalRatio;

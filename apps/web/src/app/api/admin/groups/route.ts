@@ -79,6 +79,7 @@ import {
   withErrorHandling,
 } from '@feed/api';
 import {
+  and,
   asc,
   asSystem,
   chatParticipants,
@@ -87,7 +88,9 @@ import {
   eq,
   groups,
   inArray,
+  lte,
   messages,
+  sql,
   users,
 } from '@feed/db';
 import { StaticDataRegistry } from '@feed/engine';
@@ -97,10 +100,9 @@ import { NextResponse } from 'next/server';
 /**
  * GET /api/admin/groups
  * Get all group chats with filtering and sorting
- * Admin only (localhost bypass handled by requireAdmin)
+ * Admin only
  */
 export const GET = withErrorHandling(async (request: NextRequest) => {
-  // Require admin (automatically bypassed on localhost)
   const admin = await requireAdmin(request);
 
   // Audit log the admin access
@@ -150,24 +152,56 @@ export const GET = withErrorHandling(async (request: NextRequest) => {
                 joinedAt: chatParticipants.joinedAt,
               })
               .from(chatParticipants)
-              .where(inArray(chatParticipants.chatId, chatIds))
+              .where(
+                and(
+                  inArray(chatParticipants.chatId, chatIds),
+                  eq(chatParticipants.isActive, true)
+                )
+              )
           : [];
 
-      // Get last 10 messages for each chat
-      const messagesList =
+      // Last 10 messages per chat (bounded per chat via window function)
+      // plus the real per-chat message count; previously every message of
+      // every group chat was loaded and messageCount was capped at 10.
+      const rankedMessages = database
+        .select({
+          id: messages.id,
+          chatId: messages.chatId,
+          senderId: messages.senderId,
+          content: messages.content,
+          createdAt: messages.createdAt,
+          rank: sql<number>`row_number() over (partition by ${messages.chatId} order by ${messages.createdAt} desc, ${messages.id} desc)`.as(
+            'rank'
+          ),
+        })
+        .from(messages)
+        .where(inArray(messages.chatId, chatIds))
+        .as('ranked_messages');
+
+      const [messagesList, messageCountRows] =
         chatIds.length > 0
-          ? await database
-              .select({
-                id: messages.id,
-                chatId: messages.chatId,
-                senderId: messages.senderId,
-                content: messages.content,
-                createdAt: messages.createdAt,
-              })
-              .from(messages)
-              .where(inArray(messages.chatId, chatIds))
-              .orderBy(desc(messages.createdAt))
-          : [];
+          ? await Promise.all([
+              database
+                .select({
+                  id: rankedMessages.id,
+                  chatId: rankedMessages.chatId,
+                  senderId: rankedMessages.senderId,
+                  content: rankedMessages.content,
+                  createdAt: rankedMessages.createdAt,
+                })
+                .from(rankedMessages)
+                .where(lte(rankedMessages.rank, 10))
+                .orderBy(desc(rankedMessages.createdAt)),
+              database
+                .select({
+                  chatId: messages.chatId,
+                  count: sql<number>`count(*)::int`,
+                })
+                .from(messages)
+                .where(inArray(messages.chatId, chatIds))
+                .groupBy(messages.chatId),
+            ])
+          : [[], []];
 
       // Get all unique participant IDs
       const allParticipantIds = [
@@ -226,18 +260,19 @@ export const GET = withErrorHandling(async (request: NextRequest) => {
       const messagesByChat = new Map<string, typeof messagesList>();
       messagesList.forEach((m) => {
         const list = messagesByChat.get(m.chatId) || [];
-        if (list.length < 10) {
-          // Keep only last 10 messages per chat
-          list.push(m);
-        }
+        list.push(m);
         messagesByChat.set(m.chatId, list);
       });
+      const messageCountByChat = new Map(
+        messageCountRows.map((row) => [row.chatId, Number(row.count)])
+      );
 
       // Attach participants and messages to chats
       const chatsWithRelations = chatsList.map((chat) => ({
         ...chat,
         participants: participantsByChat.get(chat.id) || [],
         messages: messagesByChat.get(chat.id) || [],
+        messageCount: messageCountByChat.get(chat.id) ?? 0,
       }));
 
       return {
@@ -363,7 +398,7 @@ export const GET = withErrorHandling(async (request: NextRequest) => {
       creatorId,
       creatorName,
       memberCount: participantsFormatted.length,
-      messageCount: chat.messages.length,
+      messageCount: chat.messageCount,
       participants: participantsFormatted,
       recentMessages: messagesWithSenders,
       createdAt: chat.createdAt,

@@ -22,6 +22,17 @@ import type { NPCMarketContext, NPCPosition } from '../types/market-context';
  */
 export function mapPersonalityToArchetype(personality: string): string {
   const p = personality.toLowerCase();
+  // Cautious descriptors are checked first so "risk-averse" / "risk manager"
+  // are not misclassified as degen by the generic "risk" keyword below.
+  if (
+    p.includes('cautious') ||
+    p.includes('conservative') ||
+    p.includes('risk-averse') ||
+    p.includes('risk averse') ||
+    p.includes('manager')
+  ) {
+    return 'RISK_MANAGER';
+  }
   if (
     p.includes('risk') ||
     p.includes('aggressive') ||
@@ -29,13 +40,6 @@ export function mapPersonalityToArchetype(personality: string): string {
     p.includes('speculator')
   ) {
     return 'DEGEN_TRADER';
-  }
-  if (
-    p.includes('cautious') ||
-    p.includes('conservative') ||
-    p.includes('manager')
-  ) {
-    return 'RISK_MANAGER';
   }
   if (p.includes('analytical') || p.includes('quant') || p.includes('math')) {
     return 'QUANT_TRADER';

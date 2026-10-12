@@ -24,9 +24,7 @@ import {
 } from '@feed/db';
 import { FeedbackTypeSchema, toISO } from '@feed/shared';
 import type { NextRequest } from 'next/server';
-
-/** Valid feedback types for SQL filter validation */
-const VALID_FEEDBACK_TYPES = FeedbackTypeSchema.options;
+import { z } from 'zod';
 
 interface FeedbackMetadata {
   feedbackType?: string;
@@ -39,31 +37,31 @@ interface FeedbackMetadata {
 }
 
 /**
- * Safely parse an integer from a string, returning a default if invalid.
- */
-function safeParseInt(value: string | null, defaultValue: number): number {
-  if (!value) return defaultValue;
-  const parsed = parseInt(value, 10);
-  return Number.isFinite(parsed) && !Number.isNaN(parsed)
-    ? parsed
-    : defaultValue;
-}
-
-/**
  * Escape SQL ILIKE metacharacters to prevent pattern injection.
  */
 function escapeIlike(str: string): string {
   return str.replace(/[%_\\]/g, (char) => `\\${char}`);
 }
 
-/**
- * Validate and parse a date string, returning null if invalid.
- */
-function parseDate(dateStr: string | null): Date | null {
-  if (!dateStr) return null;
-  const parsed = new Date(dateStr);
-  return Number.isNaN(parsed.getTime()) ? null : parsed;
-}
+const IsoDate = z
+  .string()
+  .refine((value) => !Number.isNaN(Date.parse(value)), 'Invalid date')
+  .transform((value) => new Date(value));
+
+const FeedbackListQuerySchema = z
+  .object({
+    limit: z.coerce.number().int().min(1).max(200).default(50),
+    offset: z.coerce.number().int().min(0).max(100_000).default(0),
+    type: FeedbackTypeSchema.optional(),
+    hasLinearIssue: z.enum(['true', 'false']).optional(),
+    search: z.string().trim().min(1).max(200).optional(),
+    fromDate: IsoDate.optional(),
+    toDate: IsoDate.optional(),
+  })
+  .refine(
+    (q) => !q.fromDate || !q.toDate || q.fromDate <= q.toDate,
+    'fromDate must be before toDate'
+  );
 
 /**
  * GET /api/admin/feedback
@@ -75,35 +73,39 @@ export const GET = withErrorHandling(async (request: NextRequest) => {
 
   const { searchParams } = new URL(request.url);
 
-  // Safely parse pagination params with fallbacks
-  const rawLimit = safeParseInt(searchParams.get('limit'), 50);
-  const limit = Math.min(Math.max(rawLimit, 1), 200); // Clamp between 1-200
-  const offset = Math.max(safeParseInt(searchParams.get('offset'), 0), 0);
-
-  const feedbackType = searchParams.get('type'); // bug, feature_request, performance
-  const hasLinearIssue = searchParams.get('hasLinearIssue'); // true, false
-  const search = searchParams.get('search'); // search in comment
-
-  // Validate date params
-  const fromDate = parseDate(searchParams.get('fromDate'));
-  const toDate = parseDate(searchParams.get('toDate'));
+  // Invalid values are rejected instead of silently dropping the filter
+  // (parseInt accepted "12junk"; bad dates removed the date filter).
+  const parsedQuery = FeedbackListQuerySchema.safeParse({
+    limit: searchParams.get('limit') ?? undefined,
+    offset: searchParams.get('offset') ?? undefined,
+    type: searchParams.get('type') ?? undefined,
+    hasLinearIssue: searchParams.get('hasLinearIssue') ?? undefined,
+    search: searchParams.get('search') || undefined,
+    fromDate: searchParams.get('fromDate') ?? undefined,
+    toDate: searchParams.get('toDate') ?? undefined,
+  });
+  if (!parsedQuery.success) {
+    return errorResponse(
+      parsedQuery.error.issues[0]?.message ?? 'Invalid query parameters',
+      'VALIDATION_ERROR',
+      400
+    );
+  }
+  const {
+    limit,
+    offset,
+    type: feedbackType,
+    hasLinearIssue,
+    search,
+    fromDate,
+    toDate,
+  } = parsedQuery.data;
 
   // Build conditions using SQL for JSON field access
   const conditions = [eq(feedbacks.interactionType, 'general_game_feedback')];
 
-  // CRITICAL: Validate feedbackType against allowed enum values to prevent SQL injection
+  // feedbackType is validated against FeedbackTypeSchema above
   if (feedbackType) {
-    if (
-      !VALID_FEEDBACK_TYPES.includes(
-        feedbackType as (typeof VALID_FEEDBACK_TYPES)[number]
-      )
-    ) {
-      return errorResponse(
-        'Invalid feedback type',
-        'INVALID_FEEDBACK_TYPE',
-        400
-      );
-    }
     conditions.push(
       sql`${feedbacks.metadata}->>'feedbackType' = ${feedbackType}`
     );
@@ -151,7 +153,7 @@ export const GET = withErrorHandling(async (request: NextRequest) => {
     .from(feedbacks)
     .leftJoin(users, eq(feedbacks.fromUserId, users.id))
     .where(whereClause)
-    .orderBy(desc(feedbacks.createdAt))
+    .orderBy(desc(feedbacks.createdAt), desc(feedbacks.id))
     .limit(limit)
     .offset(offset);
 

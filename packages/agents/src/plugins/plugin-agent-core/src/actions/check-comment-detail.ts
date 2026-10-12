@@ -13,7 +13,7 @@ import type {
   Memory,
   State,
 } from '@elizaos/core';
-import { and, comments, db, eq, isNull, posts, users } from '@feed/db';
+import { and, asc, comments, db, eq, isNull, posts, users } from '@feed/db';
 import { logger } from '../../../../shared/logger';
 
 const MAX_THREAD_DEPTH = 10;
@@ -117,9 +117,11 @@ export const checkCommentDetailAction: Action = {
   ): Promise<ActionResult> => {
     const agentUserId = runtime.agentId;
     const actionParams = state?.data?.actionParams as
-      | { commentId?: string }
+      | { commentId?: unknown }
       | undefined;
-    const commentId = actionParams?.commentId;
+    const rawCommentId = actionParams?.commentId;
+    const commentId =
+      typeof rawCommentId === 'string' ? rawCommentId.trim() : '';
 
     if (!commentId) {
       return {
@@ -144,7 +146,7 @@ export const checkCommentDetailAction: Action = {
         })
         .from(comments)
         .leftJoin(users, eq(comments.authorId, users.id))
-        .where(eq(comments.id, commentId))
+        .where(and(eq(comments.id, commentId), isNull(comments.deletedAt)))
         .limit(1);
 
       if (!targetComment) {
@@ -166,7 +168,7 @@ export const checkCommentDetailAction: Action = {
         })
         .from(posts)
         .leftJoin(users, eq(posts.authorId, users.id))
-        .where(eq(posts.id, targetComment.postId))
+        .where(and(eq(posts.id, targetComment.postId), isNull(posts.deletedAt)))
         .limit(1);
 
       if (!post) {
@@ -205,7 +207,8 @@ export const checkCommentDetailAction: Action = {
             eq(comments.postId, targetComment.postId),
             isNull(comments.deletedAt)
           )
-        );
+        )
+        .orderBy(asc(comments.createdAt));
 
       // Build comment map
       const commentMap = new Map<string, CommentWithRelations>();

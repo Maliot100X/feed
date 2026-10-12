@@ -12,6 +12,21 @@ import {
   updateWhitelistConfig,
 } from '@feed/api/services/whitelist-service';
 import { type NextRequest, NextResponse } from 'next/server';
+import { z } from 'zod';
+
+const ConfigSchema = z.object({
+  leaderboardRankThreshold: z
+    .number({ message: 'leaderboardRankThreshold must be a positive integer' })
+    .int('leaderboardRankThreshold must be a positive integer')
+    .min(1, 'leaderboardRankThreshold must be a positive integer')
+    .max(1_000_000, 'leaderboardRankThreshold must be at most 1000000'),
+  leaderboardCategory: z
+    .enum(['all', 'trading', 'social', 'reputation'], {
+      message:
+        'leaderboardCategory must be one of: all, trading, social, reputation',
+    })
+    .optional(),
+});
 
 export const GET = withErrorHandling(async (request: NextRequest) => {
   await requireAdmin(request);
@@ -36,39 +51,14 @@ export const GET = withErrorHandling(async (request: NextRequest) => {
 export const PUT = withErrorHandling(async (request: NextRequest) => {
   const admin = await requireAdmin(request);
 
-  const body = await request.json();
-  const { leaderboardRankThreshold, leaderboardCategory } = body as {
-    leaderboardRankThreshold: number | null;
-    leaderboardCategory?: string;
-  };
-
-  if (
-    typeof leaderboardRankThreshold !== 'number' ||
-    leaderboardRankThreshold < 1 ||
-    !Number.isInteger(leaderboardRankThreshold)
-  ) {
+  const parsed = ConfigSchema.safeParse(await request.json());
+  if (!parsed.success) {
     return NextResponse.json(
-      {
-        error: 'leaderboardRankThreshold must be a positive integer',
-      },
+      { error: parsed.error.issues[0]?.message ?? 'Invalid request body' },
       { status: 400 }
     );
   }
-
-  const VALID_CATEGORIES = ['all', 'trading', 'social', 'reputation'] as const;
-  if (
-    leaderboardCategory !== undefined &&
-    !VALID_CATEGORIES.includes(
-      leaderboardCategory as (typeof VALID_CATEGORIES)[number]
-    )
-  ) {
-    return NextResponse.json(
-      {
-        error: `leaderboardCategory must be one of: ${VALID_CATEGORIES.join(', ')}`,
-      },
-      { status: 400 }
-    );
-  }
+  const { leaderboardRankThreshold, leaderboardCategory } = parsed.data;
 
   await updateWhitelistConfig({
     leaderboardRankThreshold,

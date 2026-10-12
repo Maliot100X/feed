@@ -108,8 +108,12 @@ describe('A2A Endpoints Integration Tests', () => {
       const agentCard = await response.json();
 
       expect(agentCard.endpoints).toHaveProperty('a2a');
-      expect(agentCard.endpoints).toHaveProperty('mcp');
       expect(agentCard.endpoints).toHaveProperty('rpc');
+      // Feed hosts no per-agent MCP endpoint; one is advertised only when the
+      // agent declared its own.
+      expect(agentCard.endpoints.mcp).toBe(
+        agentCard.capabilities.mcpEndpoint ?? undefined
+      );
     });
 
     it('returns 404 for a non-existent agent', async () => {
@@ -248,7 +252,6 @@ describe('A2A Endpoints Integration Tests', () => {
       expect(Array.isArray(agentCard.capabilities.skills)).toBe(true);
       expect(Array.isArray(agentCard.capabilities.domains)).toBe(true);
       expect(agentCard.endpoints).toHaveProperty('a2a');
-      expect(agentCard.endpoints).toHaveProperty('mcp');
     });
   });
 });

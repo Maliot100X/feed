@@ -55,7 +55,8 @@ export interface MarketCorrelation {
 /**
  * Static correlation data based on real-world relationships
  *
- * Note: These are parody organization IDs matching the data/organizations/*.ts files
+ * Note: These are parody organization IDs from the default pack
+ * (packages/pack-default/src/organizations)
  */
 export const correlations: MarketCorrelation[] = [
   // ============================================================================
@@ -307,7 +308,7 @@ export const correlations: MarketCorrelation[] = [
   // ============================================================================
   {
     primary: 'faix-news',
-    related: 'ainbc',
+    related: 'msainbc',
     relationship: 'competitor',
     multiplier: -0.1,
     description: 'FAIx News and AINBC compete for viewers',

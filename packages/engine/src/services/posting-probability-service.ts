@@ -235,37 +235,42 @@ export function calculatePostingProbability(
 }
 
 /**
- * Weighted random sample from a list of candidates.
- * Uses probabilities as weights and secureRandom for consistent randomness quality.
+ * Weighted random sample (without replacement) from a list of candidates.
+ * Uses probabilities as weights; only candidates with positive weight are
+ * eligible. `rng` defaults to secureRandom and is injectable for tests.
  */
 export function weightedRandomSample<T extends { probability: number }>(
   candidates: T[],
-  count: number
+  count: number,
+  rng: () => number = secureRandom
 ): T[] {
-  if (candidates.length === 0) return [];
-  if (candidates.length <= count) return [...candidates];
+  if (!Number.isInteger(count) || count < 0) {
+    throw new RangeError(
+      `Sample count must be a non-negative integer, got ${count}`
+    );
+  }
+  for (const candidate of candidates) {
+    if (!Number.isFinite(candidate.probability) || candidate.probability < 0) {
+      throw new RangeError(
+        `Candidate probability must be finite and non-negative, got ${candidate.probability}`
+      );
+    }
+  }
+
+  // Zero weight means ineligible (daily cap / posted too recently); such
+  // candidates must never be selected, even when slots remain unfilled.
+  const remaining = candidates.filter((c) => c.probability > 0);
+  if (remaining.length <= count) return remaining;
 
   const selected: T[] = [];
-  const remaining = [...candidates];
-
   while (selected.length < count && remaining.length > 0) {
-    // Calculate total weight
     const totalWeight = remaining.reduce((sum, c) => sum + c.probability, 0);
-
-    if (totalWeight <= 0) {
-      // All remaining have 0 probability, pick randomly using secureRandom
-      const idx = Math.floor(secureRandom() * remaining.length);
-      selected.push(remaining.splice(idx, 1)[0]!);
-      continue;
-    }
-
-    // Random selection weighted by probability using secureRandom
-    let random = secureRandom() * totalWeight;
-    let selectedIdx = 0;
+    let random = rng() * totalWeight;
+    let selectedIdx = remaining.length - 1;
 
     for (let i = 0; i < remaining.length; i++) {
       random -= remaining[i]!.probability;
-      if (random <= 0) {
+      if (random < 0) {
         selectedIdx = i;
         break;
       }

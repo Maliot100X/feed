@@ -16,7 +16,16 @@ import {
   requireAdmin,
   withErrorHandling,
 } from '@feed/api';
-import { db, eq, gte, inArray, sql, userAgentConfigs, users } from '@feed/db';
+import {
+  and,
+  db,
+  eq,
+  gte,
+  inArray,
+  sql,
+  userAgentConfigs,
+  users,
+} from '@feed/db';
 import { logger } from '@feed/shared';
 import type { NextRequest } from 'next/server';
 import { NextResponse } from 'next/server';
@@ -24,20 +33,20 @@ import { NextResponse } from 'next/server';
 export const POST = withErrorHandling(async (req: NextRequest) => {
   const admin = await requireAdmin(req);
 
-  // Audit log the admin action
-  logAdminModify({
-    adminId: admin.userId,
-    ipAddress: getClientIp(req.headers) ?? undefined,
-    resourceType: 'agents',
-    metadata: { action: 'resume_all' },
-  });
-
-  // Find agents with sufficient virtualBalance (>= 1)
+  // Only resume agents that were administratively paused (toggle/pause-all)
+  // and have sufficient virtualBalance (>= 1). Agents whose owners disabled
+  // autonomy themselves are left untouched.
   const eligibleAgents = await db
     .select({ userId: userAgentConfigs.userId })
     .from(userAgentConfigs)
     .innerJoin(users, eq(userAgentConfigs.userId, users.id))
-    .where(gte(sql`CAST(${users.virtualBalance} AS NUMERIC)`, 1));
+    .where(
+      and(
+        eq(userAgentConfigs.status, 'paused'),
+        eq(users.isBanned, false),
+        gte(sql`CAST(${users.virtualBalance} AS NUMERIC)`, 1)
+      )
+    );
 
   const eligibleUserIds = eligibleAgents.map((a) => a.userId);
 
@@ -49,8 +58,8 @@ export const POST = withErrorHandling(async (req: NextRequest) => {
     });
   }
 
-  // Resume all eligible agents
-  await db
+  // Resume all eligible agents (still paused at write time)
+  const resumed = await db
     .update(userAgentConfigs)
     .set({
       autonomousTrading: true,
@@ -59,19 +68,32 @@ export const POST = withErrorHandling(async (req: NextRequest) => {
       status: 'running',
       updatedAt: new Date(),
     })
-    .where(inArray(userAgentConfigs.userId, eligibleUserIds));
+    .where(
+      and(
+        inArray(userAgentConfigs.userId, eligibleUserIds),
+        eq(userAgentConfigs.status, 'paused')
+      )
+    )
+    .returning({ userId: userAgentConfigs.userId });
+
+  await logAdminModify({
+    adminId: admin.userId,
+    ipAddress: getClientIp(req.headers) ?? undefined,
+    resourceType: 'agents',
+    metadata: { action: 'resume_all', resumed: resumed.length },
+  });
 
   logger.info(
-    `Resumed ${eligibleUserIds.length} autonomous agents with balance >= 1`,
+    `Resumed ${resumed.length} paused autonomous agents with balance >= 1`,
     undefined,
     'AdminAgentsAPI'
   );
 
   return NextResponse.json({
     success: true,
-    message: `Resumed ${eligibleUserIds.length} agents with sufficient balance`,
+    message: `Resumed ${resumed.length} paused agents with sufficient balance`,
     data: {
-      resumed: eligibleUserIds.length,
+      resumed: resumed.length,
     },
   });
 });

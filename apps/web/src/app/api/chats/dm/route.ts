@@ -201,6 +201,7 @@ export const POST = withErrorHandling(async (request: NextRequest) => {
     let existingChat = await db.chat.findUnique({
       where: { id: chatId },
     });
+    const isNewChat = !existingChat;
 
     if (!existingChat) {
       // Create new DM chat
@@ -264,7 +265,7 @@ export const POST = withErrorHandling(async (request: NextRequest) => {
       }
     }
 
-    return { chat: existingChat, targetUser };
+    return { chat: existingChat, targetUser, isNewChat };
   });
 
   if (!chat.chat) {
@@ -279,19 +280,10 @@ export const POST = withErrorHandling(async (request: NextRequest) => {
     'POST /api/chats/dm'
   );
 
-  // Track DM created/opened event
-  // Check if chat has participants by querying separately
-  const participants = await asUser(user, async (db) => {
-    return await db.chatParticipant.findMany({
-      where: { chatId: { equals: chatData.id } },
-    });
-  });
-  const hasParticipants = participants.length > 0;
-
   trackServerEvent(user.userId, 'dm_opened', {
     chatId: chatData.id,
     recipientId: targetUserId,
-    isNewChat: !hasParticipants,
+    isNewChat: chat.isNewChat,
   }).catch((error) => {
     logger.warn('Failed to track dm_opened event', { error });
   });

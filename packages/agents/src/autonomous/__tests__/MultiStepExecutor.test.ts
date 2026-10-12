@@ -195,6 +195,39 @@ describe('normalizeTradeDecisionParameters', () => {
     });
   });
 
+  test('does not guess a sell side when both outcomes are held', () => {
+    const bothSides = {
+      ...context,
+      agentPositions: {
+        ...context.agentPositions,
+        predictions: [
+          ...context.agentPositions.predictions,
+          { ...context.agentPositions.predictions[0], side: 'YES' },
+        ],
+      },
+    };
+    const result = normalizeTradeDecisionParameters(
+      { marketType: 'prediction', marketId: '123456', side: 'sell' },
+      bothSides as never
+    );
+    expect(result.side).toBeUndefined();
+    expect(
+      normalizeTradeDecisionParameters(
+        { marketType: 'prediction', marketId: '123456', side: 'sell' },
+        context as never
+      ).side
+    ).toBe('sell_no');
+  });
+
+  test('does not resolve a perp ticker from a name substring', () => {
+    expect(
+      normalizeTradeDecisionParameters(
+        { marketType: 'perp', marketId: 'NOT-NVIDAI-FUND', side: 'open_long' },
+        context as never
+      )
+    ).toMatchObject({ marketId: 'NOT-NVIDAI-FUND' });
+  });
+
   test('rescues numeric market ids emitted as JSON numbers', () => {
     expect(
       normalizeTradeDecisionParameters(
@@ -337,6 +370,46 @@ describe('normalizeSocialDecisionParameters', () => {
       postId: 'post-1',
       content: 'hello',
     });
+  });
+  test('rejects a parent comment that belongs to a different post', () => {
+    expect(
+      normalizeSocialDecisionParameters(
+        'COMMENT',
+        { postId: 'post-2', parentCommentId: 'comment-1', content: 'hi' },
+        context as never,
+        'agent-1'
+      )
+    ).toEqual({ content: 'hi' });
+  });
+
+  test('keeps a well-formed explicit id that is outside the rendered context', () => {
+    expect(
+      normalizeSocialDecisionParameters(
+        'FOLLOW',
+        { userId: '1234567890123456789' },
+        context as never,
+        'agent-1'
+      )
+    ).toEqual({ userId: '1234567890123456789' });
+  });
+
+  test('never repairs free text or out-of-range ordinals into a target', () => {
+    expect(
+      normalizeSocialDecisionParameters(
+        'DM',
+        { recipientId: 'the user who posted 2', content: 'x' },
+        context as never,
+        'agent-1'
+      )
+    ).toEqual({ content: 'x' });
+    expect(
+      normalizeSocialDecisionParameters(
+        'LIKE',
+        { postId: '#7' },
+        context as never,
+        'agent-1'
+      )
+    ).toEqual({});
   });
 });
 

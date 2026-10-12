@@ -72,7 +72,11 @@ export default defineCommand({
         consola.start(`Reloading engine (${reason})...`);
 
         try {
-          const next = await buildEngine(currentConfig, rootDir, args.legacy);
+          // Boots `next` (which becomes the active engine context) before
+          // shutting down `prev`; re-imports system files past the module cache.
+          const next = await buildEngine(currentConfig, rootDir, args.legacy, {
+            fresh: true,
+          });
           const prev = engine;
           engine = next;
           await prev.shutdown();
@@ -156,19 +160,18 @@ export default defineCommand({
     process.once('SIGTERM', cleanup);
 
     if (intervalSec <= 0) {
-      // Single tick mode
+      // Single tick mode — a failed tick rejects (non-zero exit) after cleanup
       tickCount++;
-      await enqueue(async () => {
-        try {
+      try {
+        await enqueue(async () => {
           const metrics = await engine.tick();
           consola.success('Tick completed', metrics);
-        } catch (err) {
-          consola.error('Tick failed:', err);
-        }
-      });
-      if (configWatcher) await configWatcher.unwatch();
-      if (watchState.systemsWatcher) await watchState.systemsWatcher.close();
-      await enqueue(async () => engine.shutdown());
+        });
+      } finally {
+        if (configWatcher) await configWatcher.unwatch();
+        if (watchState.systemsWatcher) await watchState.systemsWatcher.close();
+        await enqueue(async () => engine.shutdown());
+      }
       return;
     }
 

@@ -13,11 +13,6 @@ import type {
 } from '@elizaos/core';
 import type { JsonValue } from '../../../types/common';
 import type { EntityMention } from '../../../types/entities';
-import {
-  isActorEntity,
-  isCompanyEntity,
-  isUserEntity,
-} from '../../../types/entities';
 import type { FeedRuntime } from '../types';
 import {
   organizationMentionsContextSchema,
@@ -69,7 +64,7 @@ export const entityMentionsProvider: Provider = {
     }> = [];
 
     for (const entity of entities) {
-      if (entity.type === 'company' && isCompanyEntity(entity.data)) {
+      if (entity.type === 'company') {
         const company = entity.data;
 
         const context = `📈 ${company.ticker || company.name}:
@@ -89,7 +84,7 @@ export const entityMentionsProvider: Provider = {
           priceChangePercentage: company.priceChangePercentage ?? null,
           description: company.description ?? null,
         });
-      } else if (entity.type === 'user' && isUserEntity(entity.data)) {
+      } else {
         const user = entity.data;
 
         const context = `👤 ${user.displayName || user.username}:
@@ -104,20 +99,6 @@ export const entityMentionsProvider: Provider = {
           displayName: user.displayName ?? null,
           isAgent: user.isAgent ?? false,
           reputationPoints: user.reputationPoints ?? null,
-        });
-      } else if (entity.type === 'actor' && isActorEntity(entity.data)) {
-        const actor = entity.data;
-
-        const context = `🎭 ${actor.name}:
-• Type: Actor/Character
-• Category: ${actor.category || 'N/A'}${actor.bio ? `\n• Bio: ${actor.bio}` : ''}`;
-
-        entityContexts.push(context);
-        entityData.push({
-          type: 'actor',
-          id: actor.id,
-          name: actor.name,
-          category: actor.category ?? null,
         });
       }
     }
@@ -146,11 +127,11 @@ async function findEntityMentions(
   const results: EntityMention[] = [];
 
   // Extract potential entity names
-  // 1. @username mentions
-  const usernameMentions = text.match(/@(\w+)/g) || [];
+  // 1. @username mentions (usernames may contain hyphens)
+  const usernameMentions = text.match(/@([A-Za-z0-9_-]+)/g) || [];
 
-  // 2. $TICKER mentions (stock tickers)
-  const tickerMentions = text.match(/\$([A-Z]{1,5})\b/g) || [];
+  // 2. $TICKER mentions (canonical tickers can be longer than 5, e.g. OPENAGI)
+  const tickerMentions = text.match(/\$([A-Z][A-Z0-9]{0,9})\b/g) || [];
 
   // 3. Quoted names or capitalized multi-word names
   const quotedNames = text.match(/"([^"]{2,50})"/g) || [];
@@ -159,7 +140,10 @@ async function findEntityMentions(
 
   // Look up usernames via A2A
   if (usernameMentions.length > 0 && runtime.a2aClient) {
-    const usernames = usernameMentions.map((m) => m.substring(1).toLowerCase());
+    // Normalize and deduplicate before issuing any lookup requests.
+    const usernames = [
+      ...new Set(usernameMentions.map((m) => m.substring(1).toLowerCase())),
+    ];
 
     // Search for each username via A2A
     for (const username of usernames.slice(0, 10)) {
@@ -224,11 +208,6 @@ async function findEntityMentions(
       );
     }
   }
-
-  /**
-   * Actors are not available via A2A, so we skip them.
-   * This is acceptable as actors are internal game entities.
-   */
 
   // Deduplicate by ID
   const seen = new Set<string>();

@@ -51,8 +51,8 @@
  *         description: Unauthorized
  *       403:
  *         description: Admin access required
- *       404:
- *         description: User or appeal not found
+ *       409:
+ *         description: Appeal is not (or no longer) in human review
  *
  * @example
  * ```typescript
@@ -69,12 +69,20 @@
 
 import {
   createNotification,
+  errorResponse,
   requireAdmin,
   successResponse,
   withErrorHandling,
 } from '@feed/api';
-import type { JsonValue } from '@feed/db';
-import { db } from '@feed/db';
+import {
+  and,
+  db,
+  eq,
+  type JsonValue,
+  type Transaction,
+  users,
+  withTransaction,
+} from '@feed/db';
 import { WalletService } from '@feed/engine';
 import { logger } from '@feed/shared';
 import type { NextRequest } from 'next/server';
@@ -82,8 +90,87 @@ import { z } from 'zod';
 
 const HumanReviewActionSchema = z.object({
   action: z.enum(['approve', 'deny']),
-  reasoning: z.string().min(10).max(2000),
+  reasoning: z.string().trim().min(10).max(2000),
 });
+
+const inHumanReview = (userId: string) =>
+  and(eq(users.id, userId), eq(users.appealStatus, 'human_review'));
+
+/**
+ * Atomically claim a pending human review for approval: lock the user row
+ * while it is still in `human_review`, restore the account, clear the stake
+ * flags and credit the stake refund in the same transaction. Concurrent or
+ * repeated approvals find no row in `human_review` and credit nothing; a
+ * credit failure rolls back the approval so it can be retried.
+ */
+async function approveAppeal(
+  tx: Transaction,
+  userId: string,
+  reviewerId: string,
+  reasoning: string
+): Promise<boolean> {
+  const [locked] = await tx
+    .select({
+      appealStaked: users.appealStaked,
+      appealStakeAmount: users.appealStakeAmount,
+      falsePositiveHistory: users.falsePositiveHistory,
+    })
+    .from(users)
+    .where(inHumanReview(userId))
+    .limit(1)
+    .for('update');
+
+  if (!locked) return false;
+
+  const reviewedAt = new Date();
+  const history: JsonValue[] = Array.isArray(locked.falsePositiveHistory)
+    ? [...locked.falsePositiveHistory]
+    : [];
+  history.push({
+    date: reviewedAt.toISOString(),
+    reason: reasoning,
+    reviewedBy: reviewerId,
+    type: 'human_review',
+  });
+
+  await tx
+    .update(users)
+    .set({
+      isBanned: false,
+      isScammer: false,
+      isCSAM: false,
+      bannedAt: null,
+      bannedBy: null,
+      bannedReason: null,
+      appealStatus: 'approved',
+      appealReviewedAt: reviewedAt,
+      falsePositiveHistory: history,
+      appealStaked: false,
+      appealStakeAmount: null,
+      // appealStakeTxHash is kept so the same escrow payment cannot fund (and be
+      // refunded for) a later appeal; /api/moderation/appeal checks it for reuse.
+    })
+    .where(inHumanReview(userId));
+
+  const stakeAmount = Number(locked.appealStakeAmount);
+  if (locked.appealStaked && stakeAmount > 0) {
+    await WalletService.credit(
+      userId,
+      stakeAmount,
+      'appeal_stake_refund',
+      'Appeal stake refund - account restored via human review',
+      undefined,
+      tx
+    );
+    logger.info(
+      'Appeal stake refunded',
+      { userId, stakeAmount },
+      'HumanReview'
+    );
+  }
+
+  return true;
+}
 
 export const POST = withErrorHandling(
   async (
@@ -96,55 +183,16 @@ export const POST = withErrorHandling(
     const body = await request.json();
     const { action, reasoning } = HumanReviewActionSchema.parse(body);
 
-    const user = await db.user.findUnique({
-      where: { id: userId },
-      select: {
-        id: true,
-        appealStatus: true,
-        isBanned: true,
-        appealStaked: true,
-        appealStakeAmount: true,
-        falsePositiveHistory: true,
-      },
-    });
-
-    if (!user || user.appealStatus !== 'human_review') {
-      return successResponse(
-        { success: false, error: 'Appeal not in human review' },
-        400
-      );
-    }
-
     if (action === 'approve') {
-      // Mark as false positive and restore account
-      const falsePositiveHistory =
-        (user.falsePositiveHistory as Array<Record<string, unknown>> | null) ||
-        [];
-      falsePositiveHistory.push({
-        date: new Date().toISOString(),
-        reason: reasoning,
-        reviewedBy: adminUser.userId,
-        type: 'human_review',
-      });
-
-      await db.user.update({
-        where: { id: userId },
-        data: {
-          isBanned: false,
-          isScammer: false,
-          isCSAM: false,
-          bannedAt: null,
-          bannedBy: null,
-          bannedReason: null,
-          appealStatus: 'approved',
-          appealReviewedAt: new Date(),
-          falsePositiveHistory: falsePositiveHistory as JsonValue,
-        },
-      });
-
-      // Refund stake if staked
-      if (user.appealStaked && user.appealStakeAmount) {
-        await refundAppealStake(userId, Number(user.appealStakeAmount));
+      const approved = await withTransaction((tx) =>
+        approveAppeal(tx, userId, adminUser.userId, reasoning)
+      );
+      if (!approved) {
+        return errorResponse(
+          'Appeal not in human review',
+          'APPEAL_NOT_IN_REVIEW',
+          409
+        );
       }
 
       await createNotification({
@@ -169,15 +217,25 @@ export const POST = withErrorHandling(
         message: 'Appeal approved - account restored',
       });
     }
-    // Deny - permanent ban
-    await db.user.update({
-      where: { id: userId },
-      data: {
+
+    // Deny - permanent ban. Compare-and-set on the pending review state so a
+    // deny cannot overwrite a concurrent approval.
+    const denied = await db
+      .update(users)
+      .set({
         appealStatus: 'denied',
         appealReviewedAt: new Date(),
         // Keep banned, scammer, CSAM flags
-      },
-    });
+      })
+      .where(inHumanReview(userId))
+      .returning({ id: users.id });
+    if (denied.length === 0) {
+      return errorResponse(
+        'Appeal not in human review',
+        'APPEAL_NOT_IN_REVIEW',
+        409
+      );
+    }
 
     await createNotification({
       userId,
@@ -202,38 +260,3 @@ export const POST = withErrorHandling(
     });
   }
 );
-
-/**
- * Refund appeal stake to user's virtual balance
- */
-async function refundAppealStake(
-  userId: string,
-  stakeAmount: number
-): Promise<void> {
-  await WalletService.credit(
-    userId,
-    stakeAmount,
-    'appeal_stake_refund',
-    'Appeal stake refund - account restored via human review',
-    undefined
-  );
-
-  // Clear stake flags
-  await db.user.update({
-    where: { id: userId },
-    data: {
-      appealStaked: false,
-      appealStakeAmount: null,
-      appealStakeTxHash: null,
-    },
-  });
-
-  logger.info(
-    'Appeal stake refunded',
-    {
-      userId,
-      stakeAmount,
-    },
-    'HumanReview'
-  );
-}

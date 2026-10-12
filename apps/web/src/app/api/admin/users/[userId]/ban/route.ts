@@ -92,23 +92,29 @@ import {
   BusinessLogicError,
   distributeReputationToReporters,
   getClientIp,
+  isUserAdmin,
   logAdminAction,
   NotFoundError,
   requireAdmin,
   successResponse,
   withErrorHandling,
 } from '@feed/api';
-import { db } from '@feed/db';
+import { and, db, eq, users } from '@feed/db';
 import { logger } from '@feed/shared';
 import type { NextRequest } from 'next/server';
 import { z } from 'zod';
 
-const BanUserSchema = z.object({
-  action: z.enum(['ban', 'unban']),
-  reason: z.string().min(1).max(500).optional(),
-  isScammer: z.boolean().optional(),
-  isCSAM: z.boolean().optional(),
-});
+const BanUserSchema = z
+  .object({
+    action: z.enum(['ban', 'unban']),
+    reason: z.string().trim().min(1).max(500).optional(),
+    isScammer: z.boolean().optional(),
+    isCSAM: z.boolean().optional(),
+  })
+  .refine((body) => body.action !== 'ban' || body.reason !== undefined, {
+    message: 'reason is required when banning',
+    path: ['reason'],
+  });
 
 export const POST = withErrorHandling(
   async (
@@ -153,8 +159,17 @@ export const POST = withErrorHandling(
       throw new NotFoundError('User', userId);
     }
 
-    // Prevent banning admins (unless you're banning yourself, which is allowed)
-    if (targetUser.isAdmin && targetUser.id !== adminUser.userId) {
+    // Admins cannot ban themselves (could remove the last effective admin)
+    if (action === 'ban' && targetUser.id === adminUser.userId) {
+      throw new BusinessLogicError('Cannot ban yourself', 'CANNOT_BAN_SELF');
+    }
+
+    // Prevent banning admins, including role-table admins without the
+    // legacy isAdmin flag
+    if (
+      action === 'ban' &&
+      (targetUser.isAdmin || (await isUserAdmin(targetUser.id)))
+    ) {
       throw new BusinessLogicError(
         'Cannot ban other admins',
         'CANNOT_BAN_ADMIN'
@@ -169,29 +184,37 @@ export const POST = withErrorHandling(
       );
     }
 
-    // Update user ban status and flags
-    const updatedUser = await db.user.update({
-      where: { id: userId },
-      data: {
+    // Compare-and-set on the current ban state so repeated or concurrent
+    // requests apply (and trigger reporter rewards) at most once.
+    const [updatedUser] = await db
+      .update(users)
+      .set({
         isBanned: action === 'ban',
         bannedAt: action === 'ban' ? new Date() : null,
-        bannedReason: action === 'ban' ? reason : null,
+        bannedReason: action === 'ban' ? (reason ?? null) : null,
         bannedBy: action === 'ban' ? adminUser.userId : null,
         isScammer: action === 'ban' ? (isScammer ?? false) : false,
         isCSAM: action === 'ban' ? (isCSAM ?? false) : false,
-      },
-      select: {
-        id: true,
-        username: true,
-        displayName: true,
-        isBanned: true,
-        bannedAt: true,
-        bannedReason: true,
-        bannedBy: true,
-        isScammer: true,
-        isCSAM: true,
-      },
-    });
+      })
+      .where(and(eq(users.id, userId), eq(users.isBanned, action !== 'ban')))
+      .returning({
+        id: users.id,
+        username: users.username,
+        displayName: users.displayName,
+        isBanned: users.isBanned,
+        bannedAt: users.bannedAt,
+        bannedReason: users.bannedReason,
+        bannedBy: users.bannedBy,
+        isScammer: users.isScammer,
+        isCSAM: users.isCSAM,
+      });
+
+    if (!updatedUser) {
+      throw new BusinessLogicError(
+        action === 'ban' ? 'User is already banned' : 'User is not banned',
+        action === 'ban' ? 'ALREADY_BANNED' : 'NOT_BANNED'
+      );
+    }
 
     if (action === 'ban') {
       // Distribute points to successful reporters if CSAM/scammer
@@ -222,10 +245,10 @@ export const POST = withErrorHandling(
         isBanned: targetUser.isBanned,
       },
       newValue: {
-        isBanned: action === 'ban',
-        reason: reason ?? null,
-        isScammer: isScammer ?? false,
-        isCSAM: isCSAM ?? false,
+        isBanned: updatedUser.isBanned,
+        reason: updatedUser.bannedReason,
+        isScammer: updatedUser.isScammer,
+        isCSAM: updatedUser.isCSAM,
       },
       metadata: {
         targetUsername: targetUser.username,

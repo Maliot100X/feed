@@ -249,30 +249,30 @@ export const POST = withErrorHandling(async (request: NextRequest) => {
   const evaluation = await evaluateReport(report.id);
   await storeEvaluationResult(report.id, evaluation);
 
-  // If evaluation indicates valid scammer/CSAM report with high confidence, automatically ban
-  // Check if recommendedActions suggest banning or if reasoning indicates scamming/CSAM
+  // Punitive action is driven only by explicit recommended actions from the
+  // evaluator, never by substring matches in free-text reasoning (negations
+  // such as "no evidence of a scam" must not ban anyone). The evaluator output
+  // is untrusted JSON, so its shape is checked before use.
+  const recommendedActions: string[] = Array.isArray(
+    evaluation.recommendedActions
+  )
+    ? evaluation.recommendedActions.filter(
+        (action): action is string => typeof action === 'string'
+      )
+    : [];
+  const isScammer = recommendedActions.includes('mark_scammer');
+  const isCSAM = recommendedActions.includes('mark_csam');
   const shouldAutoBan =
     evaluation.outcome === 'valid_report' &&
+    typeof evaluation.confidence === 'number' &&
     evaluation.confidence >= 0.8 &&
     report.reportedUserId !== null &&
-    (evaluation.recommendedActions.includes('ban_user') ||
-      evaluation.recommendedActions.includes('ban') ||
-      evaluation.recommendedActions.includes('mark_scammer') ||
-      evaluation.recommendedActions.includes('mark_csam') ||
-      evaluation.reasoning.toLowerCase().includes('scam') ||
-      evaluation.reasoning.toLowerCase().includes('csam') ||
-      evaluation.reasoning.toLowerCase().includes('child sexual abuse'));
+    (recommendedActions.includes('ban_user') ||
+      recommendedActions.includes('ban') ||
+      isScammer ||
+      isCSAM);
 
   if (shouldAutoBan && report.reportedUserId) {
-    // Determine if scammer or CSAM based on evaluation
-    const isScammer =
-      evaluation.recommendedActions.includes('mark_scammer') ||
-      evaluation.reasoning.toLowerCase().includes('scam');
-    const isCSAM =
-      evaluation.recommendedActions.includes('mark_csam') ||
-      evaluation.reasoning.toLowerCase().includes('csam') ||
-      evaluation.reasoning.toLowerCase().includes('child sexual abuse');
-
     // Automatically ban the reported user
     if (report.reportedUserId) {
       await db.user.update({
@@ -281,7 +281,7 @@ export const POST = withErrorHandling(async (request: NextRequest) => {
           isBanned: true,
           bannedAt: new Date(),
           bannedReason: `Automated ban from report #${report.id}: ${evaluation.reasoning.substring(0, 200)}`,
-          bannedBy: undefined, // System ban - no specific admin
+          bannedBy: null, // System ban - no specific admin
           isScammer: isScammer,
           isCSAM: isCSAM,
         },

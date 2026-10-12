@@ -9,6 +9,7 @@
  */
 
 import type {
+  ArcStateType,
   NpcMemory,
   PendingTransition,
   PriceModifier,
@@ -399,17 +400,39 @@ export { isStringArray } from '@feed/shared';
 // =============================================================================
 
 /**
- * PendingTransition schema for arc state transitions.
- *
- * Note: targetState accepts any string rather than validating against the concrete
- * ArcStateType union. This is intentional for future-proofing - new arc states can
- * be added without requiring schema updates. The PendingTransition interface in
- * @feed/db defines the canonical ArcStateType constraint; this schema provides
- * looser runtime validation for flexibility.
+ * Every ArcStateType value. The type assertions below fail to compile if a
+ * state is added to (or removed from) the ArcStateType union without
+ * updating this list, so runtime validation stays in sync with the type.
+ */
+const ARC_STATE_VALUES = [
+  'setup',
+  'tension',
+  'escalation',
+  'crisis',
+  'revelation',
+  'resolution',
+  'morning',
+  'midday',
+  'afternoon',
+  'evening',
+  'active',
+  'climax',
+  'live',
+  'resolving',
+] as const satisfies readonly ArcStateType[];
+type MissingArcState = Exclude<ArcStateType, (typeof ARC_STATE_VALUES)[number]>;
+const _arcStatesExhaustive: [MissingArcState] extends [never] ? true : never =
+  true;
+void _arcStatesExhaustive;
+
+/**
+ * PendingTransition schema for arc state transitions. targetState is
+ * validated against the concrete ArcStateType union (previously any string
+ * was accepted and then cast to the constrained type).
  */
 export const PendingTransitionSchema = z.object({
-  targetState: z.string(),
-  triggerDay: z.number(),
+  targetState: z.enum(ARC_STATE_VALUES),
+  triggerDay: z.number().int().nonnegative(),
   triggerEventType: z.string().optional(),
   probability: z.number().min(0).max(1).optional(),
 });
@@ -456,7 +479,7 @@ export function parsePendingTransitionsSafe(
 
   const result = PendingTransitionsSchema.safeParse(data);
   if (result.success) {
-    return result.data as PendingTransition[];
+    return result.data;
   }
 
   logger.warn(
@@ -477,7 +500,7 @@ export function parsePendingTransitionsSafe(
       total++;
       const itemResult = PendingTransitionSchema.safeParse(item);
       if (itemResult.success) {
-        valid.push(itemResult.data as PendingTransition);
+        valid.push(itemResult.data);
       } else {
         invalid++;
       }

@@ -25,15 +25,18 @@ describe('TrendingTopicsEngine', () => {
       generateJSON: mock(async () => ({
         trends: [
           {
+            tag: 'ai',
             trendName: 'AI Revolution',
             description:
               'Major breakthroughs in AI technology reshaping the industry.',
           },
           {
+            tag: 'tech',
             trendName: 'Tech Regulation',
             description: 'Government proposes new tech oversight framework.',
           },
           {
+            tag: 'crypto',
             trendName: 'Crypto Comeback',
             description: 'Digital assets rally amid positive sentiment.',
           },
@@ -47,6 +50,26 @@ describe('TrendingTopicsEngine', () => {
   });
 
   describe('Validation', () => {
+    it('clears previous trends when no tagged posts remain', async () => {
+      await engine.updateTrends(
+        [
+          {
+            id: 'post-1',
+            content: 'AI news',
+            author: 'user-1',
+            authorName: 'User',
+            timestamp: '2025-11-15T10:00:00Z',
+            tags: ['ai'],
+          },
+        ],
+        10
+      );
+      expect(engine.getTrends()).toHaveLength(1);
+
+      await engine.updateTrends([], 20);
+      expect(engine.getTrends()).toEqual([]);
+    });
+
     it('should not fail on empty posts array', async () => {
       await engine.updateTrends([], 10);
       const trends = engine.getTrends();
@@ -487,6 +510,126 @@ describe('TrendingTopicsEngine', () => {
       expect(engine.getLastUpdateTick()).toBe(10);
       expect(engine.needsUpdate(12)).toBe(false); // Only 2 ticks since last update
       expect(engine.needsUpdate(15)).toBe(true); // 5 ticks since last update (> 4)
+    });
+  });
+
+  describe('Correctness', () => {
+    const post = (
+      id: string,
+      tags: string[],
+      timestamp = '2025-11-15T10:00:00Z'
+    ): FeedPost => ({
+      id,
+      content: `Post ${id}`,
+      author: 'user-1',
+      authorName: 'User',
+      timestamp,
+      tags,
+    });
+
+    it('pairs LLM descriptions by tag, not array position', async () => {
+      mockLLM.generateJSON = mock(async () => ({
+        trends: [
+          {
+            tag: 'crypto',
+            trendName: 'Crypto Name',
+            description: 'About crypto.',
+          },
+          { tag: 'ai', trendName: 'AI Name', description: 'About AI.' },
+        ],
+      }));
+      await engine.updateTrends(
+        [post('p1', ['ai']), post('p2', ['ai']), post('p3', ['crypto'])],
+        10
+      );
+      const trends = engine.getTrends();
+      expect(trends.map((t) => [t.tag, t.trendName])).toEqual([
+        ['ai', 'AI Name'],
+        ['crypto', 'Crypto Name'],
+      ]);
+    });
+
+    it('uses factual description for topics the LLM omitted', async () => {
+      mockLLM.generateJSON = mock(async () => ({
+        trends: [{ tag: 'ai', trendName: 'AI Name', description: 'About AI.' }],
+      }));
+      await engine.updateTrends(
+        [post('p1', ['ai']), post('p2', ['ai']), post('p3', ['crypto'])],
+        10
+      );
+      const crypto = engine.getTrends().find((t) => t.tag === 'crypto');
+      expect(crypto?.trendName).toBe('crypto');
+      expect(crypto?.description).toBe('1 posts discussing crypto');
+    });
+
+    it('drops removed topics when membership shrinks without regeneration', async () => {
+      const tags = ['a', 'b', 'c', 'd', 'e'];
+      await engine.updateTrends(
+        tags.map((t, i) => post(`p${i}`, [t])),
+        10
+      );
+      expect(engine.getTrends()).toHaveLength(5);
+
+      // One topic disappears: 1 removed of 9 total => below change threshold
+      await engine.updateTrends(
+        tags.slice(0, 4).map((t, i) => post(`p${i}`, [t])),
+        20
+      );
+      expect(engine.getTrends().map((t) => t.tag)).toEqual([
+        'a',
+        'b',
+        'c',
+        'd',
+      ]);
+    });
+
+    it('counts duplicate tags and duplicate posts once', async () => {
+      const p = post('p1', ['AI', 'ai ', 'ai']);
+      await engine.updateTrends([p, p], 10);
+      expect(engine.getTrends()[0]?.count).toBe(1);
+    });
+
+    it('recency is based on post timestamps, independent of tick units', async () => {
+      await engine.updateTrends(
+        [
+          post('old', ['old'], '2025-11-15T00:00:00Z'),
+          post('new', ['new'], '2025-11-15T10:00:00Z'),
+        ],
+        1000
+      );
+      const trends = engine.getTrends();
+      expect(trends.find((t) => t.tag === 'new')?.recency).toBe(1);
+      expect(trends.find((t) => t.tag === 'old')?.recency).toBe(0.5);
+    });
+
+    it('retries a failed update on the next call', async () => {
+      mockLLM.generateJSON = mock(async () => {
+        throw new Error('provider down');
+      });
+      await expect(
+        engine.updateTrends([post('p1', ['ai'])], 10)
+      ).rejects.toThrow('provider down');
+      expect(engine.getLastUpdateTick()).toBe(0);
+
+      mockLLM.generateJSON = mock(async () => ({
+        trends: [{ tag: 'ai', trendName: 'AI Name', description: 'About AI.' }],
+      }));
+      await engine.updateTrends([post('p1', ['ai'])], 11);
+      expect(engine.getTrends()[0]?.trendName).toBe('AI Name');
+      expect(engine.getLastUpdateTick()).toBe(11);
+    });
+
+    it('getTrends returns snapshots that cannot mutate engine state', async () => {
+      await engine.updateTrends([post('p1', ['ai'])], 10);
+      const snapshot = engine.getTrends();
+      snapshot[0]!.count = 999;
+      snapshot[0]!.samplePosts.push('x');
+      expect(engine.getTrends()[0]?.count).toBe(1);
+      expect(engine.getTrends()[0]?.samplePosts).toEqual(['p1']);
+    });
+
+    it('rejects non-finite update intervals', () => {
+      expect(() => engine.setUpdateInterval(Number.NaN)).toThrow();
     });
   });
 });

@@ -1,12 +1,5 @@
 /**
- * RL Training System Test
- *
- * Verifies the RL training and inference setup:
- * 1. Agent generates trajectory data
- * 2. RULER scores trajectory
- * 3. Training uses scored data
- * 4. Agent uses model for inference
- * 5. Agent takes actions in game
+ * RL model configuration and context-window limits.
  */
 
 import { describe, expect, it } from 'bun:test';
@@ -48,92 +41,6 @@ describe('RL Training System', () => {
 
       expect(result.tokens).toBeLessThanOrEqual(1000);
       expect(result.text.length).toBeLessThan(longText.length);
-    });
-  });
-
-  describe('Agent Services Preserve Required Context', () => {
-    it('AutonomousTradingService should reject oversized required context', async () => {
-      const module = await import('../autonomous/AutonomousTradingService');
-      expect(module.AutonomousTradingService).toBeDefined();
-
-      // Verify the file has truncation code (basic check)
-      const fs = await import('fs/promises');
-      const path = await import('path');
-      const content = await fs.readFile(
-        path.join(__dirname, '../autonomous/AutonomousTradingService.ts'),
-        'utf-8'
-      );
-      expect(content).not.toContain('truncateToTokenLimitSync');
-      expect(content).toContain('required context exceeds token budget');
-      expect(content).toContain('30000'); // 30K limit
-    });
-
-    it('AutonomousPostingService should reject oversized required context', async () => {
-      const fs = await import('fs/promises');
-      const path = await import('path');
-      const content = await fs.readFile(
-        path.join(__dirname, '../autonomous/AutonomousPostingService.ts'),
-        'utf-8'
-      );
-      expect(content).not.toContain('truncateToTokenLimitSync');
-      expect(content).toContain('required context exceeds token budget');
-      expect(content).toContain('30000');
-    });
-
-    it('AutonomousPlanningCoordinator should reject oversized required context', async () => {
-      const fs = await import('fs/promises');
-      const path = await import('path');
-      const content = await fs.readFile(
-        path.join(__dirname, '../autonomous/AutonomousPlanningCoordinator.ts'),
-        'utf-8'
-      );
-      expect(content).not.toContain('truncateToTokenLimitSync');
-      expect(content).toContain('required context exceeds token budget');
-      expect(content).toContain('30000');
-    });
-
-    it('AutonomousBatchResponseService should reject oversized required context', async () => {
-      const fs = await import('fs/promises');
-      const path = await import('path');
-      const content = await fs.readFile(
-        path.join(__dirname, '../autonomous/AutonomousBatchResponseService.ts'),
-        'utf-8'
-      );
-      expect(content).not.toContain('truncateToTokenLimitSync');
-      expect(content).toContain('required context exceeds token budget');
-      expect(content).toContain('30000');
-    });
-  });
-
-  describe('Provider Data Caps', () => {
-    it('BatchResponseService should cap interactions to 30', async () => {
-      const fs = await import('fs/promises');
-      const path = await import('path');
-      const content = await fs.readFile(
-        path.join(__dirname, '../autonomous/AutonomousBatchResponseService.ts'),
-        'utf-8'
-      );
-      expect(content).toContain('slice(0, 30)'); // Cap to 30 interactions
-    });
-  });
-
-  describe('Integration Readiness', () => {
-    it('should have all components for RL loop', async () => {
-      // 1. Trajectory logging
-      const trajectoryLogger = await import(
-        '../plugins/plugin-trajectory-logger/src/TrajectoryLoggerService'
-      );
-      expect(trajectoryLogger.TrajectoryLoggerService).toBeDefined();
-
-      // 2. RL Model config
-      const config = await import('@feed/training');
-      expect(config.getRLModelConfig).toBeDefined();
-
-      // 3. Agent runtime
-      const runtime = await import('../runtime/AgentRuntimeManager');
-      expect(runtime.AgentRuntimeManager).toBeDefined();
-
-      console.log('✅ All RL loop components present');
     });
   });
 });

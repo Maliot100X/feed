@@ -125,6 +125,21 @@ import { authenticate, withErrorHandling } from '@feed/api';
 import { db } from '@feed/db';
 import type { NextRequest } from 'next/server';
 import { NextResponse } from 'next/server';
+import { z } from 'zod';
+
+const UpdateGoalSchema = z
+  .object({
+    name: z.string().trim().min(1).max(200).optional(),
+    description: z.string().trim().min(1).max(2000).optional(),
+    // null clears the target
+    target: z.string().trim().max(2000).nullable().optional(),
+    priority: z.number().int().min(1).max(10).optional(),
+    status: z.enum(['active', 'paused', 'completed', 'failed']).optional(),
+  })
+  .strict()
+  .refine((body) => Object.keys(body).length > 0, {
+    message: 'No updatable fields provided',
+  });
 
 /**
  * GET - Get single goal
@@ -200,57 +215,33 @@ export const PUT = withErrorHandling(async function PUT(
     return NextResponse.json({ error: 'Goal not found' }, { status: 404 });
   }
 
-  // Parse updates
-  const body = (await req.json()) as {
-    name?: string;
-    description?: string;
-    target?: string;
-    priority?: number | null;
-    status?: string;
-  };
-  const { name, description, target, priority, status } = body;
+  // Parse updates (strict: malformed or unknown fields are a 400, not ignored)
+  const { name, description, target, priority, status } =
+    UpdateGoalSchema.parse(await req.json());
 
-  // Build update object
   const updates: {
     updatedAt: Date;
     name?: string;
     description?: string;
-    target?: string;
+    target?: string | null;
     priority?: number;
     status?: string;
-    completedAt?: Date;
+    completedAt?: Date | null;
   } = {
     updatedAt: new Date(),
   };
 
-  if (name !== undefined && typeof name === 'string') updates.name = name;
-  if (description !== undefined && typeof description === 'string')
-    updates.description = description;
-  if (target !== undefined && typeof target === 'string')
-    updates.target = target;
-  if (priority !== undefined && priority !== null) {
-    if (typeof priority !== 'number' || priority < 1 || priority > 10) {
-      return NextResponse.json(
-        { error: 'Priority must be between 1 and 10' },
-        { status: 400 }
-      );
-    }
-    updates.priority = priority;
-  }
+  if (name !== undefined) updates.name = name;
+  if (description !== undefined) updates.description = description;
+  if (target !== undefined) updates.target = target;
+  if (priority !== undefined) updates.priority = priority;
   if (status !== undefined) {
-    const validStatuses = ['active', 'paused', 'completed', 'failed'];
-    if (!validStatuses.includes(status)) {
-      return NextResponse.json(
-        {
-          error: `Invalid status. Must be one of: ${validStatuses.join(', ')}`,
-        },
-        { status: 400 }
-      );
-    }
     updates.status = status;
-
-    if (status === 'completed' && !existingGoal.completedAt) {
-      updates.completedAt = new Date();
+    if (status === 'completed') {
+      if (!existingGoal.completedAt) updates.completedAt = new Date();
+    } else if (existingGoal.completedAt) {
+      // Reactivated/paused/failed goals are no longer completed.
+      updates.completedAt = null;
     }
   }
 

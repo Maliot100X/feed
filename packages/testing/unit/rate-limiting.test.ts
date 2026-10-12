@@ -4,13 +4,15 @@
  * Tests for user-level rate limiting and duplicate detection
  */
 
-import { beforeEach, describe, expect, it } from 'bun:test';
+import { beforeEach, describe, expect, it, setSystemTime } from 'bun:test';
 import {
   checkDuplicate,
   checkRateLimit,
+  cleanupDuplicates,
   clearAllDuplicates,
   clearAllRateLimits,
   DUPLICATE_DETECTION_CONFIGS,
+  getDuplicateStats,
   getRateLimitStatus,
   RATE_LIMIT_CONFIGS,
 } from '@feed/engine';
@@ -317,5 +319,34 @@ describe('API duplicate detector (structured keys)', () => {
       recordsByType: { post: 2, comment: 1 },
     });
     api.clearAllDuplicates();
+  });
+});
+
+describe('Duplicate detection cleanup', () => {
+  beforeEach(() => {
+    clearAllDuplicates();
+  });
+
+  it('keeps records alive for their own (custom, longer) window', () => {
+    const start = new Date('2026-01-01T00:00:00.000Z');
+    const config = { windowMs: 30 * 60 * 1000, actionType: 'long-window' };
+    try {
+      setSystemTime(start);
+      expect(checkDuplicate('u-long', 'same text', config).isDuplicate).toBe(
+        false
+      );
+      setSystemTime(new Date(start.getTime() + 15 * 60 * 1000));
+      cleanupDuplicates();
+      expect(checkDuplicate('u-long', 'same text', config).isDuplicate).toBe(
+        true
+      );
+    } finally {
+      setSystemTime();
+    }
+  });
+
+  it('reports action types for user IDs that contain colons', () => {
+    checkDuplicate('did:example:1', 'text', DUPLICATE_DETECTION_CONFIGS.POST);
+    expect(getDuplicateStats().recordsByType).toEqual({ post: 1 });
   });
 });

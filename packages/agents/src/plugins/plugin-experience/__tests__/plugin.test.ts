@@ -6,7 +6,7 @@ describe('Experience Plugin Tests', () => {
     it('should have correct plugin metadata', () => {
       expect(experiencePlugin.name).toBe('experience');
       expect(experiencePlugin.description).toBe(
-        'Self-learning experience system that records experiences, learns from agent interactions, and tracks NPC trust & performance'
+        'Self-learning experience system that records experiences and learns from agent interactions'
       );
     });
 

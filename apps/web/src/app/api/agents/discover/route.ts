@@ -104,6 +104,7 @@ import {
   npcBootstrapService,
 } from '@feed/agents';
 import { withErrorHandling } from '@feed/api';
+import { db, inArray, users } from '@feed/db';
 import { getBaseUrl, logger } from '@feed/shared';
 import type { NextRequest } from 'next/server';
 import { NextResponse } from 'next/server';
@@ -117,12 +118,16 @@ export const GET = withErrorHandling(async function GET(req: NextRequest) {
   const typesParam = searchParams.get('types');
   const skillsParam = searchParams.get('skills');
   const domainsParam = searchParams.get('domains');
-  const matchMode = (searchParams.get('matchMode') as 'any' | 'all') || 'all';
+  const matchMode = searchParams.get('matchMode') === 'any' ? 'any' : 'all';
   const search = searchParams.get('search') || undefined;
   const includeExternalParam = searchParams.get('includeExternal');
   const includeExternal = includeExternalParam === 'true';
-  const limit = Number.parseInt(searchParams.get('limit') || '50');
-  const offset = Number.parseInt(searchParams.get('offset') || '0');
+  const parsedLimit = Number.parseInt(searchParams.get('limit') || '50', 10);
+  const parsedOffset = Number.parseInt(searchParams.get('offset') || '0', 10);
+  const limit = Number.isFinite(parsedLimit)
+    ? Math.min(Math.max(parsedLimit, 1), 100)
+    : 50;
+  const offset = Number.isFinite(parsedOffset) ? Math.max(parsedOffset, 0) : 0;
   const shouldBootstrapLocalRegistry =
     !includeExternal &&
     !typesParam &&
@@ -192,29 +197,50 @@ export const GET = withErrorHandling(async function GET(req: NextRequest) {
     agents = await agentRegistry.discoverAgents(filter);
   }
 
-  const agentCards = agents.map((agent) => ({
-    version: '1.0' as const,
-    agentId: agent.agentId,
-    name: agent.name,
-    description: agent.systemPrompt,
-    type: agent.type,
-    status: agent.status,
-    trustLevel: agent.trustLevel,
-    endpoints: {
-      a2a:
-        agent.capabilities.a2aEndpoint ||
-        `${baseUrl}/api/agents/${agent.agentId}/a2a`,
-      mcp:
-        agent.capabilities.mcpEndpoint ||
-        `${baseUrl}/api/agents/${agent.agentId}/mcp`,
-      card: `${baseUrl}/api/agents/${agent.agentId}/card`,
-    },
-    capabilities: agent.capabilities,
-    authentication: {
-      required: false,
-      methods: [],
-    },
-  }));
+  // Public description comes from the agent's public profile bio. The system
+  // prompt is private configuration and must never be published.
+  const userIds = agents.flatMap((agent) =>
+    agent.userId ? [agent.userId] : []
+  );
+  const bios = new Map(
+    userIds.length > 0
+      ? (
+          await db
+            .select({ id: users.id, bio: users.bio })
+            .from(users)
+            .where(inArray(users.id, userIds))
+        ).map((row) => [row.id, row.bio])
+      : []
+  );
+
+  const agentCards = agents.map((agent) => {
+    const externalA2aEndpoint = agent.capabilities.a2aEndpoint;
+    return {
+      version: '1.0' as const,
+      agentId: agent.agentId,
+      name: agent.name,
+      description:
+        (agent.userId ? bios.get(agent.userId) : null) ||
+        'Autonomous agent on Feed platform',
+      type: agent.type,
+      status: agent.status,
+      trustLevel: agent.trustLevel,
+      endpoints: {
+        a2a:
+          externalA2aEndpoint || `${baseUrl}/api/agents/${agent.agentId}/a2a`,
+        // Feed does not host per-agent MCP endpoints; only echo a declared one.
+        ...(agent.capabilities.mcpEndpoint
+          ? { mcp: agent.capabilities.mcpEndpoint }
+          : {}),
+        card: `${baseUrl}/api/agents/${agent.agentId}/card`,
+      },
+      capabilities: agent.capabilities,
+      // Feed-hosted A2A requires an API key; external endpoints' auth is unknown.
+      ...(externalA2aEndpoint
+        ? {}
+        : { authentication: { required: true, methods: ['apiKey'] } }),
+    };
+  });
 
   logger.info(
     `Discovered ${agentCards.length} agents`,

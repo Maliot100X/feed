@@ -13,7 +13,7 @@ import {
   Users,
   Zap,
 } from 'lucide-react';
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { z } from 'zod';
 import { Avatar } from '@/components/shared/Avatar';
 import { Skeleton } from '@/components/shared/Skeleton';
@@ -193,54 +193,91 @@ export function StatsTab() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
+  // Secondary sections fail independently; their errors are shown in place
+  // instead of silently hiding the section or leaving stale figures.
+  const [feeError, setFeeError] = useState<string | null>(null);
+  const [tokenError, setTokenError] = useState<string | null>(null);
+  const loadingRef = useRef(false);
+
   const fetchStats = useCallback(async () => {
     const response = await fetch(apiUrl('/api/admin/stats'));
-    if (!response.ok) throw new Error('Failed to fetch stats');
+    if (!response.ok) {
+      throw new Error(`Failed to fetch stats (HTTP ${response.status})`);
+    }
     const data = await response.json();
     const validation = SystemStatsSchema.safeParse(data);
     if (!validation.success) {
       throw new Error('Invalid system stats data structure');
     }
-    setStats(validation.data);
-    setError(null);
-    setLoading(false);
+    return validation.data;
   }, []);
 
   const fetchFeeStats = useCallback(async () => {
     const response = await fetch(apiUrl('/api/admin/fees'));
-    if (!response.ok) return; // Fail silently for fees
+    if (!response.ok) {
+      throw new Error(`Fee stats unavailable (HTTP ${response.status})`);
+    }
     const data = await response.json();
     const validation = FeeStatsSchema.safeParse(data.platformStats);
-    if (validation.success) {
-      setFeeStats(validation.data);
+    if (!validation.success) {
+      throw new Error('Fee stats unavailable (unexpected response)');
     }
+    return validation.data;
   }, []);
 
   const fetchTokenStats = useCallback(async () => {
     const response = await fetch(
       apiUrl('/api/stats/tokens?period=day&limit=50')
     );
-    if (!response.ok) return; // Fail silently for token stats
+    if (!response.ok) {
+      throw new Error(`Token stats unavailable (HTTP ${response.status})`);
+    }
     const data = await response.json();
     const validation = TokenStatsSchema.safeParse(data);
-    if (validation.success) {
-      setTokenStats(validation.data);
+    if (!validation.success) {
+      throw new Error('Token stats unavailable (unexpected response)');
     }
+    return validation.data;
   }, []);
 
   useEffect(() => {
+    const messageOf = (reason: unknown, fallback: string) =>
+      reason instanceof Error ? reason.message : fallback;
+
     const loadData = async () => {
-      await fetchStats().catch((err) => {
-        setError(err instanceof Error ? err.message : 'Failed to load stats');
-        setLoading(false);
-      });
-      fetchFeeStats(); // This one fails silently
-      fetchTokenStats(); // This one fails silently
+      if (loadingRef.current) return; // don't overlap polls
+      loadingRef.current = true;
+      const [main, fees, tokens] = await Promise.allSettled([
+        fetchStats(),
+        fetchFeeStats(),
+        fetchTokenStats(),
+      ]);
+
+      if (main.status === 'fulfilled') {
+        setStats(main.value);
+        setError(null);
+      } else {
+        setError(messageOf(main.reason, 'Failed to load stats'));
+      }
+      if (fees.status === 'fulfilled') {
+        setFeeStats(fees.value);
+        setFeeError(null);
+      } else {
+        setFeeError(messageOf(fees.reason, 'Fee stats unavailable'));
+      }
+      if (tokens.status === 'fulfilled') {
+        setTokenStats(tokens.value);
+        setTokenError(null);
+      } else {
+        setTokenError(messageOf(tokens.reason, 'Token stats unavailable'));
+      }
+      setLoading(false);
+      loadingRef.current = false;
     };
 
-    loadData();
+    void loadData();
     const interval = setInterval(() => {
-      loadData();
+      void loadData();
     }, 30000); // Refresh every 30s
     return () => clearInterval(interval);
   }, [fetchStats, fetchFeeStats, fetchTokenStats]);
@@ -295,7 +332,7 @@ export function StatsTab() {
     );
   }
 
-  if (error || !stats) {
+  if (!stats) {
     return (
       <div className="p-8 text-center text-red-500">
         {error || 'Failed to load statistics'}
@@ -405,6 +442,19 @@ export function StatsTab() {
           </div>
         </div>
       </div>
+
+      {error && (
+        <div className="rounded-lg border border-red-500/20 bg-red-500/10 p-3 text-red-500 text-sm">
+          {error} — showing last loaded statistics.
+        </div>
+      )}
+
+      {(feeError || tokenError) && (
+        <div className="rounded-lg border border-yellow-500/20 bg-yellow-500/10 p-3 text-sm text-yellow-600 dark:text-yellow-400">
+          {[feeError, tokenError].filter(Boolean).join(' · ')}
+          {(feeStats || tokenStats) && ' — showing last loaded values.'}
+        </div>
+      )}
 
       {/* Fee Stats (if available) */}
       {feeStats && (

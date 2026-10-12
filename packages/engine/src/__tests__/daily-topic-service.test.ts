@@ -66,25 +66,42 @@ const dbMock = {
   })),
   insert: mock(() => ({
     values: mock((data: Record<string, unknown>) => ({
-      onConflictDoUpdate: mock(({ set }: { set: Record<string, unknown> }) => ({
-        returning: mock(async () => {
-          const existingIndex = storedTopics.findIndex(
-            (topic) =>
-              (topic.date as Date).getTime() === (data.date as Date).getTime()
-          );
+      onConflictDoUpdate: mock(
+        ({
+          set,
+          setWhere,
+        }: {
+          set: Record<string, unknown>;
+          setWhere?: unknown;
+        }) => ({
+          returning: mock(async () => {
+            const existingIndex = storedTopics.findIndex(
+              (topic) =>
+                (topic.date as Date).getTime() === (data.date as Date).getTime()
+            );
 
-          if (existingIndex >= 0) {
-            storedTopics[existingIndex] = {
-              ...storedTopics[existingIndex],
-              ...set,
-            };
-            return [storedTopics[existingIndex]];
-          }
+            // setWhere is only used as "existing row is not locked"
+            if (
+              existingIndex >= 0 &&
+              setWhere !== undefined &&
+              storedTopics[existingIndex]?.isLocked === true
+            ) {
+              return [];
+            }
 
-          storedTopics.push(data);
-          return [data];
-        }),
-      })),
+            if (existingIndex >= 0) {
+              storedTopics[existingIndex] = {
+                ...storedTopics[existingIndex],
+                ...set,
+              };
+              return [storedTopics[existingIndex]];
+            }
+
+            storedTopics.push(data);
+            return [data];
+          }),
+        })
+      ),
     })),
   })),
   delete: mock(() => ({
@@ -94,7 +111,7 @@ const dbMock = {
 
 mock.module('@feed/db', () => ({
   db: dbMock,
-  dailyTopics: { __name: 'dailyTopics', id: 'id' },
+  dailyTopics: { __name: 'dailyTopics', id: 'id', isLocked: 'isLocked' },
   rssHeadlines: {
     __name: 'rssHeadlines',
     publishedAt: 'publishedAt',
@@ -108,7 +125,9 @@ mock.module('@feed/db', () => ({
   and: (...args: unknown[]) => args,
   desc: (value: unknown) => value,
   generateSnowflakeId: mock(async () => `topic-${storedTopics.length + 1}`),
+  eq: (a: unknown, b: unknown) => [a, b],
   gte: (a: unknown, b: unknown) => [a, b],
+  lt: (a: unknown, b: unknown) => [a, b],
 }));
 
 mock.module('@feed/shared', () => ({
@@ -388,16 +407,14 @@ describe('daily-topic-service', () => {
       expect(candidates[0]?.topicKey).toBeDefined();
     });
 
-    test('returns empty array when no primary topic available', async () => {
-      // Mock ensureTopicForDate to return null
-      // With no RSS rows and no stored topics, ensureTopicForDate returns a fallback
-      // So we test that it at least returns something
+    test('returns only the default fallback topic when no headlines exist', async () => {
       const candidates = await dailyTopicService.getTopicCandidatesForDate(
         new Date('2026-03-06T12:00:00.000Z')
       );
 
-      // Even with no RSS, ensureTopicForDate returns a fallback "general" topic
-      expect(candidates.length).toBeGreaterThanOrEqual(1);
+      // With no RSS rows and no stored topics, ensureTopicForDate persists the
+      // "general" default and there are no additional candidates.
+      expect(candidates.map((c) => c.topicKey)).toEqual(['general']);
     });
 
     test('excludes primary from additional candidates', async () => {
@@ -432,5 +449,82 @@ describe('daily-topic-service', () => {
       const uniqueKeys = new Set(topicKeys);
       expect(uniqueKeys.size).toBe(topicKeys.length);
     });
+  });
+
+  describe('manual lock protection', () => {
+    const lockedTopic = () => ({
+      id: 'locked-topic',
+      date: new Date('2026-03-06T00:00:00.000Z'),
+      topicKey: 'manual',
+      topicLabel: 'Manual',
+      summary: 'Admin chosen topic',
+      sourceType: 'manual_override',
+      sourceHeadlineIds: [],
+      selectionReason: 'Manually overridden in admin',
+      isLocked: true,
+      createdAt: new Date('2026-03-06T00:00:00.000Z'),
+      updatedAt: new Date('2026-03-06T00:00:00.000Z'),
+    });
+
+    test('automatic selection racing a manual lock keeps the locked topic', async () => {
+      rssRows.push({
+        id: 'h1',
+        title: 'OpenAI unveils new reasoning model',
+        summary: 'OpenAI expands enterprise rollout',
+        publishedAt: new Date('2026-03-06T08:00:00.000Z'),
+      });
+      // Simulate the lock landing after ensureTopicForDate read "no topic"
+      dbMock.dailyTopic.findFirst.mockImplementationOnce(async () => null);
+      storedTopics.push(lockedTopic());
+
+      const topic = await dailyTopicService.ensureTopicForDate(
+        new Date('2026-03-06T12:00:00.000Z')
+      );
+
+      expect(topic?.topicKey).toBe('manual');
+      expect(topic?.isLocked).toBe(true);
+      expect(storedTopics[0]?.topicKey).toBe('manual');
+    });
+
+    test('recompute replaces an unlocked topic in place without deleting it', async () => {
+      storedTopics.push({ ...lockedTopic(), isLocked: false, id: 'auto-1' });
+      rssRows.push({
+        id: 'h1',
+        title: 'OpenAI unveils new reasoning model',
+        summary: 'OpenAI expands enterprise rollout',
+        publishedAt: new Date('2026-03-06T08:00:00.000Z'),
+      });
+      dbMock.delete.mockClear();
+
+      const topic = await dailyTopicService.recomputeTopicForDate(
+        new Date('2026-03-06T12:00:00.000Z')
+      );
+
+      expect(dbMock.delete).not.toHaveBeenCalled();
+      expect(storedTopics).toHaveLength(1);
+      expect(storedTopics[0]?.id).toBe('auto-1');
+      expect(topic?.topicKey).not.toBe('manual');
+      expect(topic?.sourceType).toBe('auto');
+    });
+
+    test('clearOverride explicitly replaces a locked topic', async () => {
+      storedTopics.push(lockedTopic());
+
+      const topic = await dailyTopicService.clearOverride(
+        new Date('2026-03-06T12:00:00.000Z')
+      );
+
+      expect(topic?.isLocked).toBe(false);
+      expect(storedTopics).toHaveLength(1);
+    });
+  });
+
+  test('rejects non-positive candidate counts and empty manual labels', async () => {
+    await expect(
+      dailyTopicService.getTopicCandidatesForDate(new Date(), 0)
+    ).rejects.toThrow('positive integer');
+    await expect(
+      dailyTopicService.setManualTopic({ topicLabel: '   ' })
+    ).rejects.toThrow('cannot be empty');
   });
 });

@@ -165,27 +165,36 @@ export function shouldActorPost(
 /**
  * Calculate how many posts should be generated this tick based on pacing.
  *
- * Uses probabilistic selection to maintain target posts per hour
- * while respecting the per-tick maximum.
+ * The fractional part of the per-tick target is applied as a Bernoulli
+ * draw, so the expected posts per hour equals `targetPostsPerHour` (e.g.
+ * 12/hour at 60 ticks/hour yields 1 post on ~20% of ticks, not every tick),
+ * while respecting the eligible actor count and per-tick maximum.
  *
  * @param eligibleActorCount - Number of actors that passed individual pacing checks
  * @param ticksPerHour - How many ticks occur per hour (default: 60 for 1-minute ticks)
+ * @param rng - Random source in [0, 1) for the fractional draw
  * @returns Number of posts to generate (0 to maxPostsPerTick)
  */
 export function calculatePostsForTick(
   eligibleActorCount: number,
-  ticksPerHour: number = 60
+  ticksPerHour: number = 60,
+  rng: () => number = Math.random
 ): number {
+  if (!Number.isSafeInteger(eligibleActorCount) || eligibleActorCount < 0) {
+    throw new Error(
+      `eligibleActorCount must be a non-negative integer, got ${eligibleActorCount}`
+    );
+  }
+  if (!Number.isFinite(ticksPerHour) || ticksPerHour <= 0) {
+    throw new Error(`ticksPerHour must be positive, got ${ticksPerHour}`);
+  }
+
   const targetPostsPerTick = CONTENT_PACING.targetPostsPerHour / ticksPerHour;
+  const whole = Math.floor(targetPostsPerTick);
+  const fraction = targetPostsPerTick - whole;
+  const posts = whole + (rng() < fraction ? 1 : 0);
 
-  // Use the minimum of eligible actors and calculated target
-  const calculatedPosts = Math.min(
-    eligibleActorCount,
-    Math.ceil(targetPostsPerTick)
-  );
-
-  // Apply the per-tick maximum
-  return Math.min(calculatedPosts, CONTENT_PACING.maxPostsPerTick);
+  return Math.min(posts, eligibleActorCount, CONTENT_PACING.maxPostsPerTick);
 }
 
 /**

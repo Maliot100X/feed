@@ -8,20 +8,22 @@ import { useEffect } from 'react';
 import { UserOnboardingFlow } from '@/components/onboarding/UserOnboardingFlow';
 import { useUserSignupOnboarding } from '@/components/onboarding/user-signup-onboarding-context';
 import { PageContainer } from '@/components/shared/PageContainer';
+import { Button } from '@/components/ui/button';
 import { useAuth } from '@/hooks/useAuth';
+import { useLoginModal } from '@/hooks/useLoginModal';
 
 export default function OnboardingPage() {
   const router = useRouter();
   const flow = useUserSignupOnboarding();
-  const { ready, authenticated, login, loadingProfile, profileFetchStatus } =
+  const { ready, authenticated, loadingProfile, profileFetchStatus, refresh } =
     useAuth();
+  const queueLoginModal = useLoginModal((state) => state.queueLoginModal);
 
   useEffect(() => {
     if (!ready || authenticated) return;
-    router.push('/feed');
-    const timer = setTimeout(() => login(), 500);
-    return () => clearTimeout(timer);
-  }, [ready, authenticated, router, login]);
+    queueLoginModal();
+    router.replace('/feed');
+  }, [ready, authenticated, router, queueLoginModal]);
 
   useEffect(() => {
     if (!ready || !authenticated || loadingProfile) return;
@@ -36,6 +38,27 @@ export default function OnboardingPage() {
 
   if (!ready || !authenticated) {
     return null;
+  }
+
+  if (!loadingProfile && profileFetchStatus === 'error') {
+    return (
+      <PageContainer noPadding>
+        <div
+          className="flex min-h-dvh flex-col items-center justify-center gap-3 bg-background px-6 text-center"
+          role="alert"
+        >
+          <p className="font-semibold text-foreground">
+            We couldn't load your profile.
+          </p>
+          <p className="text-muted-foreground text-sm">
+            Check your connection and try again.
+          </p>
+          <Button type="button" onClick={() => void refresh()}>
+            Try again
+          </Button>
+        </div>
+      </PageContainer>
+    );
   }
 
   // Show loading shell while profile is still resolving.

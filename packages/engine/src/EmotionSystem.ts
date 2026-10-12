@@ -85,6 +85,9 @@ export interface EmotionalState {
  * ```
  */
 export function moodToEmotion(mood: number): EmotionalState {
+  if (!Number.isFinite(mood)) {
+    throw new RangeError(`Mood must be a finite number, got ${mood}`);
+  }
   // Clamp mood to valid range [-1, 1]
   const clampedMood = Math.max(-1, Math.min(1, mood));
 
@@ -166,9 +169,8 @@ export function getRelationshipModifier(relationship: string): {
   modifier: string;
   sentimentBonus: number;
 } {
-  const relationshipMap: Record<
-    string,
-    { modifier: string; sentimentBonus: number }
+  const relationshipMap: Readonly<
+    Record<string, { modifier: string; sentimentBonus: number }>
   > = {
     ally: { modifier: 'supportive and positive', sentimentBonus: 0.3 },
     friend: { modifier: 'friendly and warm', sentimentBonus: 0.4 },
@@ -181,9 +183,11 @@ export function getRelationshipModifier(relationship: string): {
     hates: { modifier: 'deeply negative and dismissive', sentimentBonus: -0.6 },
   };
 
-  return (
-    relationshipMap[relationship.toLowerCase()] || relationshipMap['neutral']!
-  );
+  const key = relationship.toLowerCase();
+  // Own-key lookup so prototype names like "constructor" fall back to neutral.
+  return Object.hasOwn(relationshipMap, key)
+    ? relationshipMap[key]!
+    : relationshipMap.neutral!;
 }
 
 /**
@@ -261,13 +265,13 @@ export function luckToDescription(luck: 'low' | 'medium' | 'high'): string {
  * ```typescript
  * // Simple context without relationships
  * const ctx = generateActorContext(0.6, 'high');
- * // => "Current mood: moderately happy (pleased, content, positive)\nCurrent luck: things going well, lucky streak"
+ * // => "Current mood: extremely happy (pleased, content, positive)\nCurrent luck: things going well, lucky streak"
  *
  * // Full context with relationship
  * const ctx = generateActorContext(
  *   0.3, 'medium', 'actor-2', relationships, 'actor-1'
  * );
- * // => "Current mood: slightly content (...)\nCurrent luck: ...\nRelationship with actor-2: rival - be competitive..."
+ * // => "Current mood: moderately content (...)\nCurrent luck: ...\nRelationship with actor-2: rival - be competitive..."
  * ```
  */
 export function generateActorContext(

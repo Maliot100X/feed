@@ -338,6 +338,27 @@ describe('ART Format Validation', () => {
     });
   });
 
+  describe('No fabricated transcript', () => {
+    it('emits no synthesized system/user/assistant messages without recorded calls', () => {
+      const logger = new TrajectoryLoggerService();
+      const trajId = logger.startTrajectory(mockRuntime.agentId as string);
+      const step = logger.startStep(trajId!, {
+        timestamp: Date.now(),
+        agentBalance: 1000,
+        agentPoints: 0,
+        agentPnL: 0,
+        openPositions: 0,
+      });
+      logger.completeStep(trajId, step, {
+        actionType: 'BUY_SHARES',
+        actionName: 'BUY_SHARES',
+        parameters: { amount: 10 },
+        success: true,
+      });
+      expect(toARTMessages(logger.getActiveTrajectory(trajId)!)).toEqual([]);
+    });
+  });
+
   describe('ART Trajectory Format', () => {
     it('should convert to exact ART format (matches tic-tac-toe example)', () => {
       const logger = new TrajectoryLoggerService();

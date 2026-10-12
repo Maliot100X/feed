@@ -45,7 +45,12 @@ export const GET = withErrorHandling(async (request: NextRequest) => {
   const includeTimeSeries = searchParams.get('includeTimeSeries') === 'true';
 
   // Validate date range to prevent heavy queries
-  const dateRangeError = validateDateRange(startDate, endDate);
+  // A lone startDate is bounded by now, so inverted (future) or over-long
+  // ranges are rejected instead of slipping past validation.
+  const dateRangeError = validateDateRange(
+    startDate,
+    endDate ?? (startDate ? new Date() : null)
+  );
   if (dateRangeError) {
     return errorResponse(dateRangeError, 'INVALID_DATE_RANGE', 400, {
       maxDays: MAX_DATE_RANGE_DAYS,
@@ -126,10 +131,10 @@ export const GET = withErrorHandling(async (request: NextRequest) => {
       u."displayName",
       u."profileImageUrl",
       COUNT(bt.id) as "tradeCount",
-      ABS(SUM(bt.amount::numeric)) as "totalVolume"
+      SUM(ABS(bt.amount::numeric)) as "totalVolume"
     FROM "User" u
     JOIN "BalanceTransaction" bt ON u.id = bt."userId"
-    WHERE bt.type IN ('prediction_buy', 'prediction_sell', 'perp_open', 'perp_close')
+    WHERE bt.type IN ('pred_buy', 'pred_sell', 'perp_open', 'perp_close')
       AND u."isActor" = false
     GROUP BY u.id, u.username, u."displayName", u."profileImageUrl"
     ORDER BY "totalVolume" DESC
@@ -183,11 +188,11 @@ export const GET = withErrorHandling(async (request: NextRequest) => {
         fees: string;
       }>`
         SELECT DATE(bt."createdAt") as date, COUNT(*) as trades,
-          ABS(SUM(bt.amount::numeric)) as volume, COALESCE(SUM(tf."feeAmount"::numeric), 0) as fees
+          SUM(ABS(bt.amount::numeric)) as volume, COALESCE(SUM(tf."feeAmount"::numeric), 0) as fees
         FROM "BalanceTransaction" bt
         LEFT JOIN "TradingFee" tf ON bt.id = tf."tradeId"
         WHERE bt."createdAt" >= ${timeSeriesStartIso} AND bt."createdAt" <= ${timeSeriesEndIso}
-          AND bt.type IN ('prediction_buy', 'prediction_sell')
+          AND bt.type IN ('pred_buy', 'pred_sell')
         GROUP BY DATE(bt."createdAt") ORDER BY date ASC
       `;
     } else if (marketType === 'perpetual') {
@@ -198,7 +203,7 @@ export const GET = withErrorHandling(async (request: NextRequest) => {
         fees: string;
       }>`
         SELECT DATE(bt."createdAt") as date, COUNT(*) as trades,
-          ABS(SUM(bt.amount::numeric)) as volume, COALESCE(SUM(tf."feeAmount"::numeric), 0) as fees
+          SUM(ABS(bt.amount::numeric)) as volume, COALESCE(SUM(tf."feeAmount"::numeric), 0) as fees
         FROM "BalanceTransaction" bt
         LEFT JOIN "TradingFee" tf ON bt.id = tf."tradeId"
         WHERE bt."createdAt" >= ${timeSeriesStartIso} AND bt."createdAt" <= ${timeSeriesEndIso}
@@ -213,11 +218,11 @@ export const GET = withErrorHandling(async (request: NextRequest) => {
         fees: string;
       }>`
         SELECT DATE(bt."createdAt") as date, COUNT(*) as trades,
-          ABS(SUM(bt.amount::numeric)) as volume, COALESCE(SUM(tf."feeAmount"::numeric), 0) as fees
+          SUM(ABS(bt.amount::numeric)) as volume, COALESCE(SUM(tf."feeAmount"::numeric), 0) as fees
         FROM "BalanceTransaction" bt
         LEFT JOIN "TradingFee" tf ON bt.id = tf."tradeId"
         WHERE bt."createdAt" >= ${timeSeriesStartIso} AND bt."createdAt" <= ${timeSeriesEndIso}
-          AND bt.type IN ('prediction_buy', 'prediction_sell', 'perp_open', 'perp_close')
+          AND bt.type IN ('pred_buy', 'pred_sell', 'perp_open', 'perp_close')
         GROUP BY DATE(bt."createdAt") ORDER BY date ASC
       `;
     }
@@ -252,7 +257,7 @@ export const GET = withErrorHandling(async (request: NextRequest) => {
       SELECT bt.id, bt."userId", u.username, u."displayName", bt.type, bt.amount, bt."createdAt"
       FROM "BalanceTransaction" bt
       JOIN "User" u ON bt."userId" = u.id
-      WHERE bt.type IN ('prediction_buy', 'prediction_sell')
+      WHERE bt.type IN ('pred_buy', 'pred_sell')
         AND bt."createdAt" >= ${recentTradesStartIso} AND bt."createdAt" <= ${recentTradesEndIso}
       ORDER BY bt."createdAt" DESC LIMIT 20
     `;
@@ -270,7 +275,7 @@ export const GET = withErrorHandling(async (request: NextRequest) => {
       SELECT bt.id, bt."userId", u.username, u."displayName", bt.type, bt.amount, bt."createdAt"
       FROM "BalanceTransaction" bt
       JOIN "User" u ON bt."userId" = u.id
-      WHERE bt.type IN ('prediction_buy', 'prediction_sell', 'perp_open', 'perp_close')
+      WHERE bt.type IN ('pred_buy', 'pred_sell', 'perp_open', 'perp_close')
         AND bt."createdAt" >= ${recentTradesStartIso} AND bt."createdAt" <= ${recentTradesEndIso}
       ORDER BY bt."createdAt" DESC LIMIT 20
     `;

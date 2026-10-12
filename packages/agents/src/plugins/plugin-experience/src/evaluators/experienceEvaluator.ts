@@ -8,16 +8,54 @@ import {
   ModelType,
   type State,
 } from '@elizaos/core';
+import { z } from 'zod';
 import type { ExperienceService } from '../service';
 import { ExperienceType, OutcomeType } from '../types';
 
-type ExtractedExperience = {
-  type?: string;
-  learning?: string;
-  context?: string;
-  confidence?: number;
-  reasoning?: string;
-};
+const ExtractedExperienceSchema = z.object({
+  type: z.enum(['DISCOVERY', 'CORRECTION', 'SUCCESS', 'LEARNING']),
+  learning: z.string().trim().min(1).max(1000),
+  context: z.string().trim().max(1000).optional(),
+  confidence: z.number().finite().min(0).max(1),
+  reasoning: z.string().optional(),
+});
+
+type ExtractedExperience = z.infer<typeof ExtractedExperienceSchema>;
+
+/**
+ * Parse the model's JSON array of experiences. Items that do not match the
+ * schema (wrong type enum, non-numeric/out-of-range confidence, empty
+ * learning) are dropped; non-JSON output yields no experiences.
+ */
+export function parseExtractedExperiences(
+  response: string
+): ExtractedExperience[] {
+  const start = response.indexOf('[');
+  const end = response.lastIndexOf(']');
+  if (start === -1 || end <= start) return [];
+
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(response.slice(start, end + 1));
+  } catch (error) {
+    if (error instanceof SyntaxError) return [];
+    throw error;
+  }
+  if (!Array.isArray(parsed)) return [];
+
+  const experiences: ExtractedExperience[] = [];
+  for (const item of parsed) {
+    const result = ExtractedExperienceSchema.safeParse(item);
+    if (result.success) experiences.push(result.data);
+  }
+  return experiences;
+}
+
+/** Parse a stored message counter; corrupt values restart at 0. */
+export function parseMessageCount(raw: string | null | undefined): number {
+  const value = Number(raw ?? '0');
+  return Number.isSafeInteger(value) && value >= 0 ? value : 0;
+}
 
 export const experienceEvaluator: Evaluator = {
   name: 'EXPERIENCE_EVALUATOR',
@@ -82,9 +120,9 @@ export const experienceEvaluator: Evaluator = {
 
     // Check cooldown - only extract experiences every 10 messages
     const lastExtractionKey = 'experience-extraction:last-message-count';
-    const currentCount =
-      (await runtime.getCache<string>(lastExtractionKey)) || '0';
-    const messageCount = parseInt(currentCount, 10);
+    const messageCount = parseMessageCount(
+      await runtime.getCache<string>(lastExtractionKey)
+    );
     const newMessageCount = messageCount + 1;
 
     await runtime.setCache(lastExtractionKey, newMessageCount.toString());
@@ -182,36 +220,29 @@ Return empty array [] if no novel experiences found.`;
       prompt: extractionPrompt,
     });
 
-    let experiences: ExtractedExperience[] = [];
-    const jsonMatch = response.match(/\[[\s\S]*\]/);
-    if (jsonMatch) {
-      const parsed = JSON.parse(jsonMatch[0]);
-      if (Array.isArray(parsed)) {
-        experiences = parsed.filter((item): item is ExtractedExperience => {
-          return item && typeof item === 'object';
-        });
-      }
-    }
+    const experiences = parseExtractedExperiences(response);
 
     // Record each novel experience
-    const experienceTypeMap: Record<string, ExperienceType> = {
+    const experienceTypeMap: Record<
+      ExtractedExperience['type'],
+      ExperienceType
+    > = {
       DISCOVERY: ExperienceType.DISCOVERY,
       CORRECTION: ExperienceType.CORRECTION,
       SUCCESS: ExperienceType.SUCCESS,
       LEARNING: ExperienceType.LEARNING,
     };
 
+    let recorded = 0;
     for (const exp of experiences.slice(0, 3)) {
       // Max 3 experiences per extraction
-      if (!exp.learning || !exp.confidence || exp.confidence < 0.6) {
+      if (exp.confidence < 0.6) {
         continue;
       }
 
-      const normalizedType =
-        typeof exp.type === 'string' ? exp.type.toUpperCase() : '';
-      const experienceType =
-        experienceTypeMap[normalizedType] ?? ExperienceType.LEARNING;
+      const experienceType = experienceTypeMap[exp.type];
       const experienceTag = experienceType;
+      const learning = sanitizeContext(exp.learning);
 
       await experienceService.recordExperience({
         type: experienceType,
@@ -221,22 +252,20 @@ Return empty array [] if no novel experiences found.`;
             : OutcomeType.NEUTRAL,
         context: sanitizeContext(exp.context || 'Conversation analysis'),
         action: 'pattern_recognition',
-        result: exp.learning,
-        learning: sanitizeContext(exp.learning),
+        result: learning,
+        learning,
         domain: detectDomain(exp.learning),
         tags: ['extracted', 'novel', experienceTag],
         confidence: Math.min(exp.confidence, 0.9), // Cap confidence
         importance: 0.8, // High importance for extracted experiences
       });
 
-      logger.info(
-        `[experienceEvaluator] Recorded novel experience: ${exp.learning.substring(0, 100)}...`
-      );
+      recorded++;
     }
 
-    if (experiences.length > 0) {
+    if (recorded > 0) {
       logger.info(
-        `[experienceEvaluator] Extracted ${experiences.length} novel experiences from conversation`
+        `[experienceEvaluator] Recorded ${recorded} novel experiences from conversation`
       );
     } else {
       logger.debug(

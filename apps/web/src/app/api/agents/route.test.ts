@@ -1,13 +1,15 @@
 import { beforeEach, describe, expect, it, mock } from 'bun:test';
-import type { NextRequest } from 'next/server';
+import { NextRequest } from 'next/server';
 
 const mockAuthenticateUser = mock();
 const mockListOwnedAgentSummaries = mock();
+const mockCreateAgent = mock();
+const mockUpdateAgent = mock();
 
 mock.module('@feed/agents', () => ({
   agentService: {
-    createAgent: mock(),
-    updateAgent: mock(),
+    createAgent: mockCreateAgent,
+    updateAgent: mockUpdateAgent,
   },
   getAgentConfig: mock(),
   isAutonomousTradingEnabled: mock(() => false),
@@ -31,7 +33,7 @@ mock.module('@/lib/agents/owned-agent-summaries', () => ({
   listOwnedAgentSummaries: mockListOwnedAgentSummaries,
 }));
 
-const { GET } = await import('./route');
+const { GET, POST } = await import('./route');
 
 describe('GET /api/agents', () => {
   beforeEach(() => {
@@ -105,4 +107,47 @@ describe('GET /api/agents', () => {
       autonomousTrading: true,
     });
   });
+
+  it('rejects a non-boolean autonomousTrading filter', async () => {
+    mockAuthenticateUser.mockResolvedValue({ id: 'user-1' });
+
+    await expect(
+      GET({
+        url: 'https://example.com/api/agents?autonomousTrading=yes',
+      } as NextRequest)
+    ).rejects.toThrow();
+    expect(mockListOwnedAgentSummaries).not.toHaveBeenCalled();
+  });
+});
+
+describe('POST /api/agents validation', () => {
+  beforeEach(() => {
+    mockAuthenticateUser.mockReset();
+    mockCreateAgent.mockReset();
+    mockUpdateAgent.mockReset();
+    mockAuthenticateUser.mockResolvedValue({ id: 'user-1', userId: 'user-1' });
+  });
+
+  const valid = { name: 'Agent', system: 'You trade.' };
+
+  for (const [label, body] of [
+    ['missing system', { name: 'Agent' }],
+    ['string initialDeposit', { ...valid, initialDeposit: '100' }],
+    ['negative initialDeposit', { ...valid, initialDeposit: -1 }],
+    ['string boolean setting', { ...valid, autonomousPosting: 'false' }],
+    ['unknown model tier', { ...valid, modelTier: 'ultra' }],
+  ] as const) {
+    it(`rejects ${label} before creating anything`, async () => {
+      await expect(
+        POST(
+          new NextRequest('https://example.com/api/agents', {
+            method: 'POST',
+            body: JSON.stringify(body),
+          })
+        )
+      ).rejects.toThrow();
+      expect(mockCreateAgent).not.toHaveBeenCalled();
+      expect(mockUpdateAgent).not.toHaveBeenCalled();
+    });
+  }
 });

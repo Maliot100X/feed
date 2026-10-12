@@ -119,71 +119,103 @@ export function AgentsTab() {
   >('reputation');
   const [sortOrder, setSortOrder] = useState<'asc' | 'desc'>('desc');
 
+  const [loadError, setLoadError] = useState<string | null>(null);
+  // One mutation at a time: 'global' for pause/resume-all, else an agent id.
+  // Prevents overlapping per-agent and global autonomy changes.
+  const [mutating, setMutating] = useState<string | null>(null);
+
   const fetchData = useCallback(async () => {
     const token = getAuthToken();
     if (!token) {
-      logger.error('Not authenticated', undefined, 'AgentsTab');
-      toast.error('Failed to load agents');
+      setLoadError('Not authenticated');
       setLoading(false);
       return;
     }
 
-    const response = await fetch(apiUrl('/api/admin/agents'), {
-      headers: {
-        Authorization: `Bearer ${token}`,
-      },
-    });
+    try {
+      const response = await fetch(apiUrl('/api/admin/agents'), {
+        headers: {
+          Authorization: `Bearer ${token}`,
+        },
+      });
 
-    if (!response.ok) {
-      logger.error(
-        'Failed to fetch agents',
-        { status: response.status },
-        'AgentsTab'
+      if (!response.ok) {
+        logger.error(
+          'Failed to fetch agents',
+          { status: response.status },
+          'AgentsTab'
+        );
+        setLoadError(`Failed to load agents (HTTP ${response.status})`);
+        return;
+      }
+
+      const result = await response.json();
+      setAgents(result.data.agents);
+      setStats(result.data.stats);
+      setLoadError(null);
+    } catch (err) {
+      setLoadError(
+        err instanceof Error ? err.message : 'Failed to load agents'
       );
-      toast.error('Failed to load agents');
+    } finally {
       setLoading(false);
-      return;
     }
-
-    const result = await response.json();
-    setAgents(result.data.agents);
-    setStats(result.data.stats);
-    setLoading(false);
   }, []);
 
   useEffect(() => {
-    fetchData();
+    void fetchData();
     // Refresh every 30 seconds
-    const interval = setInterval(fetchData, 30000);
+    const interval = setInterval(() => void fetchData(), 30000);
     return () => clearInterval(interval);
   }, [fetchData]);
 
-  const handleToggleAgent = async (agentId: string, enable: boolean) => {
+  /**
+   * Run an authenticated POST mutation, then refresh. Returns without doing
+   * anything if another mutation is in flight.
+   */
+  const runMutation = async (
+    key: string,
+    path: string,
+    failureMessage: string,
+    body?: Record<string, boolean>
+  ) => {
+    if (mutating) return;
     const token = getAuthToken();
     if (!token) {
       toast.error('Not authenticated');
       return;
     }
 
-    const response = await fetch(
-      apiUrl(`/api/admin/agents/${agentId}/toggle`),
-      {
+    setMutating(key);
+    try {
+      const response = await fetch(apiUrl(path), {
         method: 'POST',
         headers: {
           Authorization: `Bearer ${token}`,
-          'Content-Type': 'application/json',
+          ...(body ? { 'Content-Type': 'application/json' } : {}),
         },
-        body: JSON.stringify({ enabled: enable }),
+        ...(body ? { body: JSON.stringify(body) } : {}),
+      });
+      if (!response.ok) {
+        toast.error(`${failureMessage} (HTTP ${response.status})`);
+        return;
       }
-    );
-
-    if (!response.ok) {
-      toast.error('Failed to toggle agent');
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : failureMessage);
       return;
+    } finally {
+      setMutating(null);
     }
-
     await fetchData();
   };
+
+  const handleToggleAgent = (agentId: string, enable: boolean) =>
+    runMutation(
+      agentId,
+      `/api/admin/agents/${encodeURIComponent(agentId)}/toggle`,
+      'Failed to toggle agent',
+      { enabled: enable }
+    );
 
   const handlePauseAll = async () => {
     if (
@@ -193,27 +225,11 @@ export function AgentsTab() {
     ) {
       return;
     }
-
-    const token = getAuthToken();
-    if (!token) {
-      toast.error('Not authenticated');
-      return;
-    }
-
-    const response = await fetch(apiUrl('/api/admin/agents/pause-all'), {
-      method: 'POST',
-      headers: {
-        Authorization: `Bearer ${token}`,
-      },
-    });
-
-    if (!response.ok) {
-      toast.error('Failed to pause all agents');
-      return;
-    }
-
-    await response.json();
-    await fetchData();
+    await runMutation(
+      'global',
+      '/api/admin/agents/pause-all',
+      'Failed to pause all agents'
+    );
   };
 
   const handleResumeAll = async () => {
@@ -224,27 +240,11 @@ export function AgentsTab() {
     ) {
       return;
     }
-
-    const token = getAuthToken();
-    if (!token) {
-      toast.error('Not authenticated');
-      return;
-    }
-
-    const response = await fetch(apiUrl('/api/admin/agents/resume-all'), {
-      method: 'POST',
-      headers: {
-        Authorization: `Bearer ${token}`,
-      },
-    });
-
-    if (!response.ok) {
-      toast.error('Failed to resume all agents');
-      return;
-    }
-
-    await response.json();
-    await fetchData();
+    await runMutation(
+      'global',
+      '/api/admin/agents/resume-all',
+      'Failed to resume all agents'
+    );
   };
 
   const filteredAgents = agents
@@ -364,15 +364,19 @@ export function AgentsTab() {
         </div>
         <div className="flex items-center gap-2">
           <button
-            onClick={handlePauseAll}
-            className="flex items-center gap-2 rounded-lg bg-red-600 px-4 py-2 font-medium text-white transition-colors hover:bg-red-700"
+            type="button"
+            onClick={() => void handlePauseAll()}
+            disabled={mutating !== null}
+            className="flex items-center gap-2 rounded-lg bg-red-600 px-4 py-2 font-medium text-white transition-colors hover:bg-red-700 disabled:opacity-50"
           >
             <Pause className="h-4 w-4" />
             Emergency: Pause All
           </button>
           <button
-            onClick={handleResumeAll}
-            className="flex items-center gap-2 rounded-lg bg-green-600 px-4 py-2 font-medium text-white transition-colors hover:bg-green-700"
+            type="button"
+            onClick={() => void handleResumeAll()}
+            disabled={mutating !== null}
+            className="flex items-center gap-2 rounded-lg bg-green-600 px-4 py-2 font-medium text-white transition-colors hover:bg-green-700 disabled:opacity-50"
           >
             <Play className="h-4 w-4" />
             Resume All
@@ -380,7 +384,7 @@ export function AgentsTab() {
           <button
             onClick={() => {
               setLoading(true);
-              fetchData();
+              void fetchData();
             }}
             disabled={loading}
             className="rounded-lg p-2 transition-colors hover:bg-accent"
@@ -525,10 +529,16 @@ export function AgentsTab() {
 
       {/* Agents List */}
       <div className="space-y-3">
+        {loadError && (
+          <div className="rounded-lg border border-red-500/20 bg-red-500/10 p-3 text-red-500 text-sm">
+            {loadError}
+            {agents.length > 0 && ' — showing previously loaded agents.'}
+          </div>
+        )}
         {filteredAgents.length === 0 ? (
           <div className="flex flex-col items-center justify-center py-12 text-muted-foreground">
             <Bot className="mb-4 h-12 w-12 opacity-50" />
-            <p>No agents found</p>
+            <p>{loadError ? 'Agents unavailable' : 'No agents found'}</p>
           </div>
         ) : (
           filteredAgents.map((agent) => (
@@ -741,9 +751,14 @@ export function AgentsTab() {
                 {/* Actions */}
                 <div className="flex flex-col gap-2">
                   <button
+                    type="button"
+                    disabled={mutating !== null}
                     onClick={(e) => {
                       e.stopPropagation();
-                      handleToggleAgent(agent.id, !agent.autonomousEnabled);
+                      void handleToggleAgent(
+                        agent.id,
+                        !agent.autonomousEnabled
+                      );
                     }}
                     className={cn(
                       'rounded-lg p-2 transition-colors',

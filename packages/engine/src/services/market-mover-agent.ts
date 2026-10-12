@@ -18,6 +18,7 @@
  */
 
 import type { WorldEvent } from '@feed/shared';
+import { SeededRandom } from '../utils/entropy';
 
 /**
  * Volatility bucket for price movements
@@ -82,45 +83,34 @@ export interface MarketMoverConfig {
 }
 
 /**
- * RNG interface for price adjustments
- */
-interface RNG {
-  next(): number;
-  nextFloat(min: number, max: number): number;
-}
-
-/**
- * Create a seeded RNG using linear congruential generator
- */
-function createSeededRng(seed: number): RNG {
-  let state = seed;
-  const next = (): number => {
-    state = (state * 1664525 + 1013904223) % 4294967296;
-    return state / 4294967296;
-  };
-  return {
-    next,
-    nextFloat: (min: number, max: number) => min + next() * (max - min),
-  };
-}
-
-/**
  * Market Mover Agent
  *
  * Deterministic rule-based engine that translates world events into price movements
  * using volatility buckets. Fast, cheap, and consistent.
  */
 export class MarketMoverAgent {
-  private rng: RNG;
+  private rng: SeededRandom;
   private config: Required<MarketMoverConfig>;
 
   constructor(seed: number, config?: MarketMoverConfig) {
-    this.rng = createSeededRng(seed);
+    this.rng = new SeededRandom(seed);
     this.config = {
       maxPriceChangePerEvent: config?.maxPriceChangePerEvent ?? 0.3,
       minPriceFloor: config?.minPriceFloor ?? 0.1,
       maxPriceCeiling: config?.maxPriceCeiling ?? 4.0,
     };
+    const { maxPriceChangePerEvent, minPriceFloor, maxPriceCeiling } =
+      this.config;
+    if (
+      !Number.isFinite(maxPriceChangePerEvent) ||
+      maxPriceChangePerEvent <= 0 ||
+      !Number.isFinite(minPriceFloor) ||
+      minPriceFloor <= 0 ||
+      !Number.isFinite(maxPriceCeiling) ||
+      maxPriceCeiling < minPriceFloor
+    ) {
+      throw new Error('Invalid MarketMoverAgent config');
+    }
   }
 
   /**
@@ -141,7 +131,9 @@ export class MarketMoverAgent {
       return new Map();
     }
 
-    const adjustments = new Map<string, number>();
+    // Sum raw per-event changes per ticker, then clamp once per tick so the
+    // result does not depend on event order.
+    const rawSums = new Map<string, number>();
 
     for (const event of events) {
       // Determine which tickers are affected
@@ -155,8 +147,11 @@ export class MarketMoverAgent {
         continue;
       }
 
-      // Get volatility bucket and direction for this event type
+      // Get volatility bucket and direction; neutral/unknown evidence moves nothing
       const eventVolatility = this.getEventVolatility(event);
+      if (!eventVolatility) {
+        continue;
+      }
 
       // Generate price change for each affected ticker
       for (const ticker of affectedTickers) {
@@ -164,19 +159,14 @@ export class MarketMoverAgent {
           eventVolatility.bucket,
           !eventVolatility.isNegative
         );
-
-        // Aggregate with existing adjustments for this ticker
-        const existingChange = adjustments.get(ticker) ?? 0;
-        const newChange = existingChange + percentageChange;
-
-        // Clamp to max change per tick
-        const clampedChange = Math.max(
-          -this.config.maxPriceChangePerEvent,
-          Math.min(this.config.maxPriceChangePerEvent, newChange)
-        );
-
-        adjustments.set(ticker, clampedChange);
+        rawSums.set(ticker, (rawSums.get(ticker) ?? 0) + percentageChange);
       }
+    }
+
+    const adjustments = new Map<string, number>();
+    const limit = this.config.maxPriceChangePerEvent;
+    for (const [ticker, sum] of rawSums) {
+      adjustments.set(ticker, Math.max(-limit, Math.min(limit, sum)));
     }
 
     return adjustments;
@@ -192,13 +182,21 @@ export class MarketMoverAgent {
   ): string[] {
     // If context specifies affected tickers, use those
     if (context?.affectedTickers && context.affectedTickers.length > 0) {
-      return context.affectedTickers.filter((t) => currentPrices.has(t));
+      return [...new Set(context.affectedTickers)].filter((t) =>
+        currentPrices.has(t)
+      );
     }
 
-    // Check if event description mentions any tickers
-    const tickers = Array.from(currentPrices.keys());
-    const mentionedTickers = tickers.filter((ticker) =>
-      event.description.toUpperCase().includes(ticker.toUpperCase())
+    // Check if event description mentions any tickers as whole tokens
+    // (substring matching would let "SOL" match "SOLD").
+    const tokens = new Set(
+      event.description
+        .toUpperCase()
+        .split(/[^A-Z0-9]+/)
+        .filter(Boolean)
+    );
+    const mentionedTickers = Array.from(currentPrices.keys()).filter((ticker) =>
+      tokens.has(ticker.toUpperCase())
     );
 
     if (mentionedTickers.length > 0) {
@@ -215,25 +213,32 @@ export class MarketMoverAgent {
   private getEventVolatility(event: WorldEvent): {
     bucket: VolatilityBucket;
     isNegative: boolean;
-  } {
+  } | null {
     // Check if we have a mapping for this event type
     const mapping = EVENT_TYPE_VOLATILITY[event.type];
 
+    // A zero sentiment carries no direction: it never overrides the event
+    // type's direction and never implies a positive move on its own.
+    const sentiment =
+      event.sentimentSignal !== undefined && event.sentimentSignal !== 0
+        ? event.sentimentSignal
+        : undefined;
+
     if (mapping) {
       // Use sentiment signal if available to override direction
-      if (event.sentimentSignal !== undefined) {
+      if (sentiment !== undefined) {
         return {
           bucket: mapping.bucket,
-          isNegative: event.sentimentSignal < 0,
+          isNegative: sentiment < 0,
         };
       }
       return mapping;
     }
 
     // Default: use sentiment signal if available
-    if (event.sentimentSignal !== undefined) {
+    if (sentiment !== undefined) {
       // Map sentiment magnitude to bucket
-      const magnitude = Math.abs(event.sentimentSignal);
+      const magnitude = Math.abs(sentiment);
       let bucket: VolatilityBucket;
       if (magnitude > 0.7) {
         bucket = 'high';
@@ -245,15 +250,16 @@ export class MarketMoverAgent {
 
       return {
         bucket,
-        isNegative: event.sentimentSignal < 0,
+        isNegative: sentiment < 0,
       };
     }
 
-    // Default: low volatility, direction based on pointsToward
-    return {
-      bucket: 'low',
-      isNegative: event.pointsToward === 'NO',
-    };
+    // Default: low volatility, direction from explicit pointsToward only.
+    // With no directional evidence there is no move (never assume positive).
+    if (event.pointsToward === 'YES' || event.pointsToward === 'NO') {
+      return { bucket: 'low', isNegative: event.pointsToward === 'NO' };
+    }
+    return null;
   }
 
   /**
@@ -287,8 +293,12 @@ export class MarketMoverAgent {
       const adjustment = adjustments.get(ticker) ?? 0;
       let newPrice = currentPrice * (1 + adjustment);
 
-      // Apply price bounds based on initial price
-      const initialPrice = initialPrices.get(ticker) ?? currentPrice;
+      // Apply price bounds based on the canonical initial price; using the
+      // current price as a stand-in would silently reset the bounds.
+      const initialPrice = initialPrices.get(ticker);
+      if (initialPrice === undefined || !(initialPrice > 0)) {
+        throw new Error(`Missing initial price for ticker ${ticker}`);
+      }
       const minPrice = initialPrice * this.config.minPriceFloor;
       const maxPrice = initialPrice * this.config.maxPriceCeiling;
       newPrice = Math.max(minPrice, Math.min(maxPrice, newPrice));

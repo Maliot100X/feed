@@ -9,12 +9,14 @@ import {
   markets,
   messages,
   notifications,
+  organizationState,
   perpPositions,
   positions,
   tags,
   trendingTags,
   users,
 } from '@feed/db';
+import { StaticDataRegistry } from '@feed/engine';
 import { FeedAgentExecutor } from '../../a2a/src/executors/feed-executor';
 import { resolveGroupChatByName } from '../../agents/src/autonomous/utils/context-gatherers';
 import {
@@ -28,7 +30,12 @@ import {
 import { recentMessagesProvider } from '../../agents/src/plugins/plugin-agent-core/src/providers/recent-messages';
 
 const userId = `portfolio-audit-${crypto.randomUUID()}`;
+// Organization state rows this suite inserted (CI starts from an empty schema).
+const createdOrgStateIds: string[] = [];
 afterAll(async () => {
+  for (const id of createdOrgStateIds) {
+    await db.delete(organizationState).where(eq(organizationState.id, id));
+  }
   await db.delete(trendingTags).where(eq(trendingTags.id, userId));
   await db.delete(tags).where(eq(tags.id, userId));
   await db.delete(messages).where(eq(messages.senderId, userId));
@@ -167,6 +174,14 @@ test('A2A market responses satisfy the prompt provider contracts', async () => {
 });
 
 test('organization context resolves real names and tickers; user context retains agent identity', async () => {
+  const [staticOrg] = StaticDataRegistry.getAllOrganizations();
+  if (!staticOrg) throw new Error('Static data registry has no organizations');
+  const inserted = await db
+    .insert(organizationState)
+    .values({ id: staticOrg.id, currentPrice: 100, updatedAt: new Date() })
+    .onConflictDoNothing()
+    .returning({ id: organizationState.id });
+  createdOrgStateIds.push(...inserted.map((row) => row.id));
   const { organizations } = organizationMentionsContextSchema.parse(
     await FeedAgentExecutor.executeDirectly(
       'stats.get_organizations',

@@ -42,7 +42,7 @@ export const GET = withErrorHandling(async (request: NextRequest) => {
   const leaderboardService = LEADERBOARD_SERVICES[leaderboardMetric];
 
   const currentUser = await leaderboardService.getUserPosition(
-    authUser.userId,
+    authUser.dbUserId ?? authUser.userId,
     leaderboardType,
     pageSize
   );
@@ -53,6 +53,8 @@ export const GET = withErrorHandling(async (request: NextRequest) => {
       leaderboardType,
       leaderboardMetric,
       currentUser,
-    })
+    }),
+    200,
+    { 'Cache-Control': 'private, no-store' }
   );
 });

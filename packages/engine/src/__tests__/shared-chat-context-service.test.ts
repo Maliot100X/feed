@@ -1,10 +1,12 @@
-import { describe, expect, test } from 'bun:test';
+import { describe, expect, spyOn, test } from 'bun:test';
+import { GroupChatService } from '../services/group-chat-service';
 import {
   buildSummary,
   extractFacts,
   extractKeywords,
   parseStoredSnapshot,
   type SharedChatMessage,
+  sharedChatContextService,
 } from '../services/shared-chat-context-service';
 
 const MESSAGES: SharedChatMessage[] = [
@@ -82,5 +84,23 @@ describe('shared-chat-context-service helpers', () => {
     expect(snapshot?.chatId).toBe('chat-1');
     expect(snapshot?.chatName).toBe('Ops Chat');
     expect(snapshot?.facts).toHaveLength(1);
+  });
+});
+
+describe('getSharedFacts visibility', () => {
+  test('returns nothing for a viewer with no chat memberships', async () => {
+    const membershipSpy = spyOn(
+      GroupChatService,
+      'getUserGroupChats'
+    ).mockResolvedValue([]);
+    try {
+      const facts = await sharedChatContextService.getSharedFacts({
+        viewerUserId: 'outsider',
+      });
+      expect(facts).toEqual([]);
+      expect(membershipSpy).toHaveBeenCalledWith('outsider');
+    } finally {
+      membershipSpy.mockRestore();
+    }
   });
 });

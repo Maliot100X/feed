@@ -3,8 +3,6 @@
  *
  * Prepares trajectory data for RLAIF training pipelines.
  * Exports to HuggingFace Hub for easy access in training scripts.
- *
- * NOTE: Requires trajectory schema that's not yet in main schema
  */
 
 import {
@@ -41,8 +39,8 @@ export interface ExportOptions {
   // Limits
   maxTrajectories?: number;
 
-  // Format
-  format?: 'jsonl' | 'parquet' | 'arrow';
+  // Format (only JSONL is implemented)
+  format?: 'jsonl';
   splitRatio?: { train: number; validation: number; test: number };
 }
 
@@ -83,7 +81,7 @@ export async function exportToHuggingFace(
     .from(trajectories)
     .where(conditions.length > 0 ? and(...conditions) : undefined)
     .orderBy(desc(trajectories.startTime))
-    .limit(options.maxTrajectories || 10000);
+    .limit(resolveMaxTrajectories(options.maxTrajectories, 10000));
 
   logger.info(
     `Exporting ${result.length} trajectories...`,
@@ -97,12 +95,43 @@ export async function exportToHuggingFace(
   // Split into train/validation/test
   const splits = splitDataset(dataset, options.splitRatio);
 
-  // Export based on format
-  if (options.format === 'parquet' || options.format === 'arrow') {
-    return await exportToParquet<TrainingTrajectory>(splits, options);
-  } else {
-    return await exportToJSONL<TrainingTrajectory>(splits, options);
+  return await exportToJSONL<TrainingTrajectory>(splits, options);
+}
+
+/**
+ * Validate an optional maxTrajectories option (must be a positive integer).
+ */
+export function resolveMaxTrajectories(
+  value: number | undefined,
+  defaultValue: number
+): number {
+  if (value === undefined) return defaultValue;
+  if (!Number.isInteger(value) || value < 1) {
+    throw new Error(`maxTrajectories must be a positive integer, got ${value}`);
   }
+  return value;
+}
+
+const HF_DATASET_NAME_PATTERN = /^[A-Za-z0-9][\w.-]*\/[A-Za-z0-9][\w.-]*$/;
+
+/**
+ * Validate a Hugging Face dataset identifier (`owner/name`).
+ */
+export function assertValidDatasetName(datasetName: string): void {
+  if (!HF_DATASET_NAME_PATTERN.test(datasetName)) {
+    throw new Error(`Invalid Hugging Face dataset name: ${datasetName}`);
+  }
+}
+
+/**
+ * Map an arbitrary identifier to a safe single path segment.
+ */
+export function toSafeFileSegment(value: string): string {
+  const safe = value.replace(/[^A-Za-z0-9_-]/g, '_').slice(0, 100);
+  if (!safe) {
+    throw new Error(`Cannot derive a file name from identifier: ${value}`);
+  }
+  return safe;
 }
 
 /**
@@ -281,12 +310,20 @@ function transformForTraining(traj: TrajectoryRecord): TrainingTrajectory {
 /**
  * Split dataset into train/val/test
  */
-function splitDataset<T>(
+export function splitDataset<T>(
   data: T[],
   ratio?: { train: number; validation: number; test: number }
 ): { train: T[]; validation: T[]; test: T[] } {
   const defaultRatio = { train: 0.8, validation: 0.1, test: 0.1 };
-  const { train, validation, test: testRatio } = ratio || defaultRatio;
+  const { train, validation, test } = ratio ?? defaultRatio;
+  for (const [name, value] of Object.entries({ train, validation, test })) {
+    if (!Number.isFinite(value) || value < 0) {
+      throw new Error(`splitRatio.${name} must be a non-negative number`);
+    }
+  }
+  if (Math.abs(train + validation + test - 1) > 1e-6) {
+    throw new Error('splitRatio values must sum to 1');
+  }
 
   // Shuffle data
   const shuffled = shuffleArray(data);
@@ -299,9 +336,6 @@ function splitDataset<T>(
     validation: shuffled.slice(trainSize, trainSize + valSize),
     test: shuffled.slice(trainSize + valSize),
   };
-
-  // Suppress unused variable warning
-  void testRatio;
 }
 
 /**
@@ -327,10 +361,14 @@ async function exportToJSONL<T extends object>(
 
   // Write splits
   for (const [splitName, data] of Object.entries(splits)) {
-    if (data.length === 0) continue;
-
     const filePath = path.join(exportDir, `${splitName}.jsonl`);
-    const lines = data.map((item: T) => JSON.stringify(item)).join('\n');
+    if (data.length === 0) {
+      // Remove a stale split from a previous run so it is not uploaded
+      await fs.rm(filePath, { force: true });
+      continue;
+    }
+
+    const lines = data.map((item: T) => `${JSON.stringify(item)}\n`).join('');
     await fs.writeFile(filePath, lines, 'utf-8');
 
     logger.info(
@@ -356,23 +394,6 @@ async function exportToJSONL<T extends object>(
 }
 
 /**
- * Export to Parquet format (more efficient for large datasets)
- */
-async function exportToParquet<T extends object>(
-  splits: { train: T[]; validation: T[]; test: T[] },
-  options: ExportOptions
-): Promise<ExportResult> {
-  // This would require Apache Arrow/Parquet libraries
-  // For now, fallback to JSONL
-  logger.warn(
-    'Parquet export not yet implemented, falling back to JSONL',
-    undefined,
-    'TrajectoryExport'
-  );
-  return exportToJSONL(splits, options);
-}
-
-/**
  * Upload to Hugging Face Hub
  */
 async function uploadToHuggingFaceHub(
@@ -383,13 +404,12 @@ async function uploadToHuggingFaceHub(
     throw new Error('HuggingFace token is required for upload');
   }
 
-  // Try using child_process to call huggingface-cli (most reliable method)
-  const { exec } = await import('node:child_process');
-  const { promisify } = await import('node:util');
-  const execAsync = promisify(exec);
+  assertValidDatasetName(options.datasetName);
 
-  // Set token as environment variable for huggingface-cli
-  process.env.HUGGINGFACE_HUB_TOKEN = options.huggingFaceToken;
+  // Call huggingface-cli with an argument vector (no shell interpolation)
+  const { execFile } = await import('node:child_process');
+  const { promisify } = await import('node:util');
+  const execFileAsync = promisify(execFile);
 
   logger.info(
     'Uploading to Hugging Face Hub...',
@@ -397,8 +417,13 @@ async function uploadToHuggingFaceHub(
     'TrajectoryExport'
   );
 
-  await execAsync(
-    `huggingface-cli upload ${options.datasetName} ${exportDir} --repo-type dataset`
+  // Token is scoped to the child process instead of mutating process.env
+  await execFileAsync(
+    'huggingface-cli',
+    ['upload', options.datasetName, exportDir, '--repo-type', 'dataset'],
+    {
+      env: { ...process.env, HUGGINGFACE_HUB_TOKEN: options.huggingFaceToken },
+    }
   );
   logger.info(
     'Successfully uploaded via huggingface-cli',
@@ -468,8 +493,13 @@ export async function exportGroupedByScenario(
       })
     );
 
-    const filePath = path.join(exportDir, `scenario-${scenarioId}.jsonl`);
-    const lines = transformed.map((item) => JSON.stringify(item)).join('\n');
+    const filePath = path.join(
+      exportDir,
+      `scenario-${toSafeFileSegment(scenarioId)}.jsonl`
+    );
+    const lines = transformed
+      .map((item) => `${JSON.stringify(item)}\n`)
+      .join('');
     await fs.writeFile(filePath, lines, 'utf-8');
 
     logger.info(
@@ -508,7 +538,7 @@ export async function exportForOpenPipeART(
     .select()
     .from(trajectories)
     .where(conditions.length > 0 ? and(...conditions) : undefined)
-    .limit(options.maxTrajectories || 10000)
+    .limit(resolveMaxTrajectories(options.maxTrajectories, 10000))
     .orderBy(trajectories.startTime);
 
   const artFormat = trajResults.map((traj) => {
@@ -575,46 +605,23 @@ export async function exportGroupedForGRPO(
   const { groupTrajectories, toARTTrajectory } = await import('./art-format');
 
   // CRITICAL: Enforce maxTrajectories limit to prevent 200GB disk usage
-  const MAX_TRAJECTORIES = options.maxTrajectories || 2000; // Default hard limit
+  const MAX_TRAJECTORIES = resolveMaxTrajectories(
+    options.maxTrajectories,
+    2000
+  ); // Default hard limit
   const MAX_TRAJECTORIES_PER_SCENARIO = 50; // Limit per scenario to prevent huge files
 
   const baseConditions = buildWhereConditions(options);
 
-  // Get scenarios with counts using raw SQL for groupBy
-  const scenarioCountsRaw = await db.execute(sql`
-      SELECT "scenarioId", COUNT(*) as count 
-      FROM trajectories 
-      WHERE "scenarioId" IS NOT NULL AND "isTrainingData" = true
-      GROUP BY "scenarioId"
-    `);
-
-  // Type for raw SQL scenario count row with index signature for compatibility
-  interface ScenarioCountRow {
-    scenarioId: string | null;
-    count: string | number;
-    [key: string]: string | number | null;
-  }
-
-  // Type guard for scenario count row
-  function isScenarioCountRow(row: object): row is ScenarioCountRow {
-    return 'scenarioId' in row && 'count' in row;
-  }
-
-  // Validate and type the raw SQL result
-  if (!Array.isArray(scenarioCountsRaw)) {
-    throw new Error('Invalid scenario counts result from database');
-  }
-  const scenarioCounts: Array<{ scenarioId: string; count: string }> = (
-    scenarioCountsRaw as object[]
-  )
-    .filter(
-      (row): row is ScenarioCountRow =>
-        row !== null && typeof row === 'object' && isScenarioCountRow(row)
-    )
-    .map((row) => ({
-      scenarioId: String(row.scenarioId),
-      count: String(row.count),
-    }));
+  // Scenario counts honor the same export filters as the rows selected below
+  const scenarioCounts = await db
+    .select({
+      scenarioId: trajectories.scenarioId,
+      count: sql<number>`count(*)::int`,
+    })
+    .from(trajectories)
+    .where(and(isNotNull(trajectories.scenarioId), ...baseConditions))
+    .groupBy(trajectories.scenarioId);
 
   const fs = await import('node:fs/promises');
   const path = await import('node:path');
@@ -625,8 +632,7 @@ export async function exportGroupedForGRPO(
   let remainingQuota = MAX_TRAJECTORIES;
 
   for (const { scenarioId, count } of scenarioCounts) {
-    const countNum = parseInt(count);
-    if (!scenarioId || countNum < 2) continue; // Need at least 2 for comparison
+    if (!scenarioId || count < 2) continue; // Need at least 2 for comparison
     if (remainingQuota <= 0) break; // Stop if we've hit the limit
 
     // Calculate how many trajectories we can take for this scenario
@@ -661,7 +667,7 @@ export async function exportGroupedForGRPO(
 
     const groups = groupTrajectories(trajObjects as Trajectory[]);
 
-    for (const group of groups) {
+    for (const [groupNumber, group] of groups.entries()) {
       // Skip if we've hit the global limit
       if (remainingQuota <= 0) break;
 
@@ -673,7 +679,11 @@ export async function exportGroupedForGRPO(
         createdAt: group.createdAt,
       };
 
-      const filePath = path.join(exportDir, `group-${scenarioId}.jsonl`);
+      // One file per group so multiple groups for a scenario don't overwrite
+      const filePath = path.join(
+        exportDir,
+        `group-${toSafeFileSegment(scenarioId)}-${groupNumber}.jsonl`
+      );
       await fs.writeFile(filePath, JSON.stringify(artFormat) + '\n', 'utf-8');
 
       const exported = group.trajectories.length;

@@ -27,13 +27,7 @@ import {
   Users,
   Zap,
 } from 'lucide-react';
-import {
-  useCallback,
-  useEffect,
-  useMemo,
-  useState,
-  useTransition,
-} from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import {
   Area,
   AreaChart,
@@ -151,53 +145,92 @@ function MetricCard({
   );
 }
 
+export interface FunnelStage {
+  label: string;
+  value: number;
+  /** Share of signups (0-100). 0 when there were no signups. */
+  pct: number;
+}
+
+/**
+ * Build activation funnel rows. Pure so it can be computed during render
+ * after the loading/no-data early returns without changing hook order.
+ */
+export function buildFunnelStages(
+  funnel: GrowthData['activation']['funnel']
+): FunnelStage[] {
+  const { signups, tradedWithin24h, commandedWithin24h, activated } = funnel;
+  const pctOf = (value: number) =>
+    signups > 0 ? Math.round((value / signups) * 100) : 0;
+
+  return [
+    { label: 'Signups (30d)', value: signups, pct: signups > 0 ? 100 : 0 },
+    {
+      label: 'First Trade',
+      value: tradedWithin24h,
+      pct: pctOf(tradedWithin24h),
+    },
+    {
+      label: 'First Command',
+      value: commandedWithin24h,
+      pct: pctOf(commandedWithin24h),
+    },
+    { label: 'Activated', value: activated, pct: pctOf(activated) },
+  ];
+}
+
 export function GrowthMetricsTab() {
   const [data, setData] = useState<GrowthData | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [period, setPeriod] = useState<Period>('week');
-  const [isRefreshing, startRefresh] = useTransition();
+  const [isRefreshing, setIsRefreshing] = useState(false);
+  // Only the most recent request (e.g. after a period switch) may apply.
+  const latestRequest = useRef(0);
 
   const fetchData = useCallback(
-    (showRefreshing = false) => {
-      const fetchLogic = async () => {
-        setError(null);
+    async (showRefreshing = false) => {
+      const requestId = ++latestRequest.current;
+      if (showRefreshing) setIsRefreshing(true);
+
+      let result: GrowthData | null = null;
+      let failure: string | null = null;
+      try {
         const response = await fetch(
           apiUrl(
             `/api/admin/stats/growth?period=${period}&includeTimeSeries=true`
           )
         );
-        if (!response.ok) {
-          setData(null);
-          setError('Failed to load growth metrics');
-          setLoading(false);
-          return;
+        if (response.ok) {
+          result = (await response.json()) as GrowthData;
+        } else {
+          failure = `Failed to load growth metrics (HTTP ${response.status})`;
         }
-        const result = await response.json();
-        setData(result);
-        setLoading(false);
-      };
-
-      if (showRefreshing) {
-        startRefresh(fetchLogic);
-      } else {
-        void fetchLogic().catch(() => {
-          setData(null);
-          setError('Failed to load growth metrics');
-          setLoading(false);
-        });
+      } catch (err) {
+        failure =
+          err instanceof Error ? err.message : 'Failed to load growth metrics';
       }
+
+      if (requestId !== latestRequest.current) return;
+      if (result) {
+        setData(result);
+        setError(null);
+      } else {
+        setError(failure);
+      }
+      setLoading(false);
+      setIsRefreshing(false);
     },
     [period]
   );
 
   useEffect(() => {
-    fetchData();
+    void fetchData();
   }, [fetchData]);
 
   // Auto-refresh every 60 seconds
   useEffect(() => {
-    const interval = setInterval(() => fetchData(), 60000);
+    const interval = setInterval(() => void fetchData(), 60000);
     return () => clearInterval(interval);
   }, [fetchData]);
 
@@ -232,7 +265,7 @@ export function GrowthMetricsTab() {
           onClick={() => {
             setLoading(true);
             setError(null);
-            fetchData();
+            void fetchData();
           }}
           className="mt-4 rounded-lg bg-primary px-4 py-2 font-medium text-primary-foreground"
         >
@@ -257,41 +290,7 @@ export function GrowthMetricsTab() {
     { name: 'Hybrid', value: data.userBalance.hybrid, color: COLORS.hybrid },
   ].filter((item) => item.value > 0);
 
-  // Prepare funnel data
-  const funnelStages = useMemo(() => {
-    const signups = data.activation.funnel.signups;
-    const tradedWithin24h = data.activation.funnel.tradedWithin24h;
-    const commandedWithin24h = data.activation.funnel.commandedWithin24h;
-    const activated = data.activation.funnel.activated;
-
-    return [
-      {
-        label: 'Signups (30d)',
-        value: signups,
-        pct: 100,
-      },
-      {
-        label: 'First Trade',
-        value: tradedWithin24h,
-        pct: signups > 0 ? Math.round((tradedWithin24h / signups) * 100) : 0,
-      },
-      {
-        label: 'First Command',
-        value: commandedWithin24h,
-        pct: signups > 0 ? Math.round((commandedWithin24h / signups) * 100) : 0,
-      },
-      {
-        label: 'Activated',
-        value: activated,
-        pct: signups > 0 ? Math.round((activated / signups) * 100) : 0,
-      },
-    ];
-  }, [
-    data.activation.funnel.activated,
-    data.activation.funnel.commandedWithin24h,
-    data.activation.funnel.signups,
-    data.activation.funnel.tradedWithin24h,
-  ]);
+  const funnelStages = buildFunnelStages(data.activation.funnel);
 
   return (
     <div className="space-y-6">
@@ -303,7 +302,7 @@ export function GrowthMetricsTab() {
             Growth Metrics
           </h2>
           <p className="mt-1 text-muted-foreground">
-            Week of {formatDate(data.metadata.periodStart)} -{' '}
+            {formatDate(data.metadata.periodStart)} -{' '}
             {formatDate(data.metadata.periodEnd)}
           </p>
         </div>
@@ -314,7 +313,10 @@ export function GrowthMetricsTab() {
             {(['day', 'week', 'month'] as const).map((p) => (
               <button
                 key={p}
+                type="button"
+                aria-pressed={period === p}
                 onClick={() => {
+                  if (p === period) return;
                   setPeriod(p);
                   setLoading(true);
                 }}
@@ -331,7 +333,8 @@ export function GrowthMetricsTab() {
           </div>
 
           <button
-            onClick={() => fetchData(true)}
+            type="button"
+            onClick={() => void fetchData(true)}
             disabled={isRefreshing}
             className="flex items-center gap-1.5 rounded-lg bg-muted px-2.5 py-1.5 font-medium text-xs transition-colors hover:bg-muted/80 disabled:opacity-50 sm:gap-2 sm:px-3 sm:py-2 sm:text-sm"
           >
@@ -567,7 +570,7 @@ export function GrowthMetricsTab() {
           {funnelStages.map((stage, index) => {
             const isFirst = index === 0;
             const isLast = index === funnelStages.length - 1;
-            const width = isFirst ? 100 : Math.max(stage.pct, 2); // min 2% for visibility
+            const width = stage.pct;
             const pathLabel =
               index === 1 ? 'Trade' : index === 2 ? 'Command' : null;
 

@@ -61,21 +61,16 @@ import {
   withErrorHandling,
 } from '@feed/api';
 import { gameService } from '@feed/engine';
-import { logger } from '@feed/shared';
 import type { NextRequest } from 'next/server';
 
 export const GET = withErrorHandling(async (request: NextRequest) => {
   const { error, rateLimitInfo } = await publicRateLimit(request);
   if (error) return error;
 
-  const stats = await gameService.getStats();
-  const status = await gameService.getStatus();
-
-  logger.info(
-    'Stats fetched successfully',
-    { stats, engineStatus: status },
-    'GET /api/stats'
-  );
+  const [stats, status] = await Promise.all([
+    gameService.getStats(),
+    gameService.getStatus(),
+  ]);
 
   const res = successResponse({
     success: true,

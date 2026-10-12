@@ -25,31 +25,10 @@ import {
   or,
   sql,
 } from '@feed/db';
-
-/**
- * Format timestamp to relative time string
- */
-function formatRelativeTime(date: Date): string {
-  const now = Date.now();
-  const diffMs = now - date.getTime();
-  const diffMins = Math.floor(diffMs / 60000);
-  const diffHours = Math.floor(diffMs / 3600000);
-  const diffDays = Math.floor(diffMs / 86400000);
-
-  if (diffMins < 1) return 'just now';
-  if (diffMins < 60) return `${diffMins}m ago`;
-  if (diffHours < 24) return `${diffHours}h ago`;
-  return `${diffDays}d ago`;
-}
-
-/**
- * Format time as HH:MM
- */
-function formatTime(date: Date): string {
-  const hours = date.getHours().toString().padStart(2, '0');
-  const minutes = date.getMinutes().toString().padStart(2, '0');
-  return `${hours}:${minutes}`;
-}
+import {
+  formatClockTime,
+  formatRelativeTime,
+} from '../../../conversation-time';
 
 /**
  * Recent Messages Provider
@@ -149,7 +128,7 @@ export const recentMessagesProvider: Provider = {
         .reverse()
         .map((msg) => {
           const speaker = msg.senderId === ownerId ? 'User' : 'You';
-          const time = formatTime(msg.createdAt);
+          const time = formatClockTime(msg.createdAt);
           const relativeTime = formatRelativeTime(msg.createdAt);
           return `${time} (${relativeTime}) ${speaker}: ${msg.content}`;
         })
@@ -185,7 +164,7 @@ export const recentMessagesProvider: Provider = {
         .reverse()
         .map((msg) => {
           const speaker = msg.role === 'user' ? 'User' : 'Agent';
-          const time = formatTime(msg.createdAt);
+          const time = formatClockTime(msg.createdAt);
           const relativeTime = formatRelativeTime(msg.createdAt);
           return `${time} (${relativeTime}) ${speaker}: ${msg.content}`;
         })

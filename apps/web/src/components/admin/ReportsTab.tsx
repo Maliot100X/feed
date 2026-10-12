@@ -22,7 +22,7 @@
 
 import { cn, logger } from '@feed/shared';
 import { AlertCircle, CheckCircle, Clock, Flag, XCircle } from 'lucide-react';
-import { useCallback, useEffect, useState, useTransition } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { toast } from 'sonner';
 import { Avatar } from '@/components/shared/Avatar';
 import { Skeleton } from '@/components/shared/Skeleton';
@@ -115,128 +115,157 @@ export function ReportsTab() {
   const [selectedReport, setSelectedReport] = useState<Report | null>(null);
   const [showActionModal, setShowActionModal] = useState(false);
   const [showEvaluationModal, setShowEvaluationModal] = useState(false);
-  const [evaluatingReportId, setEvaluatingReportId] = useState<string | null>(
-    null
+  // Per-report pending mutations (evaluate/action), so concurrent
+  // operations on different reports don't unlock each other.
+  const [pendingReportIds, setPendingReportIds] = useState<ReadonlySet<string>>(
+    () => new Set()
   );
-  const [, startRefresh] = useTransition();
+  const [loadError, setLoadError] = useState<string | null>(null);
+  const latestRequest = useRef(0);
 
-  const fetchReports = useCallback(
-    (showRefreshing = false) => {
-      const fetchLogic = async () => {
-        try {
-          const params = new URLSearchParams({
-            limit: '100',
-          });
-          if (statusFilter !== 'all') params.set('status', statusFilter);
-          if (priorityFilter !== 'all') params.set('priority', priorityFilter);
+  const setPending = (reportId: string, pending: boolean) =>
+    setPendingReportIds((prev) => {
+      const next = new Set(prev);
+      if (pending) next.add(reportId);
+      else next.delete(reportId);
+      return next;
+    });
 
-          const response = await fetch(apiUrl(`/api/admin/reports?${params}`));
-          if (!response.ok) {
-            logger.error(
-              'Failed to fetch reports',
-              { status: response.status },
-              'ReportsTab'
-            );
-            setLoading(false);
-            return;
-          }
+  const fetchReports = useCallback(async () => {
+    const requestId = ++latestRequest.current;
+    const params = new URLSearchParams({
+      limit: '100',
+    });
+    if (statusFilter !== 'all') params.set('status', statusFilter);
+    if (priorityFilter !== 'all') params.set('priority', priorityFilter);
 
-          const data = await response.json();
-          setReports(data.reports || []);
-          setLoading(false);
-        } catch (err) {
-          logger.error(
-            'Error fetching reports',
-            err instanceof Error ? err : { error: err },
-            'ReportsTab'
-          );
-          setLoading(false);
-        }
-      };
-
-      if (showRefreshing) {
-        startRefresh(fetchLogic);
-      } else {
-        void fetchLogic();
-      }
-    },
-    [statusFilter, priorityFilter]
-  );
-
-  const fetchStats = useCallback(() => {
-    const fetchLogic = async () => {
-      try {
-        const response = await fetch(apiUrl('/api/admin/reports/stats'));
-        if (!response.ok) return;
-
-        const data = await response.json();
-        setStats(data);
-      } catch (err) {
+    let nextError: string | null = null;
+    let nextReports: Report[] | null = null;
+    try {
+      const response = await fetch(apiUrl(`/api/admin/reports?${params}`));
+      if (!response.ok) {
         logger.error(
-          'Error fetching report stats',
-          err instanceof Error ? err : { error: err },
+          'Failed to fetch reports',
+          { status: response.status },
           'ReportsTab'
         );
+        nextError = `Failed to load reports (HTTP ${response.status})`;
+      } else {
+        const data: { reports?: Report[] } = await response.json();
+        if (Array.isArray(data.reports)) nextReports = data.reports;
+        else nextError = 'Unexpected reports response shape';
       }
-    };
-    void fetchLogic();
+    } catch (err) {
+      logger.error(
+        'Error fetching reports',
+        err instanceof Error ? err : { error: err },
+        'ReportsTab'
+      );
+      nextError = err instanceof Error ? err.message : 'Failed to load reports';
+    }
+
+    if (requestId !== latestRequest.current) return;
+    if (nextReports) setReports(nextReports);
+    setLoadError(nextError);
+    setLoading(false);
+  }, [statusFilter, priorityFilter]);
+
+  const fetchStats = useCallback(async () => {
+    try {
+      const response = await fetch(apiUrl('/api/admin/reports/stats'));
+      if (!response.ok) return;
+
+      const data = await response.json();
+      setStats(data);
+    } catch (err) {
+      logger.error(
+        'Error fetching report stats',
+        err instanceof Error ? err : { error: err },
+        'ReportsTab'
+      );
+    }
   }, []);
 
   useEffect(() => {
-    fetchReports();
-    fetchStats();
-  }, [fetchReports, fetchStats]);
+    void fetchReports();
+  }, [fetchReports]);
 
+  useEffect(() => {
+    void fetchStats();
+  }, [fetchStats]);
+
+  /**
+   * Apply an admin action to a report. Resolves to true on success so
+   * callers (e.g. the action modal) can keep their pending state until the
+   * request has actually finished.
+   */
   const handleAction = async (
     reportId: string,
     action: string,
     resolution: string
-  ) => {
-    const response = await fetch(apiUrl(`/api/admin/reports/${reportId}`), {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ action, resolution }),
-    });
+  ): Promise<boolean> => {
+    if (pendingReportIds.has(reportId)) return false;
+    setPending(reportId, true);
+    try {
+      const response = await fetch(apiUrl(`/api/admin/reports/${reportId}`), {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action, resolution }),
+      });
 
-    if (!response.ok) {
-      const error = await response.json();
-      toast.error(error.message || 'Failed to take action');
-      return;
+      if (!response.ok) {
+        const error: { message?: string; error?: string } = await response
+          .json()
+          .catch(() => ({}));
+        toast.error(error.message ?? error.error ?? 'Failed to take action');
+        return false;
+      }
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : 'Failed to take action');
+      return false;
+    } finally {
+      setPending(reportId, false);
     }
 
     setShowActionModal(false);
     setSelectedReport(null);
-    fetchReports(true);
-    fetchStats();
+    void fetchReports();
+    void fetchStats();
+    return true;
   };
 
   const handleEvaluate = async (reportId: string) => {
-    setEvaluatingReportId(reportId);
-    const response = await fetch(apiUrl(`/api/admin/reports/${reportId}`), {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ action: 'evaluate' }),
-    });
+    if (pendingReportIds.has(reportId)) return;
+    setPending(reportId, true);
+    try {
+      const response = await fetch(apiUrl(`/api/admin/reports/${reportId}`), {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action: 'evaluate' }),
+      });
 
-    if (!response.ok) {
-      const error = await response.json();
-      toast.error(error.message || 'Failed to evaluate report');
-      setEvaluatingReportId(null);
+      if (!response.ok) {
+        const error: { message?: string; error?: string } = await response
+          .json()
+          .catch(() => ({}));
+        toast.error(
+          error.message ?? error.error ?? 'Failed to evaluate report'
+        );
+        return;
+      }
+    } catch (err) {
+      toast.error(
+        err instanceof Error ? err.message : 'Failed to evaluate report'
+      );
       return;
+    } finally {
+      setPending(reportId, false);
     }
 
-    const data = await response.json();
-
-    // Refresh reports to show evaluation
-    await fetchReports(true);
-
-    // Show evaluation modal if we have the report selected
-    const report = reports.find((r) => r.id === reportId);
-    if (report && data.evaluation) {
-      setSelectedReport({ ...report, evaluation: data.evaluation });
-      setShowEvaluationModal(true);
-    }
-    setEvaluatingReportId(null);
+    // Don't pop a modal for a background completion (the admin may have
+    // moved on); the refreshed row exposes "View Evaluation Details".
+    toast.success('Evaluation complete');
+    await fetchReports();
   };
 
   const formatDate = (date: string) => {
@@ -398,10 +427,22 @@ export function ReportsTab() {
       </div>
 
       {/* Reports List */}
+      {loadError && (
+        <div className="rounded-lg border border-red-500/20 bg-red-500/10 p-3 text-red-500 text-sm">
+          {loadError}{' '}
+          <button
+            type="button"
+            onClick={() => void fetchReports()}
+            className="underline"
+          >
+            Retry
+          </button>
+        </div>
+      )}
       {reports.length === 0 ? (
         <div className="py-12 text-center text-muted-foreground">
           <Flag className="mx-auto mb-3 h-12 w-12 opacity-50" />
-          <p>No reports found</p>
+          <p>{loadError ? 'Reports unavailable' : 'No reports found'}</p>
         </div>
       ) : (
         <div className="space-y-3">
@@ -515,13 +556,26 @@ export function ReportsTab() {
                   {report.status === 'pending' ||
                   report.status === 'reviewing' ? (
                     <div className="flex flex-wrap gap-2">
+                      {report.evaluation && (
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setSelectedReport(report);
+                            setShowEvaluationModal(true);
+                          }}
+                          className="rounded bg-muted px-3 py-1 text-foreground text-sm transition-colors hover:bg-muted/80"
+                        >
+                          View Evaluation Details
+                        </button>
+                      )}
                       <button
-                        onClick={() => handleEvaluate(report.id)}
-                        disabled={evaluatingReportId === report.id}
+                        type="button"
+                        onClick={() => void handleEvaluate(report.id)}
+                        disabled={pendingReportIds.has(report.id)}
                         className="rounded bg-purple-500 px-3 py-1 text-sm text-white transition-colors hover:bg-purple-600 disabled:opacity-50"
                       >
-                        {evaluatingReportId === report.id
-                          ? 'Evaluating...'
+                        {pendingReportIds.has(report.id)
+                          ? 'Working...'
                           : 'Evaluate'}
                       </button>
                       <button
@@ -534,14 +588,16 @@ export function ReportsTab() {
                         Take Action
                       </button>
                       <button
+                        type="button"
+                        disabled={pendingReportIds.has(report.id)}
                         onClick={() =>
-                          handleAction(
+                          void handleAction(
                             report.id,
                             'dismiss',
                             'Dismissed by admin'
                           )
                         }
-                        className="rounded bg-muted px-3 py-1 text-foreground text-sm transition-colors hover:bg-muted/80"
+                        className="rounded bg-muted px-3 py-1 text-foreground text-sm transition-colors hover:bg-muted/80 disabled:opacity-50"
                       >
                         Dismiss
                       </button>
@@ -610,7 +666,11 @@ export function ReportsTab() {
 interface ActionModalProps {
   report: Report;
   onClose: () => void;
-  onAction: (reportId: string, action: string, resolution: string) => void;
+  onAction: (
+    reportId: string,
+    action: string,
+    resolution: string
+  ) => Promise<boolean>;
 }
 
 interface EvaluationModalProps {
@@ -756,7 +816,7 @@ function EvaluationModal({
 function ActionModal({ report, onClose, onAction }: ActionModalProps) {
   const [action, setAction] = useState('resolve');
   const [resolution, setResolution] = useState('');
-  const [isSubmitting, startSubmit] = useTransition();
+  const [isSubmitting, setIsSubmitting] = useState(false);
 
   const handleSubmit = () => {
     if (!resolution.trim()) {
@@ -764,9 +824,13 @@ function ActionModal({ report, onClose, onAction }: ActionModalProps) {
       return;
     }
 
-    startSubmit(() => {
-      onAction(report.id, action, resolution);
-    });
+    if (isSubmitting) return;
+    setIsSubmitting(true);
+    // Keep the dialog locked (and the draft intact) until the request
+    // settles; on failure the admin can retry without retyping.
+    void onAction(report.id, action, resolution).finally(() =>
+      setIsSubmitting(false)
+    );
   };
 
   return (

@@ -129,27 +129,25 @@ export class EventBus {
     // Find matching subscriptions
     const matchingSubs = this.getMatchingSubscriptions(eventType);
 
-    // Execute handlers
+    // Execute handlers. Each subscriber runs inside its own promise boundary
+    // so a sync throw (in the filter or handler) is isolated exactly like an
+    // async rejection and never aborts delivery to remaining subscribers.
     const promises: Promise<void>[] = [];
     for (const sub of matchingSubs) {
-      // Apply filter if present
-      if (sub.filter && !sub.filter(event)) {
-        continue;
-      }
-
-      // Execute handler (async or sync)
-      const result = sub.handler(data);
-      if (result instanceof Promise) {
-        promises.push(
-          result.catch((error) => {
+      promises.push(
+        Promise.resolve()
+          .then(() => {
+            if (sub.filter && !sub.filter(event)) return;
+            return sub.handler(data);
+          })
+          .catch((error: unknown) => {
             logger.error(
               `Error in handler for ${eventType}`,
               error instanceof Error ? error : new Error(String(error)),
               'EventBus'
             );
           })
-        );
-      }
+      );
     }
 
     // Wait for all async handlers
@@ -185,8 +183,11 @@ export class EventBus {
       return eventType === pattern; // Exact match
     }
 
-    // Wildcard matching
-    const regexPattern = pattern.replace(/\./g, '\\.').replace(/\*/g, '.*');
+    // Wildcard matching: escape every regex metacharacter, then expand `*`.
+    const regexPattern = pattern
+      .split('*')
+      .map((segment) => segment.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'))
+      .join('.*');
     const regex = new RegExp(`^${regexPattern}$`);
 
     return regex.test(eventType);
@@ -196,13 +197,28 @@ export class EventBus {
    * Get recent event history
    *
    * @param eventType - Optional filter by event type
-   * @param limit - Maximum number of events to return
+   * @param limit - Maximum number of events to return (non-negative integer)
+   * @param predicate - Optional filter applied before the limit
    */
-  getHistory(eventType?: string, limit = 100): AgentEvent[] {
+  getHistory(
+    eventType?: string,
+    limit = 100,
+    predicate?: (event: AgentEvent) => boolean
+  ): AgentEvent[] {
+    if (!Number.isSafeInteger(limit) || limit < 0) {
+      throw new Error(
+        `EventBus.getHistory limit must be a non-negative integer`
+      );
+    }
+    if (limit === 0) return [];
+
     let events = this.eventHistory;
 
     if (eventType) {
       events = events.filter((e) => this.matchesEventType(e.type, eventType));
+    }
+    if (predicate) {
+      events = events.filter(predicate);
     }
 
     return events.slice(-limit);

@@ -6,11 +6,8 @@
 
 // PNL Normalization utilities
 export {
-  calculateAverageROI,
   calculateConfidenceScore,
-  calculateSharpeRatio,
   calculateWinRate,
-  denormalizePnL,
   getTrustLevel,
   normalizePnL,
 } from './pnl-normalizer';
@@ -33,12 +30,3 @@ export {
   updateGameMetrics,
   updateTradingMetrics,
 } from './reputation-calculation-service';
-
-// Trade Feedback Calculator
-export {
-  calculateEntryTimingScore,
-  calculateExitTimingScore,
-  calculateRiskScore,
-  calculateTradeMetrics,
-  getTradeFeedbackSummary,
-} from './trade-feedback-calculator';

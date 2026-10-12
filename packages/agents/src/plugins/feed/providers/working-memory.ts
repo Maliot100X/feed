@@ -17,8 +17,10 @@ import type {
   ProviderResult,
   State,
 } from '@elizaos/core';
+import { and, db, desc, eq, worldFacts } from '@feed/db';
 import { z } from 'zod';
 import { logger } from '../../../shared/logger';
+import { generateSnowflakeId } from '../../../shared/snowflake';
 
 const WORKING_MEMORY_CATEGORY = 'agent_working_memory';
 const MAX_CONTACTS = 10;
@@ -90,108 +92,51 @@ const memorySchema = z.object({
   lastUpdated: z.string().datetime(),
 });
 
-type WorldFactsServiceShape = {
-  getFactsByCategory: (
-    category: string,
-    options?: { limit?: number; key?: string }
-  ) => Promise<Array<{ id: string; key: string; value: string }>>;
-  upsertFact: (params: {
-    category: string;
-    key: string;
-    label: string;
-    value: string;
-    source: string;
-    priority: number;
-  }) => Promise<void>;
-};
+async function findMemoryRow(
+  key: string
+): Promise<{ id: string; value: string } | undefined> {
+  const [row] = await db
+    .select({ id: worldFacts.id, value: worldFacts.value })
+    .from(worldFacts)
+    .where(
+      and(
+        eq(worldFacts.category, WORKING_MEMORY_CATEGORY),
+        eq(worldFacts.key, key)
+      )
+    )
+    .orderBy(desc(worldFacts.updatedAt))
+    .limit(1);
+  return row ? { id: row.id, value: row.value ?? '' } : undefined;
+}
 
-let servicePromise: Promise<WorldFactsServiceShape> | null = null;
-
-async function getWorldFactsService(): Promise<WorldFactsServiceShape> {
-  if (!servicePromise) {
-    // Dynamic import to avoid circular dependencies
-    servicePromise = import('@feed/engine').then(() => {
-      return {
-        getFactsByCategory: async (
-          category: string,
-          options?: { limit?: number; key?: string }
-        ) => {
-          // Use raw DB query since worldFactsService may not expose getFactsByCategory
-          const { db, worldFacts, eq, desc, and } = await import('@feed/db');
-          const rows = await db
-            .select({
-              id: worldFacts.id,
-              key: worldFacts.key,
-              value: worldFacts.value,
-            })
-            .from(worldFacts)
-            .where(
-              and(
-                eq(worldFacts.category, category),
-                options?.key ? eq(worldFacts.key, options.key) : undefined
-              )
-            )
-            .orderBy(desc(worldFacts.updatedAt))
-            .limit(options?.limit ?? 10);
-          return rows.map((r) => ({
-            id: r.id,
-            key: r.key,
-            value: r.value ?? '',
-          }));
-        },
-        upsertFact: async (params: {
-          category: string;
-          key: string;
-          label: string;
-          value: string;
-          source: string;
-          priority: number;
-        }) => {
-          const { db, worldFacts, eq, and } = await import('@feed/db');
-          const { generateSnowflakeId } = await import('@feed/shared');
-
-          const [existing] = await db
-            .select({ id: worldFacts.id })
-            .from(worldFacts)
-            .where(
-              and(
-                eq(worldFacts.category, params.category),
-                eq(worldFacts.key, params.key)
-              )
-            )
-            .limit(1);
-
-          if (existing) {
-            await db
-              .update(worldFacts)
-              .set({
-                label: params.label,
-                value: params.value,
-                source: params.source,
-                priority: params.priority,
-                lastUpdated: new Date(),
-                updatedAt: new Date(),
-              })
-              .where(eq(worldFacts.id, existing.id));
-          } else {
-            await db.insert(worldFacts).values({
-              id: await generateSnowflakeId(),
-              category: params.category,
-              key: params.key,
-              label: params.label,
-              value: params.value,
-              source: params.source,
-              priority: params.priority,
-              isActive: true,
-              lastUpdated: new Date(),
-              updatedAt: new Date(),
-            });
-          }
-        },
-      };
-    });
+// TODO(D90): (category, key) has no unique constraint, so this read-then-write
+// upsert can race. An atomic upsert needs a schema migration.
+async function upsertMemoryRow(
+  key: string,
+  label: string,
+  value: string
+): Promise<void> {
+  const existing = await findMemoryRow(key);
+  const now = new Date();
+  if (existing) {
+    await db
+      .update(worldFacts)
+      .set({ label, value, lastUpdated: now, updatedAt: now })
+      .where(eq(worldFacts.id, existing.id));
+    return;
   }
-  return servicePromise;
+  await db.insert(worldFacts).values({
+    id: await generateSnowflakeId(),
+    category: WORKING_MEMORY_CATEGORY,
+    key,
+    label,
+    value,
+    source: 'agent-working-memory',
+    priority: 50,
+    isActive: true,
+    lastUpdated: now,
+    updatedAt: now,
+  });
 }
 
 function getMemoryKey(agentId: string): string {
@@ -213,13 +158,7 @@ export async function loadWorkingMemory(
   agentId: string
 ): Promise<AgentWorkingMemoryState> {
   try {
-    const svc = await getWorldFactsService();
-    const rows = await svc.getFactsByCategory(WORKING_MEMORY_CATEGORY, {
-      limit: 1,
-      key: getMemoryKey(agentId),
-    });
-    const key = getMemoryKey(agentId);
-    const row = rows.find((r) => r.key === key);
+    const row = await findMemoryRow(getMemoryKey(agentId));
     if (!row) return createEmptyMemory();
 
     const parsed = memorySchema.parse(JSON.parse(row.value));
@@ -260,7 +199,6 @@ export async function saveWorkingMemory(
 ): Promise<void> {
   try {
     memorySchema.parse(memory);
-    const svc = await getWorldFactsService();
     const updated: AgentWorkingMemoryState = {
       ...memory,
       recentContacts: memory.recentContacts.slice(0, MAX_CONTACTS),
@@ -272,14 +210,11 @@ export async function saveWorkingMemory(
       lastUpdated: new Date().toISOString(),
     };
 
-    await svc.upsertFact({
-      category: WORKING_MEMORY_CATEGORY,
-      key: getMemoryKey(agentId),
-      label: `Working memory for agent ${agentId}`,
-      value: JSON.stringify(updated),
-      source: 'agent-working-memory',
-      priority: 50,
-    });
+    await upsertMemoryRow(
+      getMemoryKey(agentId),
+      `Working memory for agent ${agentId}`,
+      JSON.stringify(updated)
+    );
   } catch (error) {
     logger.warn(
       'Failed to save agent working memory',
@@ -299,16 +234,12 @@ export function addContact(
   contact: Omit<RecentContact, 'lastInteraction'>
 ): AgentWorkingMemoryState {
   const now = new Date().toISOString();
-  const existing = memory.recentContacts.findIndex(
-    (c) => c.userId === contact.userId
-  );
-  const updated = [...memory.recentContacts];
-
-  if (existing >= 0) {
-    updated[existing] = { ...contact, lastInteraction: now };
-  } else {
-    updated.unshift({ ...contact, lastInteraction: now });
-  }
+  // Re-contacted users move to the most-recent position so they are not
+  // evicted ahead of older contacts.
+  const updated = [
+    { ...contact, lastInteraction: now },
+    ...memory.recentContacts.filter((c) => c.userId !== contact.userId),
+  ];
 
   return {
     ...memory,

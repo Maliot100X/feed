@@ -1,3 +1,5 @@
+'use client';
+
 /**
  * Offline fallback page.
  *
@@ -7,7 +9,7 @@
  */
 export default function OfflinePage() {
   return (
-    <div className="flex min-h-dvh items-center justify-center bg-[#0a0a0a] px-8 text-[#fafafa] md:min-h-screen">
+    <div className="flex min-h-dvh items-center justify-center bg-background px-8 text-foreground md:min-h-screen">
       <div className="max-w-[400px] text-center">
         <svg
           className="mx-auto mb-6 h-20 w-20 opacity-50"
@@ -28,14 +30,14 @@ export default function OfflinePage() {
           <line x1="12" y1="20" x2="12.01" y2="20" />
         </svg>
         <h1 className="mb-3 font-semibold text-2xl">You're Offline</h1>
-        <p className="mb-8 text-[#a1a1aa] leading-relaxed">
+        <p className="mb-8 text-muted-foreground leading-relaxed">
           Feed requires an internet connection for real-time prediction markets
           and live events.
         </p>
         <button
           type="button"
           onClick={() => window.location.reload()}
-          className="rounded-lg bg-[#0066FF] px-8 py-3 font-medium text-white transition-opacity hover:opacity-90 active:opacity-80"
+          className="rounded-lg bg-primary px-8 py-3 font-medium text-primary-foreground transition-opacity hover:opacity-90 active:opacity-80"
         >
           Try Again
         </button>

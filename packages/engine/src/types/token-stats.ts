@@ -161,7 +161,7 @@ export interface TokenStatsSummary {
   /** Statistics per model (aggregated across all ticks) */
   byModel: ModelStats[];
 
-  // Estimated costs (USD, approximate)
+  // Estimated costs (USD, approximate; excludes models without known pricing)
   /** Estimated cost for input tokens */
   estimatedInputCostUSD: number;
   /** Estimated cost for output tokens */
@@ -210,24 +210,36 @@ export const TOKEN_COST_PER_MILLION: Record<
   'claude-sonnet-4-5': { input: 3.0, output: 15.0 },
   'claude-haiku-4-5': { input: 0.25, output: 1.25 },
   'claude-opus-4-1': { input: 15.0, output: 75.0 },
-
-  // Default fallback
-  default: { input: 1.0, output: 3.0 },
 };
 
 /**
- * Calculate estimated cost for token usage
+ * Calculate estimated cost for token usage.
+ *
+ * Models without a known price return zero cost with `pricingKnown: false`
+ * rather than a guessed default, so aggregated totals only include models
+ * whose pricing is actually known.
  */
 export function calculateEstimatedCost(
   model: string,
   inputTokens: number,
   outputTokens: number
-): { inputCostUSD: number; outputCostUSD: number; totalCostUSD: number } {
-  const defaultCosts = { input: 1.0, output: 3.0 };
-  const costs =
-    TOKEN_COST_PER_MILLION[model] ??
-    TOKEN_COST_PER_MILLION.default ??
-    defaultCosts;
+): {
+  inputCostUSD: number;
+  outputCostUSD: number;
+  totalCostUSD: number;
+  pricingKnown: boolean;
+} {
+  const costs = Object.hasOwn(TOKEN_COST_PER_MILLION, model)
+    ? TOKEN_COST_PER_MILLION[model]
+    : undefined;
+  if (!costs) {
+    return {
+      inputCostUSD: 0,
+      outputCostUSD: 0,
+      totalCostUSD: 0,
+      pricingKnown: false,
+    };
+  }
   const inputCostUSD = (inputTokens / 1_000_000) * costs.input;
   const outputCostUSD = (outputTokens / 1_000_000) * costs.output;
 
@@ -235,5 +247,6 @@ export function calculateEstimatedCost(
     inputCostUSD,
     outputCostUSD,
     totalCostUSD: inputCostUSD + outputCostUSD,
+    pricingKnown: true,
   };
 }

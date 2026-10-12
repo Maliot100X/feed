@@ -95,12 +95,13 @@ class GameService {
   async getStatus() {
     // Check game state from database
     const gameState = await getDbInstance().getGameState();
+    // Report the persisted game state; never hardcode running/initialized flags.
     return {
-      isRunning: false,
-      initialized: false,
+      isRunning: gameState?.isRunning ?? false,
+      initialized: gameState !== null,
       currentDay: gameState?.currentDay ?? 1,
       currentDate: gameState?.currentDate?.toISOString(),
-      speed: 60000,
+      speed: gameState?.speed ?? null,
       lastTickAt: gameState?.lastTickAt?.toISOString(),
     };
   }
@@ -109,7 +110,7 @@ class GameService {
     // Serverless/Workers: Read from database instead of filesystem
     // The daemon writes posts to database, so we can query them directly
     const posts = actorId
-      ? await getDbInstance().getPostsByActor(actorId, limit)
+      ? await getDbInstance().getPostsByActor(actorId, limit, offset)
       : await getDbInstance().getRecentPosts(limit, offset);
 
     if (!posts || posts.length === 0) {

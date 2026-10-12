@@ -50,7 +50,10 @@ type LivePlayerRosterEntry = {
 };
 
 type SharedChatContextServiceShape = {
-  getSharedFacts: (options: { limit?: number }) => Promise<SharedChatFact[]>;
+  getSharedFacts: (options: {
+    viewerUserId: string;
+    limit?: number;
+  }) => Promise<SharedChatFact[]>;
   getRelevantGroupContextForUser: (
     userId: string,
     options: {
@@ -73,10 +76,16 @@ async function getSharedChatContextService(): Promise<SharedChatContextServiceSh
   if (!sharedChatContextServicePromise) {
     sharedChatContextServicePromise = import(
       '../../../../../engine/src/services/shared-chat-context-service'
-    ).then(
-      (module) =>
-        module.sharedChatContextService as SharedChatContextServiceShape
-    );
+    )
+      .then(
+        (module) =>
+          module.sharedChatContextService as SharedChatContextServiceShape
+      )
+      .catch((error: Error) => {
+        // Do not cache a failed import forever; the next call retries.
+        sharedChatContextServicePromise = null;
+        throw error;
+      });
   }
 
   return sharedChatContextServicePromise;
@@ -104,13 +113,15 @@ export const sharedChatFactsProvider: Provider = {
   description: 'Compact facts extracted from recent group chat summaries',
 
   get: async (
-    _runtime: IAgentRuntime,
+    runtime: IAgentRuntime,
     _message: Memory,
     _state: State
   ): Promise<ProviderResult> => {
     try {
       const sharedChatContextService = await getSharedChatContextService();
+      // Viewer-scoped: only facts from chats this agent is a member of.
       const facts = await sharedChatContextService.getSharedFacts({
+        viewerUserId: runtime.agentId,
         limit: 12,
       });
 

@@ -16,10 +16,13 @@ import { z } from 'zod';
 // PUT: Switch to conversation or rename it
 // =============================================================================
 
-const updateConversationSchema = z.object({
-  action: z.enum(['switch', 'rename']),
-  title: z.string().max(100).optional(), // Required for rename
-});
+const updateConversationSchema = z.discriminatedUnion('action', [
+  z.object({ action: z.literal('switch') }),
+  z.object({
+    action: z.literal('rename'),
+    title: z.string().trim().min(1).max(100),
+  }),
+]);
 
 export const PUT = withErrorHandling(
   async (
@@ -47,9 +50,9 @@ export const PUT = withErrorHandling(
       );
     }
 
-    const { action, title } = parseResult.data;
+    const update = parseResult.data;
 
-    if (action === 'switch') {
+    if (update.action === 'switch') {
       const teamChat = await teamChatService.switchConversation(
         user.id,
         chatId
@@ -67,32 +70,19 @@ export const PUT = withErrorHandling(
       });
     }
 
-    if (action === 'rename') {
-      if (!title) {
-        return NextResponse.json(
-          { success: false, error: 'Title is required for rename action' },
-          { status: 400 }
-        );
-      }
+    const { title } = update;
+    await teamChatService.renameConversation(user.id, chatId, title);
 
-      await teamChatService.renameConversation(user.id, chatId, title);
-
-      logger.info(
-        `Renamed conversation`,
-        { userId: user.id, chatId, title },
-        'TeamChatConversationsAPI'
-      );
-
-      return NextResponse.json({
-        success: true,
-        title,
-      });
-    }
-
-    return NextResponse.json(
-      { success: false, error: 'Invalid action' },
-      { status: 400 }
+    logger.info(
+      `Renamed conversation`,
+      { userId: user.id, chatId, title },
+      'TeamChatConversationsAPI'
     );
+
+    return NextResponse.json({
+      success: true,
+      title,
+    });
   }
 );
 

@@ -5,7 +5,7 @@
  * Uses sigmoid function to map unbounded ROI to bounded reputation score.
  */
 
-import { clamp, clamp01 } from '../utils/math-utils';
+import { clamp01 } from '../utils/math-utils';
 
 /**
  * Interface for decimal-like values that can be converted to numbers.
@@ -19,14 +19,16 @@ interface DecimalLike {
 /**
  * Normalize PNL to 0-1 scale using sigmoid function
  *
- * The sigmoid function converts unbounded ROI values to a 0-1 scale:
+ * The sigmoid function converts unbounded ROI (as a ratio) to a 0-1 scale:
  * - ROI = 0% → 0.5 (neutral)
- * - ROI = +100% → ~0.88 (very good)
- * - ROI = -50% → ~0.27 (bad)
- * - ROI = +200% → ~0.95 (excellent)
- * - ROI = -75% → ~0.11 (very bad)
+ * - ROI = +100% → ~0.73
+ * - ROI = -50% → ~0.38
+ * - ROI = +200% → ~0.88
+ * - ROI = -75% → ~0.32
  *
  * Formula: 1 / (1 + e^(-roi))
+ *
+ * @throws Error if either input is not a finite number
  *
  * @param pnl - Profit or loss amount (can be negative)
  * @param totalInvested - Total amount invested
@@ -41,6 +43,10 @@ export function normalizePnL(
     typeof totalInvested === 'number'
       ? totalInvested
       : totalInvested.toNumber();
+
+  if (!Number.isFinite(pnlNum) || !Number.isFinite(investedNum)) {
+    throw new Error('normalizePnL requires finite pnl and totalInvested');
+  }
 
   // Handle edge cases
   if (investedNum === 0) {
@@ -63,24 +69,6 @@ export function normalizePnL(
 }
 
 /**
- * Denormalize a 0-1 score back to ROI percentage
- *
- * Inverse sigmoid function: roi = -ln((1/score) - 1)
- *
- * @param normalized - Normalized score from 0 to 1
- * @returns ROI as percentage (e.g., 0.5 → 0%, 0.88 → ~100%)
- */
-export function denormalizePnL(normalized: number): number {
-  // Clamp input to valid range
-  const clamped = clamp(normalized, 0.001, 0.999);
-
-  // Inverse sigmoid
-  const roi = -Math.log(1 / clamped - 1);
-
-  return roi;
-}
-
-/**
  * Calculate win rate from trading history
  *
  * @param profitableTrades - Number of profitable trades
@@ -99,70 +87,14 @@ export function calculateWinRate(
 }
 
 /**
- * Calculate average ROI from multiple trades
- *
- * @param trades - Array of {pnl, invested} objects
- * @returns Average ROI as decimal
- */
-export function calculateAverageROI(
-  trades: Array<{ pnl: number; invested: number }>
-): number {
-  if (trades.length === 0) {
-    return 0;
-  }
-
-  const totalROI = trades.reduce((sum, trade) => {
-    if (trade.invested === 0) {
-      return sum;
-    }
-    return sum + trade.pnl / trade.invested;
-  }, 0);
-
-  return totalROI / trades.length;
-}
-
-/**
- * Calculate Sharpe Ratio (risk-adjusted returns)
- *
- * Sharpe Ratio measures excess return per unit of risk (volatility).
- * Higher values indicate better risk-adjusted performance.
- *
- * @param returns - Array of return values (ROI per trade)
- * @param riskFreeRate - Risk-free rate (default 0.02 for 2% annual)
- * @returns Sharpe ratio (higher is better)
- */
-export function calculateSharpeRatio(
-  returns: number[],
-  riskFreeRate = 0.02
-): number | null {
-  if (returns.length < 2) {
-    return null; // Need at least 2 returns for meaningful calculation
-  }
-
-  // Calculate average return
-  const avgReturn = returns.reduce((sum, r) => sum + r, 0) / returns.length;
-
-  // Calculate standard deviation (volatility)
-  const variance =
-    returns.reduce((sum, r) => sum + (r - avgReturn) ** 2, 0) /
-    (returns.length - 1);
-  const stdDev = Math.sqrt(variance);
-
-  if (stdDev === 0) {
-    return null; // No volatility = undefined Sharpe ratio
-  }
-
-  // Sharpe ratio = (average return - risk-free rate) / standard deviation
-  return (avgReturn - riskFreeRate / 12) / stdDev; // Divide risk-free rate by 12 for monthly
-}
-
-/**
  * Get trust level classification from reputation score
  *
  * @param reputationScore - Composite reputation score (0-100)
  * @returns Trust level string
  */
 export function getTrustLevel(reputationScore: number): string {
+  // Non-finite scores (e.g. NaN from bad inputs) are never rated.
+  if (!Number.isFinite(reputationScore)) return 'UNRATED';
   if (reputationScore < 20) return 'UNRATED';
   if (reputationScore < 40) return 'LOW';
   if (reputationScore < 60) return 'MEDIUM';
@@ -173,17 +105,15 @@ export function getTrustLevel(reputationScore: number): string {
 /**
  * Calculate confidence score based on sample size
  *
- * Uses Wilson score interval to determine confidence in reputation score.
- * More data = higher confidence.
+ * Uses an exponential saturation curve (1 - e^(-n/20)), not a Wilson
+ * interval. More data = higher confidence.
  *
  * @param sampleSize - Number of feedback/trades used for score
  * @returns Confidence score (0-1), where 1 = highly confident
  */
 export function calculateConfidenceScore(sampleSize: number): number {
-  // Wilson score confidence increases with sample size
   // Asymptotically approaches 1 as sample size grows
-
-  if (sampleSize === 0) {
+  if (!Number.isFinite(sampleSize) || sampleSize <= 0) {
     return 0;
   }
 

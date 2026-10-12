@@ -2,11 +2,55 @@
  * Runtime Configuration - Centralized, typed environment config.
  */
 
+import { logger } from '@feed/shared';
+
+/**
+ * Read a positive, finite numeric env var. Unset/blank uses the default;
+ * zero, negative, non-numeric or non-finite values warn and use the default
+ * (previously `Number(v) || default` accepted negatives and Infinity).
+ */
+function envPositiveNumber(key: string, defaultValue: number): number {
+  const raw = process.env[key]?.trim();
+  if (raw === undefined || raw === '') return defaultValue;
+  const parsed = Number(raw);
+  if (!Number.isFinite(parsed) || parsed <= 0) {
+    logger.warn(
+      `${key}=${raw} must be a positive finite number, using default ${defaultValue}`,
+      { key, value: raw, defaultValue },
+      'runtime-config'
+    );
+    return defaultValue;
+  }
+  return parsed;
+}
+
+/** Boolean flag: accepts "true"/"1" (case-insensitive), like the trade executor. */
+function envFlag(key: string): boolean {
+  const raw = process.env[key]?.trim().toLowerCase();
+  return raw === 'true' || raw === '1';
+}
+
 const DEFAULT_BUDGET_MS = 180000;
 const DEFAULT_RESERVE_MS = 60000;
 
-// Parse budgetMs once to avoid re-reading process.env in getters
-const budgetMs = Number(process.env.GAME_TICK_BUDGET_MS) || DEFAULT_BUDGET_MS;
+// Parse budgetMs once to avoid re-reading process.env in getters. The budget
+// must leave room for the critical-ops reserve, otherwise the content
+// deadline would precede the tick start.
+const configuredBudgetMs = envPositiveNumber(
+  'GAME_TICK_BUDGET_MS',
+  DEFAULT_BUDGET_MS
+);
+const budgetMs =
+  configuredBudgetMs > DEFAULT_RESERVE_MS
+    ? configuredBudgetMs
+    : (() => {
+        logger.warn(
+          `GAME_TICK_BUDGET_MS=${configuredBudgetMs} must exceed the ${DEFAULT_RESERVE_MS}ms critical-ops reserve, using default ${DEFAULT_BUDGET_MS}`,
+          { configuredBudgetMs, reserveMs: DEFAULT_RESERVE_MS },
+          'runtime-config'
+        );
+        return DEFAULT_BUDGET_MS;
+      })();
 
 export const GAME_TICK_CONFIG = {
   budgetMs,
@@ -18,16 +62,22 @@ export const GAME_TICK_CONFIG = {
 
 export const MARKET_DECISION_CONFIG = {
   model: process.env.MARKET_DECISION_MODEL || 'openai/gpt-oss-120b',
-  maxOutputTokens:
-    Number(process.env.MARKET_DECISION_MAX_OUTPUT_TOKENS) || 32000,
-  strictValidation: process.env.STRICT_LLM_VALIDATION === 'true',
+  maxOutputTokens: envPositiveNumber(
+    'MARKET_DECISION_MAX_OUTPUT_TOKENS',
+    32000
+  ),
+  strictValidation: envFlag('STRICT_LLM_VALIDATION'),
 } as const;
 
 // Parse values once to avoid re-reading process.env
-const updateIntervalHours =
-  Number(process.env.WORLD_FACTS_UPDATE_INTERVAL_HOURS) || 8;
-const lockDurationMinutes =
-  Number(process.env.WORLD_FACTS_LOCK_DURATION_MINUTES) || 30;
+const updateIntervalHours = envPositiveNumber(
+  'WORLD_FACTS_UPDATE_INTERVAL_HOURS',
+  8
+);
+const lockDurationMinutes = envPositiveNumber(
+  'WORLD_FACTS_LOCK_DURATION_MINUTES',
+  30
+);
 
 export const WORLD_FACTS_CONFIG = {
   updateIntervalHours,

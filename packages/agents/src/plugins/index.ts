@@ -15,7 +15,6 @@ export {
 export type { FeedRuntime } from './feed/types';
 export { groqPlugin } from './groq';
 export * from './plugin-agent-core/src';
-export * from './plugin-autonomy/src';
 export * from './plugin-experience/src';
 export * from './plugin-trajectory-logger/src';
 // Note: plugin-user-core has action names that overlap with plugin-agent-core

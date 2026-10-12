@@ -606,3 +606,94 @@ describe('PredictionMarketService', () => {
     expect(PredictionPricing.getCurrentPrice(0, 0, 'yes')).toBe(0.5);
   });
 });
+
+describe('PredictionMarketService input boundaries (D17)', () => {
+  const baseMarket: PredictionMarketRecord = {
+    id: 'mb',
+    question: 'Boundary?',
+    yesShares: 5000,
+    noShares: 5000,
+    liquidity: 10_000,
+    endDate: new Date('2030-01-01T00:00:00.000Z'),
+    resolved: false,
+  };
+
+  function makeService(now: Date, db = new InMemoryDb(baseMarket)) {
+    const wallet = new InMemoryWallet();
+    const service = new PredictionMarketService({
+      db,
+      wallet,
+      broadcast: new InMemoryBroadcast(),
+      cache: new InMemoryCache(),
+      clock: { now: () => now },
+      fees: feeConfig,
+      feeProcessor: {
+        processTradingFee: async () => ({ feeCharged: 0, referrerPaid: 0 }),
+      },
+    });
+    return { service, wallet, db };
+  }
+
+  it.each([
+    Number.NaN,
+    Number.POSITIVE_INFINITY,
+  ])('rejects non-finite buy amount %p before side effects', async (amount) => {
+    const { service, wallet, db } = makeService(
+      new Date('2029-01-01T00:00:00.000Z')
+    );
+    await expect(
+      service.buy({ userId: 'u1', marketId: 'mb', side: 'yes', amount })
+    ).rejects.toThrow('Trade amount must be at least');
+    expect(wallet.balances.size).toBe(0);
+    expect(db.positions.size).toBe(0);
+  });
+
+  it.each([
+    Number.NaN,
+    Number.POSITIVE_INFINITY,
+  ])('rejects non-finite sell shares %p', async (shares) => {
+    const { service } = makeService(new Date('2029-01-01T00:00:00.000Z'));
+    await expect(
+      service.sell({ userId: 'u1', marketId: 'mb', shares })
+    ).rejects.toThrow('Shares to sell must be at least');
+  });
+
+  it('can sell a position holding exactly the minimum shares', async () => {
+    const db = new InMemoryDb(baseMarket);
+    await db.upsertPosition({
+      userId: 'u1',
+      marketId: 'mb',
+      side: 'yes',
+      shares: 0.01,
+      avgPrice: 0.5,
+      status: 'active',
+    });
+    const { service } = makeService(new Date('2029-01-01T00:00:00.000Z'), db);
+    const result = await service.sell({
+      userId: 'u1',
+      marketId: 'mb',
+      shares: 0.01,
+    });
+    expect(result.shares).toBeCloseTo(0.01);
+  });
+
+  it('uses the injected clock for buy expiry', async () => {
+    const { service: expired } = makeService(
+      new Date('2031-01-01T00:00:00.000Z')
+    );
+    await expect(
+      expired.buy({ userId: 'u1', marketId: 'mb', side: 'yes', amount: 10 })
+    ).rejects.toThrow('Market expired');
+  });
+});
+
+describe('PredictionPricing boundaries (D17)', () => {
+  it('rejects non-finite buy amounts and sell shares', () => {
+    expect(() =>
+      PredictionPricing.calculateBuy(5000, 5000, 'yes', Number.NaN)
+    ).toThrow('Trade amount must be positive');
+    expect(() =>
+      PredictionPricing.calculateSell(5000, 5000, 'yes', Number.NaN)
+    ).toThrow('Shares to sell must be positive');
+  });
+});

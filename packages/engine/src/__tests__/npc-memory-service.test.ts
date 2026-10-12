@@ -8,7 +8,10 @@
 
 import { describe, expect, test } from 'bun:test';
 import type { NpcMemory } from '@feed/db';
-import { npcMemoryService } from '../services/npc-memory-service';
+import {
+  npcMemoryService,
+  selectRecentMemories,
+} from '../services/npc-memory-service';
 
 describe('NPC Memory Service - Format Memories For Prompt', () => {
   test('returns empty string for empty memories', () => {
@@ -103,5 +106,43 @@ describe('NPC Memory Service - Format Memories For Prompt', () => {
     // Test the formatTimeAgo method directly with fixed 'now'
     const formatted = npcMemoryService.formatTimeAgo(twoDaysAgo, fixedNow);
     expect(formatted).toBe('2d ago');
+  });
+});
+
+describe('NPC Memory Service - selectRecentMemories', () => {
+  const memories: NpcMemory[] = [1, 2, 3].map((n) => ({
+    id: `mem-${n}`,
+    type: 'posted',
+    timestamp: `2026-01-0${n}T00:00:00.000Z`,
+    summary: `memory ${n}`,
+    sentiment: 0,
+  }));
+
+  test('returns newest first, bounded by limit', () => {
+    expect(selectRecentMemories(memories, 2).map((m) => m.id)).toEqual([
+      'mem-3',
+      'mem-2',
+    ]);
+  });
+
+  test('limit 0 returns no memories instead of all of them', () => {
+    expect(selectRecentMemories(memories, 0)).toEqual([]);
+    expect(npcMemoryService.getRecentMemoriesFromRaw(memories, 'a', 0)).toEqual(
+      []
+    );
+  });
+
+  test('rejects negative, fractional and non-finite limits', () => {
+    for (const limit of [-1, 1.5, Number.NaN, Number.POSITIVE_INFINITY]) {
+      expect(() => selectRecentMemories(memories, limit)).toThrow(
+        'Invalid memory limit'
+      );
+    }
+  });
+
+  test('formatTimeAgo reports invalid timestamps instead of "just now"', () => {
+    expect(npcMemoryService.formatTimeAgo('not-a-date', new Date())).toBe(
+      'unknown time'
+    );
   });
 });

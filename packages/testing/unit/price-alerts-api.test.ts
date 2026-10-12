@@ -55,7 +55,14 @@ const mockDbSelectLimit = mock(async () => {
   return configQueryResult;
 });
 const mockDbSelectWhere = mock(() => ({ limit: mockDbSelectLimit }));
-const mockDbSelectFrom = mock(() => ({ where: mockDbSelectWhere }));
+const mockDbSelectFrom = mock(() => ({
+  where: mockDbSelectWhere,
+  // Group delivery targets are checked via a chats join; a non-empty row
+  // means the agent is an active member.
+  innerJoin: () => ({
+    where: () => ({ limit: async () => [{ chatId: 'x' }] }),
+  }),
+}));
 const mockDbSelect = mock(() => ({ from: mockDbSelectFrom }));
 
 const _actualFeedApi = await import('@feed/api');
@@ -77,6 +84,18 @@ mock.module('@feed/db', () => ({
     get update() {
       return mockDbUpdate;
     },
+    // Alert edits run in a transaction that row-locks the config.
+    transaction: async <T>(fn: (tx: object) => Promise<T>): Promise<T> =>
+      fn({
+        select: () => ({
+          from: () => ({
+            where: () => ({ for: async () => configQueryResult }),
+          }),
+        }),
+        get update() {
+          return mockDbUpdate;
+        },
+      }),
   },
   eq: (a: unknown, b: unknown) => ({ op: 'eq', a, b }),
   userAgentConfigs: {

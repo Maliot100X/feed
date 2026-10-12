@@ -1,10 +1,16 @@
 import { beforeEach, describe, expect, it } from 'bun:test';
+import {
+  calculateRawPriceFromHoldings,
+  calculateTradeImpact,
+  PERP_MARKET_CONFIG,
+} from '@feed/shared';
 import type { WalletPort } from '../../shared/common';
 import { PerpMarketService } from '../PerpMarketService';
 import type {
   PerpDbPort,
   PerpMarketRecord,
   PerpPositionRecord,
+  PriceImpactPort,
 } from '../types';
 
 const feeConfig = {
@@ -193,9 +199,9 @@ class InMemoryPerpDb implements PerpDbPort {
         | 'unrealizedPnLPercent'
       >
     >
-  ): Promise<void> {
+  ): Promise<boolean> {
     const pos = this.positions.get(positionId);
-    if (!pos || pos.closedAt) return;
+    if (!pos || pos.closedAt) return false;
     this.positions.set(positionId, {
       ...pos,
       closedAt: updates.closedAt ?? new Date(),
@@ -204,6 +210,22 @@ class InMemoryPerpDb implements PerpDbPort {
       unrealizedPnL: updates.unrealizedPnL ?? 0,
       unrealizedPnLPercent: updates.unrealizedPnLPercent ?? 0,
     });
+    return true;
+  }
+
+  async applyMarketDeltas(
+    ticker: string,
+    deltas: { openInterest?: number; volume24h?: number }
+  ): Promise<{ openInterest: number; volume24h: number }> {
+    const current = this.markets.get(ticker);
+    if (!current) throw new Error(`Market not found: ${ticker}`);
+    const openInterest = Math.max(
+      0,
+      current.openInterest + (deltas.openInterest ?? 0)
+    );
+    const volume24h = current.volume24h + (deltas.volume24h ?? 0);
+    this.markets.set(ticker, { ...current, openInterest, volume24h });
+    return { openInterest, volume24h };
   }
 
   async updateMarketStats(
@@ -911,5 +933,251 @@ describe('PerpMarketService', () => {
         leverage: 1,
       })
     ).rejects.toThrow(/Invalid persisted perp position state detected/);
+  });
+
+  describe('money-path regressions', () => {
+    /**
+     * Price impact port that prices the market from the net open holdings,
+     * mirroring the production adapter (constant-product reserves).
+     */
+    function createImpactPort(basePrice: number): PriceImpactPort {
+      return {
+        async getBasePrice() {
+          return basePrice;
+        },
+        async applyAndGetPrice(ticker: string) {
+          const net = (await db.listOpenPositions())
+            .filter((p) => p.ticker === ticker)
+            .reduce(
+              (sum, p) => sum + (p.side === 'long' ? p.size : -p.size),
+              0
+            );
+          const price = calculateRawPriceFromHoldings(
+            basePrice,
+            net,
+            PERP_MARKET_CONFIG
+          );
+          await db.updateMarketStats(ticker, { currentPrice: price });
+          return price;
+        },
+      };
+    }
+
+    it('charges funding to shorts when shorts dominate open interest', async () => {
+      await service.openPosition({
+        userId: 'u1',
+        ticker: 'ABC',
+        side: 'long',
+        size: 50,
+        leverage: 10,
+      });
+      await service.openPosition({
+        userId: 'u2',
+        ticker: 'ABC',
+        side: 'short',
+        size: 100,
+        leverage: 10,
+      });
+
+      await service.processFundingAndLiquidations();
+
+      const positions = await db.listOpenPositions();
+      const longPos = positions.find((p) => p.userId === 'u1');
+      const shortPos = positions.find((p) => p.userId === 'u2');
+      // Shorts pay (positive fundingPaid), longs receive (negative)
+      expect(shortPos?.fundingPaid ?? 0).toBeGreaterThan(0);
+      expect(longPos?.fundingPaid ?? 0).toBeLessThan(0);
+    });
+
+    it('charges no funding when open interest is balanced', async () => {
+      await service.openPosition({
+        userId: 'u1',
+        ticker: 'ABC',
+        side: 'long',
+        size: 100,
+        leverage: 10,
+      });
+      await service.openPosition({
+        userId: 'u2',
+        ticker: 'ABC',
+        side: 'short',
+        size: 100,
+        leverage: 10,
+      });
+
+      await service.processFundingAndLiquidations();
+
+      for (const pos of await db.listOpenPositions()) {
+        expect(pos.fundingPaid).toBe(0);
+      }
+    });
+
+    it('keeps the weighted cost basis when adding at a different price', async () => {
+      const basePrice = 100;
+      service = new PerpMarketService({
+        db,
+        wallet,
+        fees: feeConfig,
+        priceImpact: createImpactPort(basePrice),
+      });
+
+      const first = await service.openPosition({
+        userId: 'u1',
+        ticker: 'ABC',
+        side: 'long',
+        size: 1000,
+        leverage: 2,
+      });
+      const added = await service.openPosition({
+        userId: 'u1',
+        ticker: 'ABC',
+        side: 'long',
+        size: 1000,
+        leverage: 2,
+      });
+
+      const incrementalFill = calculateTradeImpact(
+        basePrice,
+        1000,
+        1000,
+        PERP_MARKET_CONFIG
+      ).avgFillPrice;
+      const expectedEntry =
+        (1000 * first.entryPrice + 1000 * incrementalFill) / 2000;
+
+      expect(incrementalFill).not.toBeCloseTo(first.entryPrice, 6);
+      expect(added.entryPrice).toBeCloseTo(expectedEntry, 6);
+      const [pos] = await db.listOpenPositions();
+      expect(pos?.entryPrice).toBeCloseTo(expectedEntry, 6);
+      expect(pos?.size).toBe(2000);
+    });
+
+    it('rejects an open whose post-impact fill breaches maxSlippage', async () => {
+      service = new PerpMarketService({
+        db,
+        wallet,
+        fees: feeConfig,
+        priceImpact: createImpactPort(100),
+      });
+      const fill = calculateTradeImpact(
+        100,
+        0,
+        5000,
+        PERP_MARKET_CONFIG
+      ).avgFillPrice;
+      // Tolerance below the actual impact but above zero
+      const tolerance = ((fill - 100) / 100) * 0.5;
+
+      await expect(
+        service.openPosition({
+          userId: 'u1',
+          ticker: 'ABC',
+          side: 'long',
+          size: 5000,
+          leverage: 10,
+          maxSlippage: tolerance,
+        })
+      ).rejects.toThrow(/Slippage exceeded/);
+      // Nothing moved
+      expect((await wallet.getBalance('u1')).balance).toBe(10_000);
+      expect(await db.listOpenPositions()).toHaveLength(0);
+    });
+
+    it('rejects invalid explicit close percentages instead of closing fully', async () => {
+      const open = await service.openPosition({
+        userId: 'u1',
+        ticker: 'ABC',
+        side: 'long',
+        size: 100,
+        leverage: 10,
+      });
+
+      for (const percentage of [0, -0.5, Number.NaN, 1.5]) {
+        await expect(
+          service.closePosition({
+            userId: 'u1',
+            positionId: open.positionId,
+            percentage,
+          })
+        ).rejects.toThrow(/Close percentage/);
+      }
+      const [pos] = await db.listOpenPositions();
+      expect(pos?.size).toBe(100);
+    });
+
+    it('does not mutate the caller price map when filtering invalid prices', async () => {
+      const updates = new Map<string, number>([
+        ['org-abc', 101],
+        ['bad', Number.NaN],
+      ]);
+      const summary = await service.applyPriceUpdates(updates);
+      expect(summary.errors).toHaveLength(1);
+      expect(updates.size).toBe(2);
+    });
+
+    it('accumulates open-interest decrements across liquidations on one market', async () => {
+      await service.openPosition({
+        userId: 'u1',
+        ticker: 'ABC',
+        side: 'long',
+        size: 100,
+        leverage: 10,
+      });
+      await service.openPosition({
+        userId: 'u2',
+        ticker: 'ABC',
+        side: 'long',
+        size: 200,
+        leverage: 10,
+      });
+      expect((await db.listMarkets())[0]?.openInterest).toBeCloseTo(300, 6);
+
+      const summary = await service.applyPriceUpdates({ ABC: 50 });
+
+      expect(summary.liquidations).toBe(2);
+      expect((await db.listMarkets())[0]?.openInterest).toBeCloseTo(0, 6);
+    });
+
+    it('settles a flip with a single net wallet mutation', async () => {
+      const calls: string[] = [];
+      const trackingWallet: WalletPort = {
+        debit: async (p) => {
+          calls.push('debit');
+          await wallet.debit(p);
+        },
+        credit: async (p) => {
+          calls.push('credit');
+          await wallet.credit(p);
+        },
+        recordPnL: async (p) => wallet.recordPnL(p),
+        getBalance: async (u) => wallet.getBalance(u),
+      };
+      service = new PerpMarketService({
+        db,
+        wallet: trackingWallet,
+        fees: feeConfig,
+      });
+
+      await service.openPosition({
+        userId: 'u1',
+        ticker: 'ABC',
+        side: 'long',
+        size: 100,
+        leverage: 10,
+      });
+      calls.length = 0;
+
+      const flip = await service.openPosition({
+        userId: 'u1',
+        ticker: 'ABC',
+        side: 'short',
+        size: 300,
+        leverage: 10,
+      });
+
+      expect(flip.rebalanceType).toBe('flip');
+      expect(calls).toHaveLength(1);
+      expect((await db.listMarkets())[0]?.openInterest).toBeCloseTo(200, 6);
+    });
   });
 });

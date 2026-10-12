@@ -42,7 +42,7 @@ import {
   db,
   follows,
   gte,
-  lte,
+  lt,
   posts,
   reactions,
   sql,
@@ -50,42 +50,7 @@ import {
 } from '@feed/db';
 import { logger, toISO } from '@feed/shared';
 import type { NextRequest } from 'next/server';
-
-type PeriodType = 'day' | 'week' | 'month';
-
-function getDateRange(period: PeriodType): { start: Date; end: Date } {
-  const now = new Date();
-  const end = new Date(now.getFullYear(), now.getMonth(), now.getDate() + 1);
-  let start: Date;
-
-  switch (period) {
-    case 'day':
-      start = new Date(end);
-      start.setDate(start.getDate() - 7); // Last 7 days for daily view
-      break;
-    case 'week':
-      start = new Date(end);
-      start.setDate(start.getDate() - 28); // Last 4 weeks
-      break;
-    case 'month':
-      start = new Date(end);
-      start.setMonth(start.getMonth() - 6); // Last 6 months
-      break;
-    default:
-      start = new Date(end);
-      start.setDate(start.getDate() - 7);
-  }
-
-  return { start, end };
-}
-
-function formatDateKey(date: Date, period: PeriodType): string {
-  if (period === 'month') {
-    return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}`;
-  }
-  const isoDate = toISO(date).split('T')[0];
-  return isoDate ?? '';
-}
+import { getAnalyticsBuckets, type PeriodType } from './_buckets';
 
 const VALID_PERIODS: PeriodType[] = ['day', 'week', 'month'];
 
@@ -104,11 +69,8 @@ export const GET = withErrorHandling(async (request: NextRequest) => {
     'GET /api/admin/analytics'
   );
 
-  const { start, end } = getDateRange(period);
-
-  // Maximum data points to prevent memory issues with large datasets
-  // (month=6, week=28, day=7 by date range, but we limit to 200 as safety margin)
-  const MAX_DATA_POINTS = 200;
+  // Fixed, bounded UTC buckets over a half-open [start, end) window.
+  const { start, end, keys } = getAnalyticsBuckets(period);
 
   // Execute all queries in parallel for better performance
   const [
@@ -123,12 +85,12 @@ export const GET = withErrorHandling(async (request: NextRequest) => {
       .select({
         date: (period === 'month'
           ? sql<string>`TO_CHAR(DATE_TRUNC('month', ${users.createdAt}), 'YYYY-MM')`
-          : sql<string>`DATE(${users.createdAt})`
+          : sql<string>`TO_CHAR(DATE(${users.createdAt}), 'YYYY-MM-DD')`
         ).as('date'),
         count: count(),
       })
       .from(users)
-      .where(and(gte(users.createdAt, start), lte(users.createdAt, end)))
+      .where(and(gte(users.createdAt, start), lt(users.createdAt, end)))
       .groupBy(
         period === 'month'
           ? sql`DATE_TRUNC('month', ${users.createdAt})`
@@ -138,20 +100,19 @@ export const GET = withErrorHandling(async (request: NextRequest) => {
         period === 'month'
           ? sql`DATE_TRUNC('month', ${users.createdAt})`
           : sql`DATE(${users.createdAt})`
-      )
-      .limit(MAX_DATA_POINTS),
+      ),
 
     // Posts
     db
       .select({
         date: (period === 'month'
           ? sql<string>`TO_CHAR(DATE_TRUNC('month', ${posts.createdAt}), 'YYYY-MM')`
-          : sql<string>`DATE(${posts.createdAt})`
+          : sql<string>`TO_CHAR(DATE(${posts.createdAt}), 'YYYY-MM-DD')`
         ).as('date'),
         count: count(),
       })
       .from(posts)
-      .where(and(gte(posts.createdAt, start), lte(posts.createdAt, end)))
+      .where(and(gte(posts.createdAt, start), lt(posts.createdAt, end)))
       .groupBy(
         period === 'month'
           ? sql`DATE_TRUNC('month', ${posts.createdAt})`
@@ -161,20 +122,19 @@ export const GET = withErrorHandling(async (request: NextRequest) => {
         period === 'month'
           ? sql`DATE_TRUNC('month', ${posts.createdAt})`
           : sql`DATE(${posts.createdAt})`
-      )
-      .limit(MAX_DATA_POINTS),
+      ),
 
     // Comments
     db
       .select({
         date: (period === 'month'
           ? sql<string>`TO_CHAR(DATE_TRUNC('month', ${comments.createdAt}), 'YYYY-MM')`
-          : sql<string>`DATE(${comments.createdAt})`
+          : sql<string>`TO_CHAR(DATE(${comments.createdAt}), 'YYYY-MM-DD')`
         ).as('date'),
         count: count(),
       })
       .from(comments)
-      .where(and(gte(comments.createdAt, start), lte(comments.createdAt, end)))
+      .where(and(gte(comments.createdAt, start), lt(comments.createdAt, end)))
       .groupBy(
         period === 'month'
           ? sql`DATE_TRUNC('month', ${comments.createdAt})`
@@ -184,22 +144,19 @@ export const GET = withErrorHandling(async (request: NextRequest) => {
         period === 'month'
           ? sql`DATE_TRUNC('month', ${comments.createdAt})`
           : sql`DATE(${comments.createdAt})`
-      )
-      .limit(MAX_DATA_POINTS),
+      ),
 
     // Reactions
     db
       .select({
         date: (period === 'month'
           ? sql<string>`TO_CHAR(DATE_TRUNC('month', ${reactions.createdAt}), 'YYYY-MM')`
-          : sql<string>`DATE(${reactions.createdAt})`
+          : sql<string>`TO_CHAR(DATE(${reactions.createdAt}), 'YYYY-MM-DD')`
         ).as('date'),
         count: count(),
       })
       .from(reactions)
-      .where(
-        and(gte(reactions.createdAt, start), lte(reactions.createdAt, end))
-      )
+      .where(and(gte(reactions.createdAt, start), lt(reactions.createdAt, end)))
       .groupBy(
         period === 'month'
           ? sql`DATE_TRUNC('month', ${reactions.createdAt})`
@@ -209,20 +166,19 @@ export const GET = withErrorHandling(async (request: NextRequest) => {
         period === 'month'
           ? sql`DATE_TRUNC('month', ${reactions.createdAt})`
           : sql`DATE(${reactions.createdAt})`
-      )
-      .limit(MAX_DATA_POINTS),
+      ),
 
     // Follows
     db
       .select({
         date: (period === 'month'
           ? sql<string>`TO_CHAR(DATE_TRUNC('month', ${follows.createdAt}), 'YYYY-MM')`
-          : sql<string>`DATE(${follows.createdAt})`
+          : sql<string>`TO_CHAR(DATE(${follows.createdAt}), 'YYYY-MM-DD')`
         ).as('date'),
         count: count(),
       })
       .from(follows)
-      .where(and(gte(follows.createdAt, start), lte(follows.createdAt, end)))
+      .where(and(gte(follows.createdAt, start), lt(follows.createdAt, end)))
       .groupBy(
         period === 'month'
           ? sql`DATE_TRUNC('month', ${follows.createdAt})`
@@ -232,8 +188,7 @@ export const GET = withErrorHandling(async (request: NextRequest) => {
         period === 'month'
           ? sql`DATE_TRUNC('month', ${follows.createdAt})`
           : sql`DATE(${follows.createdAt})`
-      )
-      .limit(MAX_DATA_POINTS),
+      ),
   ]);
 
   // Build unified time-series data
@@ -249,10 +204,8 @@ export const GET = withErrorHandling(async (request: NextRequest) => {
     }
   >();
 
-  // Initialize all dates in range
-  const currentDate = new Date(start);
-  while (currentDate < end) {
-    const key = formatDateKey(currentDate, period);
+  // Initialize every bucket in range
+  for (const key of keys) {
     dateMap.set(key, {
       date: key,
       users: 0,
@@ -261,11 +214,6 @@ export const GET = withErrorHandling(async (request: NextRequest) => {
       reactions: 0,
       follows: 0,
     });
-    if (period === 'month') {
-      currentDate.setMonth(currentDate.getMonth() + 1);
-    } else {
-      currentDate.setDate(currentDate.getDate() + 1);
-    }
   }
 
   // Fill in data from queries
@@ -299,10 +247,8 @@ export const GET = withErrorHandling(async (request: NextRequest) => {
     if (entry) entry.follows = row.count;
   }
 
-  // Convert to array, sort, and calculate totals in a single pass for efficiency
-  const timeSeries = Array.from(dateMap.values()).sort((a, b) =>
-    a.date.localeCompare(b.date)
-  );
+  // Buckets were inserted in chronological order
+  const timeSeries = Array.from(dateMap.values());
 
   // Calculate totals in single pass (more efficient than multiple reduce calls)
   const totals = { users: 0, posts: 0, comments: 0, reactions: 0, follows: 0 };

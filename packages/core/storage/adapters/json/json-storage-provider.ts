@@ -29,13 +29,23 @@ import { JsonPostAdapter } from './ports/posts';
 import { JsonQuestionAdapter } from './ports/questions';
 import { JsonTradingAdapter } from './ports/trading';
 import { JsonUserAdapter } from './ports/users';
-import { createEmptyState, type JsonStorageState } from './types';
+import {
+  createEmptyState,
+  type JsonStorageState,
+  parseJsonStorageState,
+} from './types';
 
 export class JsonStorageProvider implements IStorageProvider {
-  readonly mode: StorageMode = 'json';
+  readonly mode: StorageMode;
 
-  private state: JsonStorageState;
+  /**
+   * Single state object shared by reference with every adapter. It must never
+   * be reassigned; loads mutate it in place so adapters see the same data that
+   * snapshots serialize.
+   */
+  private readonly state: JsonStorageState;
   private basePath: string;
+  private hasExplicitBasePath: boolean;
   private idGenerator: JsonIdGenerator;
   private autoSave: boolean;
   private initialized = false;
@@ -51,8 +61,11 @@ export class JsonStorageProvider implements IStorageProvider {
   readonly users: UserPort;
 
   constructor(config: StorageProviderConfig) {
+    this.mode = config.mode;
+    this.hasExplicitBasePath = config.jsonBasePath !== undefined;
     this.basePath = config.jsonBasePath ?? './feed-data';
-    this.autoSave = config.persistOnChange ?? true;
+    // Memory mode never performs implicit disk I/O.
+    this.autoSave = config.mode === 'json' && (config.persistOnChange ?? true);
     this.state = createEmptyState();
     this.idGenerator = new JsonIdGenerator('sim');
 
@@ -91,6 +104,11 @@ export class JsonStorageProvider implements IStorageProvider {
   async initialize(): Promise<void> {
     if (this.initialized) return;
 
+    if (this.mode === 'memory') {
+      this.initialized = true;
+      return;
+    }
+
     // Ensure base directory exists
     if (!existsSync(this.basePath)) {
       mkdirSync(this.basePath, { recursive: true });
@@ -99,15 +117,14 @@ export class JsonStorageProvider implements IStorageProvider {
     // Try to load existing state
     const statePath = join(this.basePath, 'state.json');
     if (existsSync(statePath)) {
-      const data = readFileSync(statePath, 'utf-8');
-      const loaded = JSON.parse(data) as JsonStorageState;
-      this.mergeState(loaded);
+      this.mergeState(parseJsonStorageState(readFileSync(statePath, 'utf-8')));
     }
 
     this.initialized = true;
   }
 
   async shutdown(): Promise<void> {
+    if (this.mode === 'memory') return;
     await this.saveSnapshot();
   }
 
@@ -116,6 +133,14 @@ export class JsonStorageProvider implements IStorageProvider {
   }
 
   async saveSnapshot(): Promise<void> {
+    if (this.mode === 'memory' && !this.hasExplicitBasePath) {
+      throw new Error(
+        'Memory storage has no snapshot location. Configure jsonBasePath or use exportToJson(path).'
+      );
+    }
+    if (!existsSync(this.basePath)) {
+      mkdirSync(this.basePath, { recursive: true });
+    }
     const statePath = join(this.basePath, 'state.json');
     this.state.metadata.updatedAt = new Date().toISOString();
 
@@ -138,9 +163,7 @@ export class JsonStorageProvider implements IStorageProvider {
   }
 
   async loadSnapshot(path: string): Promise<void> {
-    const data = readFileSync(path, 'utf-8');
-    const loaded = JSON.parse(data) as JsonStorageState;
-    this.mergeState(loaded);
+    this.mergeState(parseJsonStorageState(readFileSync(path, 'utf-8')));
   }
 
   async exportToJson(path: string): Promise<void> {
@@ -161,20 +184,17 @@ export class JsonStorageProvider implements IStorageProvider {
   /**
    * Replace the entire state (for loading from file).
    */
-  setState(state: JsonStorageState): void {
+  setState(state: Partial<JsonStorageState>): void {
     this.mergeState(state);
   }
 
-  private mergeState(loaded: JsonStorageState): void {
-    // Merge loaded state with current state
-    this.state = {
-      ...this.state,
-      ...loaded,
-      metadata: {
-        ...this.state.metadata,
-        ...loaded.metadata,
-      },
-    };
+  private mergeState(loaded: Partial<JsonStorageState>): void {
+    // Mutate in place: adapters hold a reference to this.state.
+    const { metadata, ...collections } = loaded;
+    Object.assign(this.state, collections);
+    if (metadata) {
+      this.state.metadata = { ...this.state.metadata, ...metadata };
+    }
 
     // Restore counters
     if (loaded.counters) {

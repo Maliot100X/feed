@@ -18,7 +18,6 @@ import {
   db,
   eq,
   gte,
-  inArray,
   lte,
   posts,
   reactions,
@@ -84,6 +83,67 @@ export interface InteractionWindow {
 export interface FocusWeights {
   social: number;
   trading: number;
+}
+
+const DEFAULT_WINDOW_MS = 30 * 24 * 60 * 60 * 1000;
+
+/**
+ * Normalize an interaction window once so every query (and the spam
+ * denominator) uses the same bounds: end is capped at now, and the window
+ * must be non-empty.
+ */
+export function normalizeInteractionWindow(
+  window: Partial<InteractionWindow> | undefined,
+  now: Date = new Date()
+): InteractionWindow {
+  const requestedEnd = window?.endDate ?? now;
+  const endDate = requestedEnd > now ? now : requestedEnd;
+  const startDate =
+    window?.startDate ?? new Date(endDate.getTime() - DEFAULT_WINDOW_MS);
+  if (
+    Number.isNaN(startDate.getTime()) ||
+    Number.isNaN(endDate.getTime()) ||
+    startDate >= endDate
+  ) {
+    throw new Error(
+      `Invalid interaction window: ${startDate.toISOString?.() ?? startDate} .. ${endDate.toISOString?.() ?? endDate}`
+    );
+  }
+  return { startDate, endDate };
+}
+
+/**
+ * Normalize focus weights. Trading weight only applies when trading activity
+ * is part of the score; weights must be finite, non-negative and not all 0.
+ */
+export function normalizeFocusWeights(
+  weights: FocusWeights,
+  includeTradingActivity: boolean
+): FocusWeights {
+  const trading = includeTradingActivity ? weights.trading : 0;
+  for (const [name, value] of [
+    ['social', weights.social],
+    ['trading', trading],
+  ] as const) {
+    if (!Number.isFinite(value) || value < 0) {
+      throw new Error(`Invalid ${name} focus weight: ${value}`);
+    }
+  }
+  const total = weights.social + trading;
+  if (total <= 0) {
+    throw new Error('Focus weights must not all be zero');
+  }
+  return { social: weights.social / total, trading: trading / total };
+}
+
+/** Trading-performance fast-track predicate (shared by score and check). */
+function meetsFastTrack(stats: TradingStats): boolean {
+  return (
+    ALPHA_GROUP_CONFIG.fastTrackEnabled &&
+    stats.totalTrades >= ALPHA_GROUP_CONFIG.fastTrackMinTrades &&
+    stats.totalPnL >= ALPHA_GROUP_CONFIG.fastTrackMinPnL &&
+    stats.winRate >= ALPHA_GROUP_CONFIG.fastTrackMinWinRate
+  );
 }
 
 export class NPCInteractionTracker {
@@ -209,31 +269,11 @@ export class NPCInteractionTracker {
     window?: InteractionWindow,
     focusWeights?: FocusWeights
   ): Promise<NPCInteractionScore> {
-    const endDate = window?.endDate || new Date();
-    const startDate =
-      window?.startDate || new Date(Date.now() - 30 * 24 * 60 * 60 * 1000);
-
-    // Ensure effective end date doesn't exceed current time
-    const now = new Date();
-    const effectiveEndDate = endDate > now ? now : endDate;
+    const { startDate, endDate } = normalizeInteractionWindow(window);
 
     // ==========================================================================
     // SOCIAL INTERACTIONS
     // ==========================================================================
-
-    // Get all NPC posts in the time window
-    const npcPosts = await db
-      .select({ id: posts.id })
-      .from(posts)
-      .where(
-        and(
-          eq(posts.authorId, npcId),
-          gte(posts.timestamp, startDate),
-          lte(posts.timestamp, effectiveEndDate)
-        )
-      );
-
-    const npcPostIds = npcPosts.map((p) => p.id);
 
     // Count replies (from UserInteraction table)
     const replyInteractions = await db
@@ -255,40 +295,36 @@ export class NPCInteractionTracker {
           replyCount
         : 0;
 
-    // Count likes
-    let likeCount = 0;
-    if (npcPostIds.length > 0) {
-      const [likeResult] = await db
-        .select({ count: count() })
-        .from(reactions)
-        .where(
-          and(
-            eq(reactions.userId, userId),
-            inArray(reactions.postId, npcPostIds),
-            eq(reactions.type, 'like'),
-            gte(reactions.createdAt, startDate),
-            lte(reactions.createdAt, endDate)
-          )
-        );
-      likeCount = likeResult?.count ?? 0;
-    }
+    // Count likes/shares made in the window on any of the NPC's posts
+    // (including posts created before the window), aggregated in SQL.
+    const [likeResult] = await db
+      .select({ count: count() })
+      .from(reactions)
+      .innerJoin(posts, eq(reactions.postId, posts.id))
+      .where(
+        and(
+          eq(reactions.userId, userId),
+          eq(posts.authorId, npcId),
+          eq(reactions.type, 'like'),
+          gte(reactions.createdAt, startDate),
+          lte(reactions.createdAt, endDate)
+        )
+      );
+    const likeCount = likeResult?.count ?? 0;
 
-    // Count shares
-    let shareCount = 0;
-    if (npcPostIds.length > 0) {
-      const [shareResult] = await db
-        .select({ count: count() })
-        .from(shares)
-        .where(
-          and(
-            eq(shares.userId, userId),
-            inArray(shares.postId, npcPostIds),
-            gte(shares.createdAt, startDate),
-            lte(shares.createdAt, endDate)
-          )
-        );
-      shareCount = shareResult?.count ?? 0;
-    }
+    const [shareResult] = await db
+      .select({ count: count() })
+      .from(shares)
+      .innerJoin(posts, eq(shares.postId, posts.id))
+      .where(
+        and(
+          eq(shares.userId, userId),
+          eq(posts.authorId, npcId),
+          gte(shares.createdAt, startDate),
+          lte(shares.createdAt, endDate)
+        )
+      );
+    const shareCount = shareResult?.count ?? 0;
 
     const totalInteractions = replyCount + likeCount + shareCount;
 
@@ -349,23 +385,16 @@ export class NPCInteractionTracker {
       );
     }
 
-    // Apply focus weights (use provided or default)
-    // When trading is disabled, trading weight effectively becomes 0
-    const weights = focusWeights || {
-      social: ALPHA_GROUP_CONFIG.defaultSocialWeight,
-      trading: ALPHA_GROUP_CONFIG.includeTradingActivity
-        ? ALPHA_GROUP_CONFIG.defaultTradingWeight
-        : 0,
-    };
-    // Normalize weights to ensure they sum to 1 (when one is zero, use only the other)
-    const totalWeight = weights.social + weights.trading;
-    const normalizedWeights =
-      totalWeight > 0
-        ? {
-            social: weights.social / totalWeight,
-            trading: weights.trading / totalWeight,
-          }
-        : { social: 1, trading: 0 };
+    // Apply focus weights (use provided or default). When trading activity is
+    // disabled the trading weight is 0 even for custom weights, so it cannot
+    // depress the social score.
+    const normalizedWeights = normalizeFocusWeights(
+      focusWeights ?? {
+        social: ALPHA_GROUP_CONFIG.defaultSocialWeight,
+        trading: ALPHA_GROUP_CONFIG.defaultTradingWeight,
+      },
+      ALPHA_GROUP_CONFIG.includeTradingActivity
+    );
     const weightedScore =
       socialScore * normalizedWeights.social +
       tradingScore * normalizedWeights.trading;
@@ -425,7 +454,10 @@ export class NPCInteractionTracker {
         ? totalInteractions / daysSinceStart
         : totalInteractions;
 
-    if (interactionsPerDay > ALPHA_GROUP_CONFIG.maxInteractionsPerDay) {
+    // Spam is a hard failure: fast-track only overrides social minimums.
+    const isSpam =
+      interactionsPerDay > ALPHA_GROUP_CONFIG.maxInteractionsPerDay;
+    if (isSpam) {
       isEligible = false;
       eligibilityReasons.push(
         `Too many interactions per day (${interactionsPerDay.toFixed(0)}/day exceeds ${ALPHA_GROUP_CONFIG.maxInteractionsPerDay}/day limit)`
@@ -436,14 +468,10 @@ export class NPCInteractionTracker {
     // FAST TRACK CHECK
     // ==========================================================================
 
-    const qualifiesForFastTrack =
-      ALPHA_GROUP_CONFIG.fastTrackEnabled &&
-      tradingStats.totalTrades >= ALPHA_GROUP_CONFIG.fastTrackMinTrades &&
-      tradingStats.totalPnL >= ALPHA_GROUP_CONFIG.fastTrackMinPnL &&
-      tradingStats.winRate >= ALPHA_GROUP_CONFIG.fastTrackMinWinRate;
+    const qualifiesForFastTrack = meetsFastTrack(tradingStats);
 
-    // Fast-track overrides social requirements
-    if (qualifiesForFastTrack && !isEligible) {
+    // Fast-track overrides social requirements (never the spam guard)
+    if (qualifiesForFastTrack && !isEligible && !isSpam) {
       isEligible = true;
       eligibilityReasons.length = 0; // Clear previous reasons
       eligibilityReasons.push(

@@ -6,8 +6,8 @@
  *
  * @description
  * Scheduled cron job that generates game content including posts, events, market
- * updates, and reputation syncs. Runs every minute via the Cloudflare cron Worker. Uses generation
- * locks to prevent concurrent execution. Max execution time: 300s.
+ * updates, and reputation syncs. Runs every minute via the Cloudflare cron worker
+ * (workers/cron). Uses generation locks to prevent concurrent execution.
  *
  * @openapi
  * /api/cron/game-tick:
@@ -78,7 +78,7 @@ import { ensureEngineServices } from '@/lib/engine/ensure-engine-services';
 /**
  * POST /api/cron/game-tick
  *
- * Executes game tick, advancing the game simulation by one day. Processes world events,
+ * Executes one game tick, advancing the continuous simulation. Processes world events,
  * generates new content (posts, articles, questions), updates market states, and triggers
  * agent autonomous actions. Uses generation locks to prevent concurrent execution.
  * Supports staging environment relay.
@@ -89,8 +89,6 @@ import { ensureEngineServices } from '@/lib/engine/ensure-engine-services';
  * @throws {409} Game tick already in progress (generation lock held)
  */
 export const POST = withErrorHandling(async (request: NextRequest) => {
-  ensureEngineServices();
-
   // 1. Verify this is a legitimate cron request using centralized auth
   if (!verifyCronAuth(request, { jobName: 'GameTickCron' })) {
     logger.warn('Unauthorized cron request attempt', undefined, 'Cron');
@@ -100,6 +98,8 @@ export const POST = withErrorHandling(async (request: NextRequest) => {
       'execute'
     );
   }
+
+  ensureEngineServices();
 
   const startTime = Date.now();
   const lockId = `tick-${Date.now()}-${crypto.randomUUID().slice(0, 8)}`;
@@ -427,29 +427,11 @@ export const POST = withErrorHandling(async (request: NextRequest) => {
   }
 });
 
-// GET endpoint for the Cloudflare cron Worker (dispatches GET requests)
 /**
  * GET /api/cron/game-tick
  *
- * Health check endpoint for game tick cron job. Returns current game state and generation status.
- * Requires `Authorization: Bearer <CRON_SECRET>` (sent by the Cloudflare cron Worker).
- *
- * @param request - Next.js request
- * @returns Game tick status and current game state information
+ * Alias for POST: the Cloudflare cron worker and internal scheduler issue GET
+ * requests with the same Bearer CRON_SECRET. Authorization is identical to POST;
+ * a spoofable user-agent is never accepted as a credential.
  */
-export const GET = withErrorHandling(async (request: NextRequest) => {
-  // Security: Verify cron authorization (CRON_SECRET bearer token)
-  if (!verifyCronAuth(request, { jobName: 'GameTickCron' })) {
-    logger.warn('Unauthorized GET request to cron endpoint', undefined, 'Cron');
-    throw new AuthorizationError(
-      'Unauthorized cron request',
-      'cron',
-      'execute'
-    );
-  }
-
-  logger.info('GET request forwarded to POST handler', undefined, 'Cron');
-
-  // Forward to POST handler
-  return POST(request);
-});
+export const GET = POST;

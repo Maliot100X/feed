@@ -40,14 +40,11 @@ import { TutorialHelpButton } from '@/components/tutorial/TutorialHelpButton';
 import { useAgentsTeamDashboard } from '@/hooks/useAgentsTeamDashboard';
 import { useAuth } from '@/hooks/useAuth';
 import { useOwnedAgentTradeRefresh } from '@/hooks/useOwnedAgentTradeRefresh';
-import { useTeamChat } from '@/hooks/useTeamChat';
-import {
-  TUTORIAL_PERPS_DATA,
-  TUTORIAL_PERPS_ENTITY_ID,
-} from './_components/tutorial/steps';
+import { type TeamChatAgent, useTeamChat } from '@/hooks/useTeamChat';
+import type { TeamDashboardAgent } from '@/lib/agents/team-dashboard-types';
 import { useAgentsTutorial } from './_components/tutorial/useAgentsTutorial';
 import { ConversationList } from './ConversationList';
-import type { AgentStats, TeamChatAgent } from './MemberList';
+import { parseImportedTeamSelection } from './team-import';
 
 // ═══════════════════════════════════════════════════════════════
 // TYPES & CONSTANTS
@@ -247,6 +244,8 @@ const ARCHETYPES: Archetype[] = [
   },
 ];
 
+const ARCHETYPE_IDS: ReadonlySet<string> = new Set(ARCHETYPES.map((a) => a.id));
+
 const FACTION_META: Record<Hat, { label: string; subtitle: string }> = {
   black: { label: 'BLACK HAT', subtitle: 'Chaos Agents' },
   gray: { label: 'GRAY HAT', subtitle: 'Mercenaries' },
@@ -359,19 +358,9 @@ export default function TeamChatPage() {
     },
   });
 
-  const prevTutorialStepRef = useRef(tutorial.currentStep);
-  useEffect(() => {
-    const prev = prevTutorialStepRef.current;
-    prevTutorialStepRef.current = tutorial.currentStep;
-    if (tutorial.isActive && prev === 1 && tutorial.currentStep === 2) {
-      router.push('/agents/create');
-    }
-  }, [tutorial.isActive, tutorial.currentStep, router]);
-
   useEffect(() => {
     if (searchParams.get('create') === 'true') {
-      router.push('/agents/create');
-      router.replace('/agents/team', { scroll: false });
+      router.replace('/agents/create');
     }
   }, [searchParams, router]);
 
@@ -381,57 +370,6 @@ export default function TeamChatPage() {
     setPageView(teamChat.agents.length === 0 ? 'roster' : 'chat');
     setInitialViewSet(true);
   }, [loading, teamChat, initialViewSet]);
-
-  // Tutorial chat details
-  const tutorialChatDetails = useMemo(() => {
-    if (!chatDetails) return chatDetails;
-    if (!tutorial.isActive || tutorial.currentStep < 2) return chatDetails;
-
-    const agentSenderId = teamChat?.agents?.[0]?.id ?? 'tutorial-agent';
-    const agentName =
-      teamChat?.agents?.[0]?.displayName ??
-      teamChat?.agents?.[0]?.username ??
-      'Agent';
-    const now = new Date().toISOString();
-
-    return {
-      ...chatDetails,
-      messages: [
-        {
-          id: 'tutorial-msg-user',
-          content: `@${agentName}, what are the top trending perpetual markets right now?`,
-          senderId: user?.id ?? 'tutorial-user',
-          createdAt: now,
-          stableKey: 'tutorial-msg-user',
-        },
-        {
-          id: 'tutorial-msg-agent',
-          content:
-            "Here are the top trending perpetual markets I'm watching right now. BTC is showing strong momentum and ETH has interesting volume patterns.",
-          senderId: agentSenderId,
-          createdAt: now,
-          stableKey: 'tutorial-msg-agent',
-          metadata: {
-            tags: [
-              {
-                type: 'perps' as const,
-                label: 'Perps Markets',
-                icon: 'TrendingUp' as const,
-                entityId: TUTORIAL_PERPS_ENTITY_ID,
-                data: TUTORIAL_PERPS_DATA,
-              },
-            ],
-          },
-        },
-      ],
-    };
-  }, [
-    chatDetails,
-    tutorial.isActive,
-    tutorial.currentStep,
-    teamChat?.agents,
-    user?.id,
-  ]);
 
   useOwnedAgentTradeRefresh({
     userId: user?.id,
@@ -451,13 +389,27 @@ export default function TeamChatPage() {
     setPageView('agent-detail');
   }, []);
 
+  // Tracks the agent whose settings were most recently requested so a late
+  // response for a previous agent (or after the modal closed) is ignored.
+  const editRequestRef = useRef<string | null>(null);
+
+  const closeEditModal = useCallback(() => {
+    editRequestRef.current = null;
+    setEditingAgentId(null);
+    setEditingAgentData(null);
+  }, []);
+
   const handleViewSettings = useCallback(
     async (agentId: string) => {
+      editRequestRef.current = agentId;
       setEditingAgentId(agentId);
-      const token = await getAccessToken();
+      setEditingAgentData(null);
+      const isCurrent = () => editRequestRef.current === agentId;
+      const token = await getAccessToken().catch(() => null);
+      if (!isCurrent()) return;
       if (!token) {
         toast.error('Authentication required');
-        setEditingAgentId(null);
+        closeEditModal();
         return;
       }
       try {
@@ -465,18 +417,21 @@ export default function TeamChatPage() {
           headers: { Authorization: `Bearer ${token}` },
         });
         if (!res.ok) {
+          if (!isCurrent()) return;
           toast.error('Failed to fetch agent details');
-          setEditingAgentId(null);
+          closeEditModal();
           return;
         }
         const data = await res.json();
+        if (!isCurrent()) return;
         setEditingAgentData(data.agent);
       } catch {
+        if (!isCurrent()) return;
         toast.error('Failed to fetch agent details');
-        setEditingAgentId(null);
+        closeEditModal();
       }
     },
-    [getAccessToken]
+    [getAccessToken, closeEditModal]
   );
 
   // Toggle archetype selection
@@ -505,7 +460,7 @@ export default function TeamChatPage() {
     if (selectedIds.size === 0) return;
     setDeploying(true);
 
-    const token = await getAccessToken();
+    const token = await getAccessToken().catch(() => null);
     if (!token) {
       toast.error('Please sign in');
       setDeploying(false);
@@ -602,16 +557,21 @@ export default function TeamChatPage() {
     );
 
     const created = results.filter((r) => r.status === 'fulfilled').length;
-    const failed = results.filter((r) => r.status === 'rejected').length;
+    // Keep only the selections that failed so a retry does not create
+    // (and fund) the successfully deployed agents a second time.
+    const failedIds = selected
+      .filter((_, index) => results[index]?.status === 'rejected')
+      .map((archetype) => archetype.id);
+    const failed = failedIds.length;
 
     if (created > 0) {
       toast.success(
-        `Deployed ${created} agent${created > 1 ? 's' : ''}!${failed > 0 ? ` (${failed} failed)` : ''}`
+        `Deployed ${created} agent${created > 1 ? 's' : ''}!${failed > 0 ? ` (${failed} failed — still selected for retry)` : ''}`
       );
-      setSelectedIds(new Set());
+      setSelectedIds(new Set(failedIds));
       refreshTeamChat();
       refreshTeamSummary();
-      setPageView('chat');
+      if (failed === 0) setPageView('chat');
     } else {
       toast.error('Failed to deploy agents. Try again.');
     }
@@ -893,10 +853,12 @@ export default function TeamChatPage() {
                         name: a.displayName || a.username || 'Agent',
                       })),
                     };
-                    navigator.clipboard.writeText(
-                      JSON.stringify(data, null, 2)
-                    );
-                    toast.success('Team exported to clipboard');
+                    navigator.clipboard
+                      .writeText(JSON.stringify(data, null, 2))
+                      .then(
+                        () => toast.success('Team exported to clipboard'),
+                        () => toast.error('Could not write to clipboard')
+                      );
                   }}
                   className="flex items-center gap-1.5 rounded-lg px-2.5 py-1.5 text-muted-foreground text-xs transition-colors hover:bg-muted hover:text-foreground"
                   title="Export team"
@@ -907,20 +869,29 @@ export default function TeamChatPage() {
                 <button
                   type="button"
                   onClick={async () => {
-                    try {
-                      const text = await navigator.clipboard.readText();
-                      const data = JSON.parse(text);
-                      if (data.selected && Array.isArray(data.selected)) {
-                        const validIds = data.selected.filter((id: string) =>
-                          ARCHETYPES.some((a) => a.id === id)
-                        );
-                        setSelectedIds(new Set(validIds));
-                        toast.success(`Imported ${validIds.length} selections`);
-                      } else {
-                        toast.error('Invalid team data');
-                      }
-                    } catch {
-                      toast.error('Could not import — paste valid team JSON');
+                    const text = await navigator.clipboard
+                      .readText()
+                      .catch(() => null);
+                    if (text === null) {
+                      toast.error('Could not read from clipboard');
+                      return;
+                    }
+                    const result = parseImportedTeamSelection(
+                      text,
+                      ARCHETYPE_IDS,
+                      MAX_PARTY_SIZE - existingCount
+                    );
+                    if (!result.ok) {
+                      toast.error(result.error);
+                      return;
+                    }
+                    setSelectedIds(new Set(result.ids));
+                    if (result.dropped > 0) {
+                      toast.warning(
+                        `Imported ${result.ids.length} selections; ${result.dropped} skipped (party is full)`
+                      );
+                    } else {
+                      toast.success(`Imported ${result.ids.length} selections`);
                     }
                   }}
                   className="flex items-center gap-1.5 rounded-lg px-2.5 py-1.5 text-muted-foreground text-xs transition-colors hover:bg-muted hover:text-foreground"
@@ -1139,7 +1110,10 @@ export default function TeamChatPage() {
           </div>
 
           {/* Main Content */}
-          <div className="flex min-h-0 flex-1 flex-col overflow-hidden">
+          <div
+            data-tour="agents-chat-area"
+            className="flex min-h-0 flex-1 flex-col overflow-hidden"
+          >
             {/* No agents → nudge to roster */}
             {!hasAgents && pageView === 'chat' ? (
               <div className="flex flex-1 flex-col items-center justify-center gap-6 p-8 text-center">
@@ -1250,7 +1224,7 @@ export default function TeamChatPage() {
                 </div>
 
                 <TeamChatView
-                  chatDetails={tutorialChatDetails}
+                  chatDetails={chatDetails}
                   currentUserId={user?.id}
                   authenticated={authenticated}
                   sseConnected={sseConnected}
@@ -1289,10 +1263,7 @@ export default function TeamChatPage() {
       {editingAgentId && editingAgentData && (
         <AgentEditModal
           agent={editingAgentData}
-          onClose={() => {
-            setEditingAgentId(null);
-            setEditingAgentData(null);
-          }}
+          onClose={closeEditModal}
           onUpdate={() => {
             refreshTeamChat();
             refreshTeamSummary();
@@ -1337,7 +1308,7 @@ function AgentDetailCard({
   onViewSettings,
 }: {
   agent: TeamChatAgent;
-  stats: AgentStats | undefined;
+  stats: TeamDashboardAgent | undefined;
   processingAgentIds: Set<string>;
   onTagAgent: (agent: TeamChatAgent) => void;
   onStopAgent: (agentId: string) => void;

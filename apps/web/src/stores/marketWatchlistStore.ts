@@ -17,7 +17,7 @@ interface MarketWatchlistState {
   clear: () => void;
 }
 
-function serializeKey(key: MarketKey): string {
+export function serializeMarketKey(key: MarketKey): string {
   const id = key.id.trim();
   if (!id) return '';
   return `${key.kind}:${key.kind === 'perp' ? id.toUpperCase() : id}`;
@@ -29,7 +29,7 @@ export const useMarketWatchlistStore = create<MarketWatchlistState>()(
       favorites: [],
       favoritesSet: new Set<string>(),
       toggleFavorite: (key) => {
-        const serialized = serializeKey(key);
+        const serialized = serializeMarketKey(key);
         if (!serialized) return;
 
         const next = new Set(get().favoritesSet);
@@ -38,7 +38,7 @@ export const useMarketWatchlistStore = create<MarketWatchlistState>()(
         set({ favorites: Array.from(next), favoritesSet: next });
       },
       isFavorite: (key) => {
-        const serialized = serializeKey(key);
+        const serialized = serializeMarketKey(key);
         if (!serialized) return false;
         return get().favoritesSet.has(serialized);
       },

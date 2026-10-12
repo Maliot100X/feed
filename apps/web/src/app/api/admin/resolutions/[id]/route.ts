@@ -13,7 +13,7 @@ import {
   successResponse,
   withErrorHandling,
 } from '@feed/api';
-import { db, eq, questions } from '@feed/db';
+import { and, db, eq, isNull, or, questions } from '@feed/db';
 import { logger, toISO } from '@feed/shared';
 import type { NextRequest } from 'next/server';
 import { z } from 'zod';
@@ -31,6 +31,30 @@ const ParamsSchema = z.object({
 const BodySchema = z.object({
   action: z.enum(['approve', 'reject']),
 });
+
+/**
+ * Compare-and-set guard: the question must still be active, awaiting manual
+ * review and not yet approved at write time, so concurrent approve/reject
+ * requests (or a cron resolution) cannot both apply.
+ */
+const stillReviewable = (id: string) =>
+  and(
+    eq(questions.id, id),
+    eq(questions.status, 'active'),
+    eq(questions.requiresManualReview, true),
+    // Same pending predicate as the review queue (GET /api/admin/resolutions)
+    or(
+      isNull(questions.resolutionReviewStatus),
+      eq(questions.resolutionReviewStatus, 'pending')
+    )
+  );
+
+const conflict = () =>
+  errorResponse(
+    'Question review state changed; reload and retry',
+    'REVIEW_CONFLICT',
+    409
+  );
 
 export const POST = withErrorHandling(
   async (
@@ -83,10 +107,13 @@ export const POST = withErrorHandling(
       );
     }
 
-    if (existing.resolutionReviewStatus === 'approved') {
+    if (
+      existing.resolutionReviewStatus !== null &&
+      existing.resolutionReviewStatus !== 'pending'
+    ) {
       return errorResponse(
-        'Question already approved',
-        'ALREADY_APPROVED',
+        `Question review already ${existing.resolutionReviewStatus}`,
+        'ALREADY_REVIEWED',
         400
       );
     }
@@ -94,7 +121,7 @@ export const POST = withErrorHandling(
     const now = new Date();
 
     if (action === 'approve') {
-      await db
+      const approved = await db
         .update(questions)
         .set({
           resolutionReviewStatus: 'approved',
@@ -102,7 +129,10 @@ export const POST = withErrorHandling(
           resolutionReviewedBy: admin.userId,
           updatedAt: now,
         })
-        .where(eq(questions.id, id));
+        .where(stillReviewable(id))
+        .returning({ id: questions.id });
+
+      if (approved.length === 0) return conflict();
 
       logger.info(
         'Resolution approved',
@@ -120,7 +150,7 @@ export const POST = withErrorHandling(
     // Reject: clear the review flag and postpone resolution to avoid immediate retry loops.
     const postponed = new Date(now.getTime() + POSTPONE_HOURS * 60 * 60 * 1000);
 
-    await db
+    const rejected = await db
       .update(questions)
       .set({
         requiresManualReview: false,
@@ -133,7 +163,10 @@ export const POST = withErrorHandling(
         resolutionDate: postponed,
         updatedAt: now,
       })
-      .where(eq(questions.id, id));
+      .where(stillReviewable(id))
+      .returning({ id: questions.id });
+
+    if (rejected.length === 0) return conflict();
 
     logger.info(
       'Resolution rejected',

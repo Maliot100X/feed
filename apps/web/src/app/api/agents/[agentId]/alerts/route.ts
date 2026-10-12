@@ -11,7 +11,15 @@
  */
 
 import { authenticateUser, withErrorHandling } from '@feed/api';
-import { db, eq, userAgentConfigs, users } from '@feed/db';
+import {
+  and,
+  chatParticipants,
+  chats,
+  db,
+  eq,
+  userAgentConfigs,
+  users,
+} from '@feed/db';
 import type { PriceAlert } from '@feed/db/schema';
 import { generateSnowflakeId } from '@feed/shared';
 import type { NextRequest } from 'next/server';
@@ -23,9 +31,58 @@ const createAlertSchema = z.object({
   condition: z.enum(['above', 'below']),
   threshold: z.number().positive(),
   deliveryChannel: z.enum(['team_chat', 'group']).optional(),
-  deliveryChatId: z.string().optional(),
+  deliveryChatId: z.string().trim().min(1).max(100).optional(),
   cooldownMinutes: z.number().int().positive().max(1440).optional(),
 });
+
+const deleteAlertSchema = z.union([
+  z.object({ alertId: z.string().trim().min(1), tokenSymbol: z.undefined() }),
+  z.object({
+    alertId: z.undefined(),
+    tokenSymbol: z.string().trim().min(1).max(20),
+    condition: z.enum(['above', 'below']).optional(),
+  }),
+]);
+
+/** Upper bound on stored alerts per agent (the tick checks every alert). */
+const MAX_ALERTS_PER_AGENT = 50;
+
+/**
+ * A group delivery target must be an existing group chat in which the agent
+ * is an active participant; otherwise alerts could post into arbitrary chats.
+ */
+async function isAgentGroupChat(
+  agentId: string,
+  chatId: string
+): Promise<boolean> {
+  const [membership] = await db
+    .select({ chatId: chatParticipants.chatId })
+    .from(chatParticipants)
+    .innerJoin(chats, eq(chats.id, chatParticipants.chatId))
+    .where(
+      and(
+        eq(chatParticipants.chatId, chatId),
+        eq(chatParticipants.userId, agentId),
+        eq(chatParticipants.isActive, true),
+        eq(chats.isGroup, true)
+      )
+    )
+    .limit(1);
+  return Boolean(membership);
+}
+
+/** Read the alert list under a row lock so concurrent edits do not clobber each other. */
+async function lockAlerts(
+  tx: Parameters<Parameters<typeof db.transaction>[0]>[0],
+  configId: string
+): Promise<PriceAlert[]> {
+  const [row] = await tx
+    .select({ priceAlerts: userAgentConfigs.priceAlerts })
+    .from(userAgentConfigs)
+    .where(eq(userAgentConfigs.id, configId))
+    .for('update');
+  return (row?.priceAlerts ?? []) as PriceAlert[];
+}
 
 /**
  * Verify agent exists, is an agent, and is managed by the authenticated user.
@@ -36,7 +93,7 @@ async function verifyAgentOwnership(
   agentId: string
 ): Promise<
   | { error: NextResponse }
-  | { config: { id: string; priceAlerts: PriceAlert[] }; userId: string }
+  | { config: { id: string; priceAlerts: PriceAlert[] } }
 > {
   const user = await authenticateUser(req);
 
@@ -85,7 +142,6 @@ async function verifyAgentOwnership(
       id: config.id,
       priceAlerts: (config.priceAlerts ?? []) as PriceAlert[],
     },
-    userId: user.id,
   };
 }
 
@@ -152,52 +208,90 @@ export const POST = withErrorHandling(async function POST(
     );
   }
 
-  const alerts = result.config.priceAlerts;
-  const upperSymbol = tokenSymbol.trim().toUpperCase();
-
-  // Check for existing alert with same token+condition
-  const existingIdx = alerts.findIndex(
-    (a) => a.tokenSymbol === upperSymbol && a.condition === condition
-  );
-
-  const now = new Date().toISOString();
-  let alert: PriceAlert;
-  let updated = false;
-
-  if (existingIdx >= 0) {
-    // Update existing
-    const existing = alerts[existingIdx]!;
-    alert = {
-      ...existing,
-      threshold,
-      deliveryChannel: deliveryChannel ?? existing.deliveryChannel,
-      deliveryChatId: deliveryChatId ?? existing.deliveryChatId,
-      cooldownMinutes: cooldownMinutes ?? existing.cooldownMinutes,
-      enabled: true,
-      lastTriggeredAt: undefined, // Reset cooldown on update
-    };
-    alerts[existingIdx] = alert;
-    updated = true;
-  } else {
-    // Create new
-    alert = {
-      id: await generateSnowflakeId(),
-      tokenSymbol: upperSymbol,
-      condition,
-      threshold,
-      deliveryChannel: deliveryChannel ?? 'team_chat',
-      deliveryChatId,
-      enabled: true,
-      cooldownMinutes: cooldownMinutes ?? 15,
-      createdAt: now,
-    };
-    alerts.push(alert);
+  if (deliveryChatId && deliveryChannel !== 'group') {
+    return NextResponse.json(
+      { error: 'deliveryChatId is only valid with deliveryChannel "group"' },
+      { status: 400 }
+    );
   }
 
-  await db
-    .update(userAgentConfigs)
-    .set({ priceAlerts: alerts, updatedAt: new Date() })
-    .where(eq(userAgentConfigs.id, result.config.id));
+  if (deliveryChatId && !(await isAgentGroupChat(agentId, deliveryChatId))) {
+    return NextResponse.json(
+      {
+        error:
+          'deliveryChatId must be a group chat the agent is an active member of',
+      },
+      { status: 400 }
+    );
+  }
+
+  const upperSymbol = tokenSymbol.toUpperCase();
+  const now = new Date().toISOString();
+  const newId = await generateSnowflakeId();
+
+  const outcome = await db.transaction(async (tx) => {
+    const alerts = await lockAlerts(tx, result.config.id);
+
+    // Check for existing alert with same token+condition
+    const existingIdx = alerts.findIndex(
+      (a) => a.tokenSymbol === upperSymbol && a.condition === condition
+    );
+
+    let alert: PriceAlert;
+    if (existingIdx >= 0) {
+      const existing = alerts[existingIdx]!;
+      const channel = deliveryChannel ?? existing.deliveryChannel;
+      alert = {
+        ...existing,
+        threshold,
+        deliveryChannel: channel,
+        // Switching to team_chat clears any stale group target.
+        deliveryChatId:
+          channel === 'group'
+            ? (deliveryChatId ?? existing.deliveryChatId)
+            : undefined,
+        cooldownMinutes: cooldownMinutes ?? existing.cooldownMinutes,
+        enabled: true,
+        lastTriggeredAt: undefined, // Reset cooldown on update
+      };
+      if (alert.deliveryChannel === 'group' && !alert.deliveryChatId) {
+        return {
+          error: 'deliveryChatId is required when deliveryChannel is "group"',
+        } as const;
+      }
+      alerts[existingIdx] = alert;
+    } else {
+      if (alerts.length >= MAX_ALERTS_PER_AGENT) {
+        return {
+          error: `An agent can have at most ${MAX_ALERTS_PER_AGENT} price alerts`,
+        } as const;
+      }
+      alert = {
+        id: newId,
+        tokenSymbol: upperSymbol,
+        condition,
+        threshold,
+        deliveryChannel: deliveryChannel ?? 'team_chat',
+        deliveryChatId,
+        enabled: true,
+        cooldownMinutes: cooldownMinutes ?? 15,
+        createdAt: now,
+      };
+      alerts.push(alert);
+    }
+
+    await tx
+      .update(userAgentConfigs)
+      .set({ priceAlerts: alerts, updatedAt: new Date() })
+      .where(eq(userAgentConfigs.id, result.config.id));
+
+    return { alert, updated: existingIdx >= 0 } as const;
+  });
+
+  if ('error' in outcome) {
+    return NextResponse.json({ error: outcome.error }, { status: 400 });
+  }
+  const { alert, updated } = outcome;
 
   return NextResponse.json(
     {
@@ -224,32 +318,57 @@ export const DELETE = withErrorHandling(async function DELETE(
   if ('error' in result) return result.error;
 
   const url = new URL(req.url);
-  const alertId = url.searchParams.get('alertId');
-  const tokenSymbol = url.searchParams.get('tokenSymbol');
-  const condition = url.searchParams.get('condition');
+  const selector = deleteAlertSchema.safeParse({
+    alertId: url.searchParams.get('alertId') ?? undefined,
+    tokenSymbol: url.searchParams.get('tokenSymbol') ?? undefined,
+    condition: url.searchParams.get('condition') ?? undefined,
+  });
 
-  if (!alertId && !tokenSymbol) {
+  if (!selector.success) {
     return NextResponse.json(
-      { error: 'Provide alertId or tokenSymbol query parameter' },
+      {
+        error:
+          'Provide exactly one of alertId or tokenSymbol (with optional condition "above"|"below")',
+      },
       { status: 400 }
     );
   }
+  const target = selector.data;
 
-  const alerts = result.config.priceAlerts;
-  let removed: PriceAlert | undefined;
-  let remaining: PriceAlert[];
+  const removed = await db.transaction(async (tx) => {
+    const alerts = await lockAlerts(tx, result.config.id);
 
-  if (alertId) {
-    removed = alerts.find((a) => a.id === alertId);
-    remaining = alerts.filter((a) => a.id !== alertId);
-  } else {
-    const upperSymbol = tokenSymbol!.toUpperCase();
-    removed = alerts.find(
-      (a) =>
-        a.tokenSymbol === upperSymbol &&
-        (!condition || a.condition === condition)
+    const matches =
+      target.alertId !== undefined
+        ? alerts.filter((a) => a.id === target.alertId)
+        : alerts.filter(
+            (a) =>
+              a.tokenSymbol === target.tokenSymbol.toUpperCase() &&
+              (!target.condition || a.condition === target.condition)
+          );
+    // Without a condition, both directions may match; never guess which.
+    if (matches.length > 1) return 'ambiguous' as const;
+    const match = matches[0];
+    if (!match) return undefined;
+
+    await tx
+      .update(userAgentConfigs)
+      .set({
+        priceAlerts: alerts.filter((a) => a.id !== match.id),
+        updatedAt: new Date(),
+      })
+      .where(eq(userAgentConfigs.id, result.config.id));
+    return match;
+  });
+
+  if (removed === 'ambiguous') {
+    return NextResponse.json(
+      {
+        error:
+          'Multiple alerts match this tokenSymbol; specify condition or alertId',
+      },
+      { status: 400 }
     );
-    remaining = removed ? alerts.filter((a) => a.id !== removed!.id) : alerts;
   }
 
   if (!removed) {
@@ -258,11 +377,6 @@ export const DELETE = withErrorHandling(async function DELETE(
       { status: 404 }
     );
   }
-
-  await db
-    .update(userAgentConfigs)
-    .set({ priceAlerts: remaining, updatedAt: new Date() })
-    .where(eq(userAgentConfigs.id, result.config.id));
 
   return NextResponse.json({
     success: true,

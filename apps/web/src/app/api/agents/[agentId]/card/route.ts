@@ -64,6 +64,7 @@
 import type { AgentCard } from '@feed/agents';
 import { agentRegistry } from '@feed/agents';
 import { withErrorHandling } from '@feed/api';
+import { db, eq, users } from '@feed/db';
 import { logger } from '@feed/shared';
 import type { NextRequest } from 'next/server';
 import { NextResponse } from 'next/server';
@@ -94,34 +95,38 @@ export const GET = withErrorHandling(async function GET(
   // Build agent card from registration data
   const baseUrl = process.env.NEXT_PUBLIC_BASE_URL || 'http://localhost:3000';
 
+  // Public description comes from the public profile bio. The system prompt is
+  // private agent configuration and must never be published here.
+  const [profile] = agent.userId
+    ? await db
+        .select({ bio: users.bio })
+        .from(users)
+        .where(eq(users.id, agent.userId))
+        .limit(1)
+    : [];
+
+  const externalA2aEndpoint = agent.capabilities.a2aEndpoint;
+
   const agentCard: AgentCard = {
     version: '1.0',
     agentId: agent.agentId,
     name: agent.name,
-    description: agent.systemPrompt,
+    description: profile?.bio || 'Autonomous agent on Feed platform',
     endpoints: {
-      // A2A WebSocket endpoint (future implementation)
-      a2a:
-        agent.capabilities.a2aEndpoint ||
-        `${baseUrl}/api/agents/${agentId}/a2a`,
-      // MCP HTTP endpoint (future implementation)
-      mcp:
-        agent.capabilities.mcpEndpoint ||
-        `${baseUrl}/api/agents/${agentId}/mcp`,
-      // Agent card endpoint (current implementation)
+      a2a: externalA2aEndpoint || `${baseUrl}/api/agents/${agentId}/a2a`,
+      // Only advertise an MCP endpoint the agent actually declared; Feed does
+      // not host per-agent MCP endpoints.
+      ...(agent.capabilities.mcpEndpoint
+        ? { mcp: agent.capabilities.mcpEndpoint }
+        : {}),
       rpc: `${baseUrl}/api/agents/${agentId}/card`,
     },
     capabilities: agent.capabilities,
-    // Authentication requirements (public for now)
-    authentication: {
-      required: false,
-      methods: [],
-    },
-    // Usage limits (unlimited for internal agents)
-    limits: {
-      rateLimit: 0, // 0 = unlimited
-      costPerAction: 0, // Free for internal agents
-    },
+    // Feed-hosted per-agent A2A requires an API key (X-Feed-Api-Key). For an
+    // externally hosted endpoint we cannot vouch for its auth or limits.
+    ...(externalA2aEndpoint
+      ? {}
+      : { authentication: { required: true, methods: ['apiKey'] } }),
   };
 
   logger.info(

@@ -10,7 +10,7 @@
  */
 
 import { afterAll, beforeAll, describe, expect, test } from 'bun:test';
-import { and, db, eq, gte, posts } from '@feed/db';
+import { and, db, eq, inArray, posts } from '@feed/db';
 
 // Skip unless explicitly enabled with database running
 const SKIP = process.env.RUN_INTEGRATION_TESTS !== 'true';
@@ -30,6 +30,14 @@ type RegistryModule = typeof import('../../services/static-data-registry');
 
 describe.skipIf(SKIP || !hasLLMKey)('NPC Post Voice Integration', () => {
   let testTimestamp: Date;
+  // Exact timestamps passed to generateNPCPost; together with the fixture
+  // actor IDs they identify only the posts this suite created.
+  const fixtureTimestamps: Date[] = [];
+  const fixturePosts = () =>
+    and(
+      inArray(posts.authorId, testActorIds),
+      inArray(posts.timestamp, fixtureTimestamps)
+    );
   let llmClient: ReturnType<LLMModule['FeedLLMClient']['forGameTick']>;
   let generateNPCPost: PostHelpersModule['generateNPCPost'];
   let loadSharedPostContext: PostHelpersModule['loadSharedPostContext'];
@@ -61,13 +69,10 @@ describe.skipIf(SKIP || !hasLLMKey)('NPC Post Voice Integration', () => {
   });
 
   afterAll(async () => {
-    // Delete test posts created during this test
-    // Note: generateNPCPost uses gameId: 'continuous', not 'test-voice'
-    await db
-      .delete(posts)
-      .where(
-        and(gte(posts.timestamp, testTimestamp), eq(posts.gameId, 'continuous'))
-      );
+    // Delete only the fixture posts (exact actor + timestamp pairs), never
+    // other content created concurrently in the shared continuous game.
+    if (fixtureTimestamps.length === 0) return;
+    await db.delete(posts).where(fixturePosts());
   });
 
   test('generates posts with distinct voices for different actors', async () => {
@@ -98,6 +103,10 @@ describe.skipIf(SKIP || !hasLLMKey)('NPC Post Voice Integration', () => {
         continue;
       }
 
+      const postTimestamp = new Date(
+        testTimestamp.getTime() + generatedPosts.length * 1000
+      );
+      fixtureTimestamps.push(postTimestamp);
       const success = await generateNPCPost(
         llmClient,
         {
@@ -112,7 +121,7 @@ describe.skipIf(SKIP || !hasLLMKey)('NPC Post Voice Integration', () => {
         },
         question,
         worldFacts,
-        new Date(testTimestamp.getTime() + generatedPosts.length * 1000), // Offset timestamps
+        postTimestamp, // Offset timestamps
         sharedContext
         // No currentDay - skips arc plan lookup
       );
@@ -145,16 +154,12 @@ describe.skipIf(SKIP || !hasLLMKey)('NPC Post Voice Integration', () => {
         content: posts.content,
       })
       .from(posts)
-      .where(
-        and(gte(posts.timestamp, testTimestamp), eq(posts.gameId, 'continuous'))
-      );
+      .where(fixturePosts());
 
     console.log(`Found ${recentPosts.length} posts created during test`);
 
-    if (recentPosts.length < 2) {
-      console.log('Not enough posts to compare, skipping distinctness test');
-      return;
-    }
+    // Generation is explicitly opted into; missing posts are a failure.
+    expect(recentPosts.length).toBeGreaterThanOrEqual(2);
 
     // Check that posts are not identical
     const contents = recentPosts.map((p) => p.content);
@@ -177,17 +182,9 @@ describe.skipIf(SKIP || !hasLLMKey)('NPC Post Voice Integration', () => {
         content: posts.content,
       })
       .from(posts)
-      .where(
-        and(
-          gte(posts.timestamp, testTimestamp),
-          eq(posts.authorId, 'kanyai-west')
-        )
-      );
+      .where(and(fixturePosts(), eq(posts.authorId, 'kanyai-west')));
 
-    if (recentPosts.length === 0) {
-      console.log('No KanyAI post found, skipping voice check');
-      return;
-    }
+    expect(recentPosts.length).toBeGreaterThan(0);
 
     const kanyaiPost = recentPosts[0]!;
     console.log(`KanyAI post: "${kanyaiPost.content}"`);
@@ -208,17 +205,9 @@ describe.skipIf(SKIP || !hasLLMKey)('NPC Post Voice Integration', () => {
         content: posts.content,
       })
       .from(posts)
-      .where(
-        and(
-          gte(posts.timestamp, testTimestamp),
-          eq(posts.authorId, 'baill-gaites')
-        )
-      );
+      .where(and(fixturePosts(), eq(posts.authorId, 'baill-gaites')));
 
-    if (recentPosts.length === 0) {
-      console.log('No BAIll GAItes post found, skipping voice check');
-      return;
-    }
+    expect(recentPosts.length).toBeGreaterThan(0);
 
     const gatesPost = recentPosts[0]!;
     console.log(`BAIll GAItes post: "${gatesPost.content}"`);
@@ -239,9 +228,7 @@ describe.skipIf(SKIP || !hasLLMKey)('NPC Post Voice Integration', () => {
         content: posts.content,
       })
       .from(posts)
-      .where(
-        and(gte(posts.timestamp, testTimestamp), eq(posts.gameId, 'continuous'))
-      );
+      .where(fixturePosts());
 
     // These patterns were appearing too frequently due to feedback loop
     const overusedPatterns = [

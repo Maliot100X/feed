@@ -73,14 +73,11 @@ function summarizeQuestion(fullText: string): string {
  * Presents the direction as a personal hunch without revealing insider status.
  */
 function formatSignalAsNaturalLanguage(
-  signal: { direction: 'YES' | 'NO' | 'NEUTRAL'; reason: string },
+  signal: { direction: 'YES' | 'NO'; reason: string },
   phase: 'early' | 'middle' | 'late' | 'climax',
   questionTopic: string
 ): string {
-  const expectation =
-    signal.direction === 'NEUTRAL'
-      ? ''
-      : ` You expect the following claim to ${signal.direction === 'YES' ? 'come true' : 'not come true'}: "${questionTopic}".`;
+  const expectation = ` You expect the following claim to ${signal.direction === 'YES' ? 'come true' : 'not come true'}: "${questionTopic}".`;
 
   if (signal.reason === 'insider') {
     // Insider: confident but subtle - never say "you know the answer"

@@ -128,7 +128,17 @@ export const POST = withErrorHandling(async (request: NextRequest) => {
 
   const body = parsed;
 
-  const fromAgent = await requireUserByIdentifier(body.agentId);
+  const fromAgent = await requireUserByIdentifier(body.agentId, {
+    id: true,
+    isAgent: true,
+  });
+
+  if (!fromAgent.isAgent) {
+    return NextResponse.json(
+      { success: false, error: 'AGENT_REQUIRED' },
+      { status: 400 }
+    );
+  }
   const toUser = await requireUserByIdentifier(body.toUserId);
 
   const now = new Date();

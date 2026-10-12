@@ -19,6 +19,7 @@
 import { logger } from '@feed/shared';
 import {
   clearKnownNamesCache,
+  extractProperNouns,
   getKnownNames,
   validateCoherence,
   validateGrounding,
@@ -69,10 +70,14 @@ export class ContentQualityGate {
     scores.push(entity.score);
     if (!entity.passed) reasons.push(...entity.reasons);
 
-    // 3. Grounding: parody should stay topically related to original
-    const grounding = await validateGrounding(originalTitle, parodyTitle);
-    scores.push(grounding.confidence);
-    if (!grounding.grounded) reasons.push(...grounding.reasons);
+    // 3. Grounding: parody should stay topically related to original.
+    // Skipped (cheapest-first) when the structure is already invalid, since
+    // grounding may call the embedding API.
+    if (structure.passed) {
+      const grounding = await validateGrounding(originalTitle, parodyTitle);
+      scores.push(grounding.confidence);
+      if (!grounding.grounded) reasons.push(...grounding.reasons);
+    }
 
     // If parody has content body, check its coherence too
     if (parodyContent) {
@@ -128,11 +133,14 @@ export class ContentQualityGate {
     scores.push(entity.score);
     if (!entity.passed) reasons.push(...entity.reasons);
 
-    // 3. Source-relative or coherence check
+    // 3. Source-relative or coherence check. Embedding-backed grounding is
+    // skipped (cheapest-first) when the structure is already invalid.
     if (sourceContext) {
-      const grounding = await validateGrounding(sourceContext, factText);
-      scores.push(grounding.confidence);
-      if (!grounding.grounded) reasons.push(...grounding.reasons);
+      if (structure.passed) {
+        const grounding = await validateGrounding(sourceContext, factText);
+        scores.push(grounding.confidence);
+        if (!grounding.grounded) reasons.push(...grounding.reasons);
+      }
     } else {
       const coherence = validateCoherence(factText);
       scores.push(coherence.confidence);
@@ -183,10 +191,13 @@ export class ContentQualityGate {
     scores.push(entity.score);
     if (!entity.passed) reasons.push(...entity.reasons);
 
-    // 3. Grounding: article should relate to its source context
-    const grounding = await validateGrounding(sourceContext, articleText);
-    scores.push(grounding.confidence);
-    if (!grounding.grounded) reasons.push(...grounding.reasons);
+    // 3. Grounding: article should relate to its source context (skipped
+    // when the structure is already invalid — avoids embedding calls)
+    if (structure.passed) {
+      const grounding = await validateGrounding(sourceContext, articleText);
+      scores.push(grounding.confidence);
+      if (!grounding.grounded) reasons.push(...grounding.reasons);
+    }
 
     const compositeScore =
       scores.length > 0
@@ -267,16 +278,10 @@ export class ContentQualityGate {
     // Use shared cache from content-grounding-validator
     const knownNames = getKnownNames();
 
-    const properNounPattern = /\b([A-Z][a-z]+(?:\s+[A-Z][a-z]+)+)\b/g;
-    const matches = text.match(properNounPattern) ?? [];
-
-    const unknownEntities: string[] = [];
-    for (const match of matches) {
-      const lower = match.toLowerCase();
-      if (!knownNames.has(lower)) {
-        unknownEntities.push(match);
-      }
-    }
+    // Shared extraction with content-grounding-validator (distinct names).
+    const unknownEntities = extractProperNouns(text).filter(
+      (name) => !knownNames.has(name.toLowerCase())
+    );
 
     // Allow up to MAX_UNKNOWN_ENTITIES unknown proper nouns (could be real-world references),
     // but more suggests the LLM is inventing entities

@@ -1,7 +1,11 @@
 /**
  * Reply Rate Limiter Service
  *
- * Enforces exactly 1 reply per hour per NPC for each player.
+ * Enforces a minimum 55-minute gap between a player's replies to the same
+ * NPC; replies inside the 55–65 minute window extend the hourly streak.
+ *
+ * Note: canReply and recordReply are separate calls, so concurrent replies can
+ * both pass the check (TODO: claim and insert in one transaction).
  */
 
 import { and, db, desc, eq, userInteractions } from '@feed/db';
@@ -172,122 +176,5 @@ export class ReplyRateLimiter {
       qualityScore,
       timestamp: new Date(),
     });
-  }
-
-  /**
-   * Get user's reply statistics for an NPC
-   */
-  static async getReplyStats(userId: string, npcId: string) {
-    const interactions = await db
-      .select()
-      .from(userInteractions)
-      .where(
-        and(
-          eq(userInteractions.userId, userId),
-          eq(userInteractions.npcId, npcId)
-        )
-      )
-      .orderBy(desc(userInteractions.timestamp));
-
-    if (interactions.length === 0) {
-      return {
-        totalReplies: 0,
-        currentStreak: 0,
-        longestStreak: 0,
-        averageQuality: 0,
-        lastReplyAt: null,
-      };
-    }
-
-    const currentStreak = await ReplyRateLimiter.calculateReplyStreak(
-      userId,
-      npcId
-    );
-    const averageQuality =
-      interactions.reduce((sum, i) => sum + i.qualityScore, 0) /
-      interactions.length;
-
-    // Calculate longest streak from all historical interactions
-    const longestStreak = await ReplyRateLimiter.calculateLongestStreak(
-      userId,
-      npcId,
-      interactions
-    );
-
-    return {
-      totalReplies: interactions.length,
-      currentStreak,
-      longestStreak,
-      averageQuality,
-      lastReplyAt: interactions[0]?.timestamp,
-    };
-  }
-
-  /**
-   * Calculate longest consecutive reply streak from all interactions
-   */
-  private static async calculateLongestStreak(
-    _userId: string,
-    _npcId: string,
-    interactions: Array<{ timestamp: Date }>
-  ): Promise<number> {
-    if (interactions.length < 2) return interactions.length;
-
-    let maxStreak = 1;
-    let currentStreak = 1;
-
-    for (let i = 0; i < interactions.length - 1; i++) {
-      const current = interactions[i];
-      const next = interactions[i + 1];
-      if (!current || !next) continue;
-      const gap = current.timestamp.getTime() - next.timestamp.getTime();
-
-      if (
-        gap >= ReplyRateLimiter.MIN_REPLY_INTERVAL_MS &&
-        gap <= ReplyRateLimiter.MAX_REPLY_INTERVAL_MS
-      ) {
-        currentStreak++;
-        if (currentStreak > maxStreak) {
-          maxStreak = currentStreak;
-        }
-      } else {
-        currentStreak = 1;
-      }
-    }
-
-    return maxStreak;
-  }
-
-  /**
-   * Get all NPCs user has replied to with their stats
-   */
-  static async getAllReplyStats(userId: string) {
-    const interactions = await db
-      .select()
-      .from(userInteractions)
-      .where(eq(userInteractions.userId, userId))
-      .orderBy(desc(userInteractions.timestamp));
-
-    // Group by NPC
-    const npcMap = new Map<string, typeof interactions>();
-    for (const interaction of interactions) {
-      if (!npcMap.has(interaction.npcId)) {
-        npcMap.set(interaction.npcId, []);
-      }
-      npcMap.get(interaction.npcId)!.push(interaction);
-    }
-
-    // Calculate stats for each NPC
-    const stats = await Promise.all(
-      Array.from(npcMap.keys()).map(async (npcId) => {
-        const npcStats = await ReplyRateLimiter.getReplyStats(userId, npcId);
-        return {
-          npcId,
-          ...npcStats,
-        };
-      })
-    );
-
-    return stats;
   }
 }

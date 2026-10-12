@@ -16,7 +16,8 @@ import {
   RefreshCw,
   TrendingUp,
 } from 'lucide-react';
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
+import { z } from 'zod';
 import { AdminStandalonePage } from '@/components/admin/AdminStandalonePage';
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert';
 import { Badge } from '@/components/ui/badge';
@@ -31,68 +32,81 @@ import {
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { apiUrl } from '@/utils/api-url';
 
-interface ModelInfo {
-  modelId: string;
-  version: string;
-  status: string;
-  benchmarkScore: number | null;
-  avgReward: number | null;
-  deployedAt: string | null;
-  createdAt: string;
-}
+const ModelInfoSchema = z.object({
+  modelId: z.string(),
+  version: z.string(),
+  status: z.string(),
+  benchmarkScore: z.number().nullable(),
+  avgReward: z.number().nullable(),
+  deployedAt: z.string().nullable(),
+  createdAt: z.string(),
+});
+type ModelInfo = z.infer<typeof ModelInfoSchema>;
 
-interface BenchmarkSummary {
-  totalBenchmarked: number;
-  topModels: Array<{
-    modelId: string;
-    version: string;
-    score: number | null;
-    accuracy: number | null;
-    status: string;
-    createdAt: string;
-  }>;
-  recentModels: Array<{
-    modelId: string;
-    version: string;
-    score: number | null;
-    accuracy: number | null;
-    status: string;
-    createdAt: string;
-  }>;
-}
+const BenchmarkEntrySchema = z.object({
+  modelId: z.string(),
+  version: z.string(),
+  score: z.number().nullable(),
+  accuracy: z.number().nullable(),
+  status: z.string(),
+  createdAt: z.string(),
+});
 
-interface ModelSelection {
-  summary: {
-    bundleCount: number;
-    trainedModelCount: number;
-    bestModel: string | null;
-    bestScore: number | null;
-    recommendation: string;
-  };
-  selection: {
-    modelId: string;
-    modelPath: string;
-    strategy: string;
-    reason: string;
-    metadata?: {
-      bundleCount?: number;
-      bestModelScore?: number;
-      baseModel?: string;
-    };
-  } | null;
-  selectionError: string | null;
-}
+const BenchmarkSummarySchema = z.object({
+  totalBenchmarked: z.number(),
+  topModels: z.array(BenchmarkEntrySchema),
+  recentModels: z.array(BenchmarkEntrySchema),
+});
+type BenchmarkSummary = z.infer<typeof BenchmarkSummarySchema>;
 
-interface TrainingStatus {
-  ready: boolean;
-  reason: string;
-  stats: {
-    totalTrajectories: number;
-    unscoredTrajectories: number;
-    scenarioGroups: number;
-    dataQuality: number;
-  };
-}
+const ModelSelectionSchema = z.object({
+  success: z.literal(true),
+  summary: z.object({
+    bundleCount: z.number(),
+    trainedModelCount: z.number(),
+    bestModel: z.string().nullable(),
+    bestScore: z.number().nullable(),
+    recommendation: z.string(),
+  }),
+  selection: z
+    .object({
+      modelId: z.string(),
+      modelPath: z.string(),
+      strategy: z.string(),
+      reason: z.string(),
+      metadata: z
+        .object({
+          bundleCount: z.number().optional(),
+          bestModelScore: z.number().optional(),
+          baseModel: z.string().optional(),
+        })
+        .optional(),
+    })
+    .nullable(),
+  selectionError: z.string().nullable(),
+});
+type ModelSelection = z.infer<typeof ModelSelectionSchema>;
+
+const TrainingStatusSchema = z.object({
+  ready: z.boolean(),
+  reason: z.string(),
+  stats: z.object({
+    totalTrajectories: z.number(),
+    unscoredTrajectories: z.number(),
+    scenarioGroups: z.number(),
+    dataQuality: z.number(),
+  }),
+});
+type TrainingStatus = z.infer<typeof TrainingStatusSchema>;
+
+const ActionResultSchema = z.object({
+  success: z.boolean().optional(),
+  error: z.string().optional(),
+  benchmark: z
+    .object({ benchmarkScore: z.number().nullable().optional() })
+    .optional(),
+});
+type ActionResult = z.infer<typeof ActionResultSchema>;
 
 export default function RLTrainingDashboard() {
   const [models, setModels] = useState<ModelInfo[]>([]);
@@ -107,89 +121,169 @@ export default function RLTrainingDashboard() {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [actionStatus, setActionStatus] = useState<string | null>(null);
+  const [actionPending, setActionPending] = useState(false);
+  const loadingRef = useRef(false);
+  const statusTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const refetchTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
-  // Fetch all data
+  useEffect(
+    () => () => {
+      if (statusTimer.current) clearTimeout(statusTimer.current);
+      if (refetchTimer.current) clearTimeout(refetchTimer.current);
+    },
+    []
+  );
+
+  // Fetch all data. The four sources are independent, so they load in
+  // parallel and each failure is reported without discarding the others.
   const fetchData = useCallback(async () => {
+    if (loadingRef.current) return; // avoid overlapping polls
+    loadingRef.current = true;
     setLoading(true);
-    setError(null);
 
-    // Fetch models
-    const modelsRes = await fetch(apiUrl('/api/admin/training/models'));
-    const modelsData = await modelsRes.json();
-    if (modelsData.models) {
-      setModels(modelsData.models);
-    }
+    const load = async <T,>(path: string, schema: z.ZodType<T>) => {
+      const res = await fetch(apiUrl(path));
+      if (!res.ok) throw new Error(`${path} returned HTTP ${res.status}`);
+      const parsed = schema.safeParse(await res.json());
+      if (!parsed.success) throw new Error(`${path}: unexpected response`);
+      return parsed.data;
+    };
 
-    // Fetch benchmark summary
-    const benchmarkRes = await fetch(apiUrl('/api/admin/training/benchmark'));
-    const benchmarkData = await benchmarkRes.json();
-    if (benchmarkData.summary) {
-      setBenchmarkSummary(benchmarkData.summary);
-    }
+    const [modelsRes, benchmarkRes, selectionRes, statusRes] =
+      await Promise.allSettled([
+        load(
+          '/api/admin/training/models',
+          z.object({ models: z.array(ModelInfoSchema) })
+        ),
+        load(
+          '/api/admin/training/benchmark',
+          z.object({ summary: BenchmarkSummarySchema })
+        ),
+        load('/api/admin/training/model-selection', ModelSelectionSchema),
+        load('/api/admin/training/trigger', TrainingStatusSchema),
+      ]);
 
-    // Fetch model selection
-    const selectionRes = await fetch(
-      apiUrl('/api/admin/training/model-selection')
-    );
-    const selectionData = await selectionRes.json();
-    if (selectionData.success) {
-      setModelSelection(selectionData);
-    }
+    const failures: string[] = [];
+    const record = (r: PromiseRejectedResult) =>
+      failures.push(
+        r.reason instanceof Error ? r.reason.message : String(r.reason)
+      );
 
-    // Fetch training status
-    const statusRes = await fetch(apiUrl('/api/admin/training/trigger'));
-    const statusData = await statusRes.json();
-    if (statusData) {
-      setTrainingStatus(statusData);
-    }
+    if (modelsRes.status === 'fulfilled') setModels(modelsRes.value.models);
+    else record(modelsRes);
+    if (benchmarkRes.status === 'fulfilled')
+      setBenchmarkSummary(benchmarkRes.value.summary);
+    else record(benchmarkRes);
+    if (selectionRes.status === 'fulfilled')
+      setModelSelection(selectionRes.value);
+    else record(selectionRes);
+    if (statusRes.status === 'fulfilled') setTrainingStatus(statusRes.value);
+    else record(statusRes);
 
+    setError(failures.length > 0 ? failures.join('; ') : null);
+    loadingRef.current = false;
     setLoading(false);
   }, []);
 
-  // Trigger training
-  const triggerTraining = async (force = false) => {
-    setActionStatus('Triggering training...');
-    const res = await fetch(apiUrl('/api/admin/training/trigger'), {
+  const finishAction = (message: string, clearAfterMs: number) => {
+    setActionStatus(message);
+    if (statusTimer.current) clearTimeout(statusTimer.current);
+    statusTimer.current = setTimeout(() => setActionStatus(null), clearAfterMs);
+  };
+
+  const scheduleRefetch = () => {
+    if (refetchTimer.current) clearTimeout(refetchTimer.current);
+    refetchTimer.current = setTimeout(() => void fetchData(), 2000);
+  };
+
+  const postAction = async (
+    path: string,
+    body: Record<string, string | boolean>
+  ): Promise<ActionResult> => {
+    const res = await fetch(apiUrl(path), {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ force }),
+      body: JSON.stringify(body),
     });
-    const data = await res.json();
-
-    if (data.success) {
-      setActionStatus('✅ Training triggered successfully!');
-      setTimeout(() => fetchData(), 2000);
-    } else {
-      setActionStatus(`❌ ${data.error || 'Failed to trigger training'}`);
+    const parsed = ActionResultSchema.safeParse(
+      await res.json().catch(() => null)
+    );
+    if (!parsed.success) {
+      return {
+        success: false,
+        error: `Unexpected response (HTTP ${res.status})`,
+      };
     }
-    setTimeout(() => setActionStatus(null), 5000);
+    if (!res.ok && parsed.data.success === undefined) {
+      return {
+        success: false,
+        error: parsed.data.error ?? `HTTP ${res.status}`,
+      };
+    }
+    return parsed.data;
+  };
+
+  // Trigger training
+  const triggerTraining = async (force = false) => {
+    if (actionPending) return;
+    setActionPending(true);
+    if (statusTimer.current) clearTimeout(statusTimer.current);
+    setActionStatus('Triggering training...');
+    try {
+      const data = await postAction('/api/admin/training/trigger', { force });
+      if (data.success === true) {
+        finishAction('✅ Training triggered successfully!', 5000);
+        scheduleRefetch();
+      } else {
+        finishAction(`❌ ${data.error ?? 'Failed to trigger training'}`, 5000);
+      }
+    } catch (err) {
+      finishAction(
+        `❌ ${err instanceof Error ? err.message : 'Failed to trigger training'}`,
+        5000
+      );
+    } finally {
+      setActionPending(false);
+    }
   };
 
   // Benchmark a model
   const benchmarkModel = async (modelId: string) => {
+    if (actionPending) return;
+    setActionPending(true);
+    if (statusTimer.current) clearTimeout(statusTimer.current);
     setActionStatus(`Benchmarking ${modelId}...`);
-    const res = await fetch(apiUrl('/api/admin/training/benchmark'), {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ modelId, compare: true }),
-    });
-    const data = await res.json();
-
-    if (data.success) {
-      setActionStatus(
-        `✅ Benchmark complete! Score: ${data.benchmark.benchmarkScore.toFixed(3)}`
+    try {
+      const data = await postAction('/api/admin/training/benchmark', {
+        modelId,
+        compare: true,
+      });
+      if (data.success === true) {
+        const score = data.benchmark?.benchmarkScore;
+        finishAction(
+          typeof score === 'number'
+            ? `✅ Benchmark complete! Score: ${score.toFixed(3)}`
+            : '✅ Benchmark complete!',
+          8000
+        );
+        scheduleRefetch();
+      } else {
+        finishAction(`❌ ${data.error ?? 'Benchmarking failed'}`, 8000);
+      }
+    } catch (err) {
+      finishAction(
+        `❌ ${err instanceof Error ? err.message : 'Benchmarking failed'}`,
+        8000
       );
-      setTimeout(() => fetchData(), 2000);
-    } else {
-      setActionStatus(`❌ ${data.error || 'Benchmarking failed'}`);
+    } finally {
+      setActionPending(false);
     }
-    setTimeout(() => setActionStatus(null), 8000);
   };
 
   useEffect(() => {
-    fetchData();
+    void fetchData();
     // Auto-refresh every 30 seconds
-    const interval = setInterval(fetchData, 30000);
+    const interval = setInterval(() => void fetchData(), 30000);
     return () => clearInterval(interval);
   }, [fetchData]);
 
@@ -253,7 +347,7 @@ export default function RLTrainingDashboard() {
           </CardHeader>
           <CardContent>
             <div className="font-bold text-2xl">
-              {benchmarkSummary?.totalBenchmarked || 0}
+              {benchmarkSummary?.totalBenchmarked ?? '—'}
             </div>
             <p className="text-muted-foreground text-xs">
               {models.filter((m) => m.benchmarkScore !== null).length}/
@@ -271,10 +365,10 @@ export default function RLTrainingDashboard() {
           </CardHeader>
           <CardContent>
             <div className="font-bold text-2xl">
-              {modelSelection?.summary.bundleCount || 0}
+              {modelSelection?.summary.bundleCount ?? '—'}
             </div>
             <p className="text-muted-foreground text-xs">
-              {trainingStatus?.stats.totalTrajectories || 0} trajectories
+              {trainingStatus?.stats.totalTrajectories ?? '—'} trajectories
             </p>
           </CardContent>
         </Card>
@@ -288,11 +382,17 @@ export default function RLTrainingDashboard() {
           </CardHeader>
           <CardContent>
             <div className="font-bold text-2xl">
-              {trainingStatus?.ready ? '✅ Ready' : '⏳ Waiting'}
+              {trainingStatus === null
+                ? '—'
+                : trainingStatus.ready
+                  ? '✅ Ready'
+                  : '⏳ Waiting'}
             </div>
             <p className="text-muted-foreground text-xs">
               Quality:{' '}
-              {((trainingStatus?.stats.dataQuality || 0) * 100).toFixed(0)}%
+              {trainingStatus
+                ? `${(trainingStatus.stats.dataQuality * 100).toFixed(0)}%`
+                : '—'}
             </p>
           </CardContent>
         </Card>
@@ -345,10 +445,10 @@ export default function RLTrainingDashboard() {
                         </div>
                         <div className="mt-1 text-muted-foreground text-sm">
                           Version: {model.version}
-                          {model.benchmarkScore && (
+                          {model.benchmarkScore !== null && (
                             <> • Score: {model.benchmarkScore.toFixed(3)}</>
                           )}
-                          {model.avgReward && (
+                          {model.avgReward !== null && (
                             <> • Avg Reward: {model.avgReward.toFixed(3)}</>
                           )}
                         </div>
@@ -364,11 +464,12 @@ export default function RLTrainingDashboard() {
                         </div>
                       </div>
                       <div className="flex gap-2">
-                        {!model.benchmarkScore && (
+                        {model.benchmarkScore === null && (
                           <Button
                             size="sm"
                             variant="outline"
-                            onClick={() => benchmarkModel(model.modelId)}
+                            disabled={actionPending}
+                            onClick={() => void benchmarkModel(model.modelId)}
                           >
                             Benchmark
                           </Button>
@@ -412,8 +513,8 @@ export default function RLTrainingDashboard() {
                           <div className="flex-1">
                             <div className="font-medium">{model.modelId}</div>
                             <div className="text-muted-foreground text-sm">
-                              Score: {model.score?.toFixed(3) || 'N/A'}
-                              {model.accuracy && (
+                              Score: {model.score?.toFixed(3) ?? 'N/A'}
+                              {model.accuracy !== null && (
                                 <>
                                   {' '}
                                   • Accuracy:{' '}
@@ -465,10 +566,10 @@ export default function RLTrainingDashboard() {
                         </div>
                         <div className="text-right">
                           <div className="font-semibold">
-                            {model.score?.toFixed(3) || 'N/A'}
+                            {model.score?.toFixed(3) ?? 'N/A'}
                           </div>
                           <div className="text-muted-foreground text-sm">
-                            {model.accuracy
+                            {model.accuracy !== null
                               ? `${(model.accuracy * 100).toFixed(1)}%`
                               : 'N/A'}
                           </div>
@@ -654,15 +755,16 @@ export default function RLTrainingDashboard() {
                 </p>
                 <div className="flex gap-2">
                   <Button
-                    onClick={() => triggerTraining(false)}
-                    disabled={!trainingStatus?.ready}
+                    onClick={() => void triggerTraining(false)}
+                    disabled={actionPending || !trainingStatus?.ready}
                   >
                     <Play className="mr-2 h-4 w-4" />
                     Trigger Training
                   </Button>
                   <Button
                     variant="outline"
-                    onClick={() => triggerTraining(true)}
+                    onClick={() => void triggerTraining(true)}
+                    disabled={actionPending}
                     className="border-red-500 text-red-500 hover:bg-red-50"
                   >
                     <Play className="mr-2 h-4 w-4" />
@@ -689,7 +791,9 @@ export default function RLTrainingDashboard() {
                 </p>
                 <div className="space-y-2">
                   {models
-                    .filter((m) => !m.benchmarkScore && m.status === 'ready')
+                    .filter(
+                      (m) => m.benchmarkScore === null && m.status === 'ready'
+                    )
                     .map((model) => (
                       <div
                         key={model.modelId}
@@ -699,14 +803,15 @@ export default function RLTrainingDashboard() {
                         <Button
                           size="sm"
                           variant="outline"
-                          onClick={() => benchmarkModel(model.modelId)}
+                          disabled={actionPending}
+                          onClick={() => void benchmarkModel(model.modelId)}
                         >
                           Benchmark
                         </Button>
                       </div>
                     ))}
                   {models.filter(
-                    (m) => !m.benchmarkScore && m.status === 'ready'
+                    (m) => m.benchmarkScore === null && m.status === 'ready'
                   ).length === 0 && (
                     <div className="text-muted-foreground text-sm">
                       No models need benchmarking

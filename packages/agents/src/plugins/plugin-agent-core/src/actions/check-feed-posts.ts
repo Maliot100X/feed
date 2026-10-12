@@ -107,7 +107,11 @@ export const checkFeedPostsAction: Action = {
       | undefined;
 
     // Limit between 1 and 50, default to 10
-    const limit = Math.min(Math.max(actionParams?.limit ?? 10, 1), 50);
+    const rawLimit: unknown = actionParams?.limit;
+    const limit =
+      typeof rawLimit === 'number' && Number.isInteger(rawLimit)
+        ? Math.min(Math.max(rawLimit, 1), 50)
+        : 10;
 
     try {
       // Fetch posts from the API with timeout to prevent hanging
@@ -117,20 +121,19 @@ export const checkFeedPostsAction: Action = {
       const controller = new AbortController();
       const timeoutId = setTimeout(() => controller.abort(), 30000); // 30 second timeout
 
-      let response: Response;
+      // Keep the timeout armed until the body is fully read.
+      let data: FeedApiResponse;
       try {
-        response = await fetch(`${baseUrl}/api/posts?limit=${limit}`, {
+        const response = await fetch(`${baseUrl}/api/posts?limit=${limit}`, {
           signal: controller.signal,
         });
+        if (!response.ok) {
+          throw new Error(`Failed to fetch feed: ${response.status}`);
+        }
+        data = (await response.json()) as FeedApiResponse;
       } finally {
         clearTimeout(timeoutId);
       }
-
-      if (!response.ok) {
-        throw new Error(`Failed to fetch feed: ${response.status}`);
-      }
-
-      const data = (await response.json()) as FeedApiResponse;
 
       if (!data.success || !data.posts) {
         return {

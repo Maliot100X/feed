@@ -16,6 +16,7 @@
  * @module engine/services/event-market-linker
  */
 
+import { PredictionPricing } from '@feed/core/markets/prediction/pricing';
 import {
   and,
   db,
@@ -23,7 +24,9 @@ import {
   eq,
   gte,
   inArray,
+  lte,
   markets,
+  ne,
   questions,
   worldEvents,
 } from '@feed/db';
@@ -91,7 +94,8 @@ export class EventMarketLinkerService {
     questionNumber: number,
     lookbackHours = 24
   ): Promise<EventMarketImpact[]> {
-    const lookbackDate = new Date(Date.now() - lookbackHours * 60 * 60 * 1000);
+    const now = new Date();
+    const lookbackDate = lookbackStart(now, lookbackHours);
 
     // Get events linked to this question
     const events = await db
@@ -106,7 +110,10 @@ export class EventMarketLinkerService {
       .where(
         and(
           eq(worldEvents.relatedQuestion, questionNumber),
-          gte(worldEvents.timestamp, lookbackDate)
+          gte(worldEvents.timestamp, lookbackDate),
+          // Never surface future-scheduled or private events to traders
+          lte(worldEvents.timestamp, now),
+          ne(worldEvents.visibility, 'private')
         )
       )
       .orderBy(desc(worldEvents.timestamp))
@@ -183,7 +190,8 @@ export class EventMarketLinkerService {
   static async getMarketEventSummaries(
     lookbackHours = 24
   ): Promise<MarketEventSummary[]> {
-    const lookbackDate = new Date(Date.now() - lookbackHours * 60 * 60 * 1000);
+    const now = new Date();
+    const lookbackDate = lookbackStart(now, lookbackHours);
 
     // Get all recent events with linked questions
     const eventsWithQuestions = await db
@@ -199,6 +207,9 @@ export class EventMarketLinkerService {
       .where(
         and(
           gte(worldEvents.timestamp, lookbackDate),
+          // Never surface future-scheduled or private events to traders
+          lte(worldEvents.timestamp, now),
+          ne(worldEvents.visibility, 'private'),
           // Only include events with valid relatedQuestion values
           gte(worldEvents.relatedQuestion, 1)
         )
@@ -274,9 +285,13 @@ export class EventMarketLinkerService {
       // Calculate current probability
       const yesShares = Number(market.yesShares);
       const noShares = Number(market.noShares);
-      const totalShares = yesShares + noShares;
-      const currentProbability =
-        totalShares > 0 ? yesShares / totalShares : 0.5;
+      // Canonical CPMM quote: YES price is noShares / total (the raw
+      // yesShares fraction is the inverse probability).
+      const currentProbability = PredictionPricing.getCurrentPrice(
+        yesShares,
+        noShares,
+        'yes'
+      );
 
       // Calculate impacts for each event
       const recentImpacts: EventMarketImpact[] = events.map((event) => {
@@ -421,4 +436,13 @@ export class EventMarketLinkerService {
 
     return baseImpact * clarityMultiplier;
   }
+}
+
+function lookbackStart(now: Date, lookbackHours: number): Date {
+  if (!Number.isFinite(lookbackHours) || lookbackHours <= 0) {
+    throw new RangeError(
+      `lookbackHours must be a positive finite number, got ${lookbackHours}`
+    );
+  }
+  return new Date(now.getTime() - lookbackHours * 60 * 60 * 1000);
 }

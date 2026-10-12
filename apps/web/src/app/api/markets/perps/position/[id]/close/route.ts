@@ -1,5 +1,6 @@
 import {
   authenticate,
+  BadRequestError,
   checkRateLimitAsync,
   invalidateMarketsApiPerpsSnapshot,
   RATE_LIMIT_CONFIGS,
@@ -19,8 +20,47 @@ import { trackServerEvent } from '@/lib/posthog/server';
 import { createPerpMarketService } from '../../../_adapters';
 
 const IdParamSchema = z.object({
-  id: z.string(),
+  id: z.string().trim().min(1).max(100),
 });
+
+type CloseOptions = { percentage?: number; slippage?: number };
+
+/**
+ * Parse the optional close body. An absent/empty body (or `{}`) means a full
+ * market close with no slippage bound, matching existing clients. A body that
+ * is present but not valid JSON, or fails the schema, is rejected before any
+ * mutation. Limit closes are not supported by the service, so they are
+ * rejected rather than silently executed at market.
+ */
+async function parseCloseBody(request: NextRequest): Promise<CloseOptions> {
+  const raw = await request.text();
+  if (raw.trim() === '') return {};
+
+  let body: unknown;
+  try {
+    body = JSON.parse(raw);
+  } catch {
+    throw new BadRequestError('Request body must be valid JSON');
+  }
+
+  if (
+    typeof body === 'object' &&
+    body !== null &&
+    !Array.isArray(body) &&
+    Object.keys(body).length === 0
+  ) {
+    return {};
+  }
+
+  const parsed = ClosePerpPositionSchema.parse(body);
+  if (parsed.orderType !== 'market') {
+    throw new BadRequestError(
+      'Only market close orders are supported',
+      'UNSUPPORTED_ORDER_TYPE'
+    );
+  }
+  return { percentage: parsed.percentage, slippage: parsed.slippage };
+}
 
 /**
  * POST /api/markets/perps/position/[id]/close
@@ -47,21 +87,7 @@ export const POST = withErrorHandling(
     const { id: positionId } = IdParamSchema.parse(await context.params);
 
     // Parse and validate request body (optional for partial close)
-    let body: Record<string, unknown> = {};
-    try {
-      body = await request.json();
-    } catch {
-      // Body is optional for this endpoint
-    }
-    const parsed =
-      Object.keys(body).length > 0
-        ? ClosePerpPositionSchema.parse(body)
-        : {
-            percentage: undefined as number | undefined,
-            slippage: undefined as number | undefined,
-            orderType: 'market' as const,
-            limitPrice: undefined as number | undefined,
-          };
+    const parsed = await parseCloseBody(request);
 
     // Create service with fee processor, broadcast, and price impact protection
     // Price impact adjustment (BF-75) is handled inside the service via PriceImpactPort,

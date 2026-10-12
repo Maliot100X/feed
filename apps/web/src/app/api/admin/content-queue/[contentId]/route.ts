@@ -11,13 +11,24 @@
 
 import {
   checkRateLimitAndDuplicates,
+  errorResponse,
   logAdminModify,
   RATE_LIMIT_CONFIGS,
   requireAdmin,
   successResponse,
   withErrorHandling,
 } from '@feed/api';
-import { comments, db, eq, posts, reports, withTransaction } from '@feed/db';
+import {
+  and,
+  comments,
+  db,
+  eq,
+  inArray,
+  isNull,
+  posts,
+  reports,
+  withTransaction,
+} from '@feed/db';
 import { logger } from '@feed/shared';
 import type { NextRequest } from 'next/server';
 import { z } from 'zod';
@@ -31,6 +42,10 @@ import { z } from 'zod';
  * soft deletes. If hard delete is needed in the future, it should be a
  * separate, more privileged action with additional safeguards.
  */
+// Only open reports are transitioned; already resolved/dismissed reports keep
+// their original reviewer and resolution.
+const OPEN_REPORT_STATUSES = inArray(reports.status, ['pending', 'reviewing']);
+
 const ModerateRequestSchema = z.object({
   action: z.enum(['approve', 'hide']),
   contentType: z.enum(['post', 'comment']),
@@ -71,10 +86,9 @@ export const POST = withErrorHandling(
     // Validate request body with Zod schema
     const parseResult = ModerateRequestSchema.safeParse(await request.json());
     if (!parseResult.success) {
-      return successResponse(
-        { error: 'Invalid request', details: parseResult.error.flatten() },
-        400
-      );
+      return errorResponse('Invalid request', 'VALIDATION_ERROR', 400, {
+        details: parseResult.error.flatten(),
+      });
     }
     const { action, contentType, reason } = parseResult.data;
 
@@ -93,7 +107,7 @@ export const POST = withErrorHandling(
         .limit(1);
 
       if (!existingPost) {
-        return successResponse({ error: 'Post not found' }, 404);
+        return errorResponse('Post not found', 'NOT_FOUND', 404);
       }
 
       const clientIp = getClientIp(request);
@@ -110,7 +124,9 @@ export const POST = withErrorHandling(
             resolvedAt: new Date(),
             updatedAt: new Date(),
           })
-          .where(eq(reports.reportedPostId, contentId));
+          .where(
+            and(eq(reports.reportedPostId, contentId), OPEN_REPORT_STATUSES)
+          );
 
         await logAdminModify({
           adminId: admin.userId,
@@ -129,7 +145,8 @@ export const POST = withErrorHandling(
           await tx
             .update(posts)
             .set({ deletedAt: new Date() })
-            .where(eq(posts.id, contentId));
+            // Keep the original deletedAt if already hidden (idempotent)
+            .where(and(eq(posts.id, contentId), isNull(posts.deletedAt)));
 
           // Mark reports as resolved
           await tx
@@ -141,14 +158,18 @@ export const POST = withErrorHandling(
               resolvedAt: new Date(),
               updatedAt: new Date(),
             })
-            .where(eq(reports.reportedPostId, contentId));
+            .where(
+              and(eq(reports.reportedPostId, contentId), OPEN_REPORT_STATUSES)
+            );
         });
 
         await logAdminModify({
           adminId: admin.userId,
           resourceType: 'post',
           resourceId: contentId,
-          previousValue: { deletedAt: null },
+          previousValue: {
+            deletedAt: existingPost.deletedAt?.toISOString() ?? null,
+          },
           newValue: {
             deletedAt: new Date().toISOString(),
             reason: reason ?? null,
@@ -171,7 +192,7 @@ export const POST = withErrorHandling(
         .limit(1);
 
       if (!existingComment) {
-        return successResponse({ error: 'Comment not found' }, 404);
+        return errorResponse('Comment not found', 'NOT_FOUND', 404);
       }
 
       const clientIp = getClientIp(request);
@@ -188,7 +209,9 @@ export const POST = withErrorHandling(
             resolvedAt: new Date(),
             updatedAt: new Date(),
           })
-          .where(eq(reports.reportedCommentId, contentId));
+          .where(
+            and(eq(reports.reportedCommentId, contentId), OPEN_REPORT_STATUSES)
+          );
 
         await logAdminModify({
           adminId: admin.userId,
@@ -210,7 +233,8 @@ export const POST = withErrorHandling(
               deletedAt: new Date(),
               updatedAt: new Date(),
             })
-            .where(eq(comments.id, contentId));
+            // Keep the original deletedAt if already hidden (idempotent)
+            .where(and(eq(comments.id, contentId), isNull(comments.deletedAt)));
 
           // Mark reports as resolved (matching post hide behavior)
           await tx
@@ -222,14 +246,21 @@ export const POST = withErrorHandling(
               resolvedAt: new Date(),
               updatedAt: new Date(),
             })
-            .where(eq(reports.reportedCommentId, contentId));
+            .where(
+              and(
+                eq(reports.reportedCommentId, contentId),
+                OPEN_REPORT_STATUSES
+              )
+            );
         });
 
         await logAdminModify({
           adminId: admin.userId,
           resourceType: 'comment',
           resourceId: contentId,
-          previousValue: { deletedAt: null },
+          previousValue: {
+            deletedAt: existingComment.deletedAt?.toISOString() ?? null,
+          },
           newValue: {
             deletedAt: new Date().toISOString(),
             reason: reason ?? null,

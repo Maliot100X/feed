@@ -5,7 +5,15 @@
  * Uses a custom provider to avoid dependency on environment config.
  */
 
-import { afterEach, beforeEach, describe, expect, it, mock } from 'bun:test';
+import {
+  afterEach,
+  beforeEach,
+  describe,
+  expect,
+  it,
+  mock,
+  setSystemTime,
+} from 'bun:test';
 import {
   type NpcTradeRateLimitConfig,
   NpcTradeRateLimiter,
@@ -399,6 +407,21 @@ describe('NpcTradeRateLimiter', () => {
     it('should report cleanup count as 0 when no stale entries', () => {
       const cleaned = NpcTradeRateLimiter.cleanupStaleEntries();
       expect(cleaned).toBe(0);
+    });
+
+    it('counts an NPC once when it is stale in both maps', async () => {
+      setSystemTime(new Date('2026-01-01T12:00:00Z'));
+      await NpcTradeRateLimiter.recordTrade('stale-npc');
+      setSystemTime(new Date('2026-01-03T12:00:00Z'));
+      try {
+        expect(NpcTradeRateLimiter.cleanupStaleEntries()).toBe(1);
+        expect(NpcTradeRateLimiter.getProviderStats()).toEqual({
+          lastTradeTime: 0,
+          dailyTradeCount: 0,
+        });
+      } finally {
+        setSystemTime();
+      }
     });
   });
 });

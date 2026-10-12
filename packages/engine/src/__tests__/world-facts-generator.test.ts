@@ -60,6 +60,7 @@ const mockDb = {
 mock.module('@feed/db', () => ({
   db: mockDb,
   and: (...args: unknown[]) => args,
+  asc: (col: unknown) => col,
   desc: (col: unknown) => col,
   eq: (a: unknown, b: unknown) => [a, b],
   gte: (a: unknown, b: unknown) => [a, b],
@@ -278,5 +279,44 @@ describe('archiveOldFacts', () => {
     const result = await generator.generateNewWorldFacts();
     // archived should be 0 since we're below minimum
     expect(result.archived).toBe(0);
+  });
+});
+
+describe('generated count', () => {
+  test('does not count facts rejected by the quality gate as generated', async () => {
+    mockSelectResult.push({
+      id: 'event-1',
+      description: 'A public event happened in the satirical world today',
+      eventType: 'announcement',
+      visibility: 'public',
+      timestamp: new Date(),
+      text: 'Will the event happen?',
+      content: 'A post about the event',
+      authorId: 'actor-1',
+    });
+    mockDb.insert.mockClear();
+    const rejectedLlm = {
+      // Passes the >10 char extraction filter but fails the 15-char
+      // structural minimum of the quality gate
+      generateJSON: mock(() => Promise.resolve({ facts: ['Tiny fact!!!'] })),
+    } as unknown as ConstructorParameters<typeof WorldFactsGeneratorService>[1];
+
+    try {
+      const generator = new WorldFactsGeneratorService({}, rejectedLlm);
+      const result = await generator.generateNewWorldFacts();
+
+      expect(rejectedLlm?.generateJSON).toHaveBeenCalled();
+      expect(mockDb.insert).not.toHaveBeenCalled();
+      expect(result.generated).toBe(0);
+    } finally {
+      mockSelectResult.length = 0;
+    }
+  });
+
+  test('rejects non-integer configuration', () => {
+    expect(
+      () =>
+        new WorldFactsGeneratorService({ minActiveFacts: Number.NaN }, mockLlm)
+    ).toThrow('minActiveFacts must be a non-negative integer');
   });
 });

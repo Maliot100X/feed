@@ -10,6 +10,7 @@
 
 import {
   and,
+  asc,
   db,
   desc,
   eq,
@@ -62,14 +63,27 @@ const DEFAULT_CONFIG: WorldFactsGenerationConfig = {
  */
 export class WorldFactsGeneratorService {
   private config: WorldFactsGenerationConfig;
-  private llm: FeedLLMClient;
+  private llmClient: FeedLLMClient | undefined;
 
   constructor(
     config: Partial<WorldFactsGenerationConfig> = {},
     llm?: FeedLLMClient
   ) {
     this.config = { ...DEFAULT_CONFIG, ...config };
-    this.llm = llm ?? FeedLLMClient.forGameTick();
+    for (const [name, value] of Object.entries(this.config)) {
+      if (!Number.isInteger(value) || value < 0) {
+        throw new Error(
+          `WorldFactsGenerationConfig.${name} must be a non-negative integer, got ${value}`
+        );
+      }
+    }
+    this.llmClient = llm;
+  }
+
+  /** Created on first use so importing the singleton does not build an LLM client. */
+  private get llm(): FeedLLMClient {
+    this.llmClient ??= FeedLLMClient.forGameTick();
+    return this.llmClient;
   }
 
   /**
@@ -104,20 +118,28 @@ export class WorldFactsGeneratorService {
         this.generateFactsFromActorActivity(),
       ]);
 
-    // Combine and deduplicate
+    // Combine and drop exact duplicates (case/whitespace-insensitive)
+    const seenTexts = new Set<string>();
     const allNewFacts: GeneratedFact[] = [
       ...eventFacts,
       ...marketFacts,
       ...questionFacts,
       ...actorFacts,
-    ];
+    ].filter((fact) => {
+      const normalized = fact.text.trim().toLowerCase().replace(/\s+/g, ' ');
+      if (seenTexts.has(normalized)) return false;
+      seenTexts.add(normalized);
+      return true;
+    });
 
-    // Store the new facts
+    // Store the new facts; only committed inserts count as generated
     let storedCount = 0;
     for (const fact of allNewFacts.slice(0, this.config.maxFactsPerUpdate)) {
       try {
-        await this.storeFact(fact);
-        storedCount++;
+        const outcome = await this.storeFact(fact);
+        if (outcome === 'inserted') {
+          storedCount++;
+        }
       } catch (error) {
         logger.warn(
           'Failed to store world fact',
@@ -510,7 +532,9 @@ Return as XML:
    * Store a new world fact in the database after quality validation.
    * Skips the fact (no insert) if it fails the quality gate.
    */
-  private async storeFact(fact: GeneratedFact): Promise<void> {
+  private async storeFact(
+    fact: GeneratedFact
+  ): Promise<'inserted' | 'rejected'> {
     const { text: value, sourceContext, depth } = fact;
 
     // Quality gate: validate before insert (with source context for grounding)
@@ -528,7 +552,7 @@ Return as XML:
         },
         'WorldFactsGenerator'
       );
-      return;
+      return 'rejected';
     }
 
     // Generate a key from the first few words
@@ -566,6 +590,7 @@ Return as XML:
       lastUpdated: new Date(),
       updatedAt: new Date(),
     });
+    return 'inserted';
   }
 
   /**
@@ -594,15 +619,29 @@ Return as XML:
       return 0;
     }
 
-    // Archive old auto-generated facts
-    const result = await db
-      .update(worldFacts)
-      .set({ isActive: false })
+    // Archive the oldest eligible auto-generated facts, but never more than
+    // would take the active set below the configured floor.
+    const archiveBudget = activeCount - this.config.minActiveFacts;
+    const archivableIds = db
+      .select({ id: worldFacts.id })
+      .from(worldFacts)
       .where(
         and(
           eq(worldFacts.source, 'auto-generated'),
           eq(worldFacts.isActive, true),
           lte(worldFacts.createdAt, cutoffDate)
+        )
+      )
+      .orderBy(asc(worldFacts.createdAt))
+      .limit(archiveBudget);
+
+    const result = await db
+      .update(worldFacts)
+      .set({ isActive: false, updatedAt: new Date() })
+      .where(
+        and(
+          inArray(worldFacts.id, archivableIds),
+          eq(worldFacts.isActive, true)
         )
       )
       .returning({ id: worldFacts.id });
@@ -621,36 +660,27 @@ Return as XML:
     oldestFact: Date | null;
     newestFact: Date | null;
   }> {
-    const [totalResult, autoResult, facts] = await Promise.all([
-      db
-        .select({ count: sql<number>`count(*)::int` })
-        .from(worldFacts)
-        .where(eq(worldFacts.isActive, true)),
-      db
-        .select({ count: sql<number>`count(*)::int` })
-        .from(worldFacts)
-        .where(
-          and(
-            eq(worldFacts.isActive, true),
-            eq(worldFacts.source, 'auto-generated')
-          )
-        ),
-      db
-        .select({ createdAt: worldFacts.createdAt })
-        .from(worldFacts)
-        .where(eq(worldFacts.isActive, true))
-        .orderBy(desc(worldFacts.createdAt)),
-    ]);
+    const [row] = await db
+      .select({
+        total: sql<number>`count(*)::int`,
+        auto: sql<number>`count(*) filter (where ${worldFacts.source} = 'auto-generated')::int`,
+        oldest: sql<Date | null>`min(${worldFacts.createdAt})`,
+        newest: sql<Date | null>`max(${worldFacts.createdAt})`,
+      })
+      .from(worldFacts)
+      .where(eq(worldFacts.isActive, true));
 
-    const total = totalResult[0]?.count ?? 0;
-    const auto = autoResult[0]?.count ?? 0;
+    const total = row?.total ?? 0;
+    const auto = row?.auto ?? 0;
+    const toDate = (value: Date | string | null | undefined): Date | null =>
+      value == null ? null : new Date(value);
 
     return {
       totalActive: total,
       autoGenerated: auto,
       manual: total - auto,
-      oldestFact: facts.length > 0 ? facts[facts.length - 1]!.createdAt : null,
-      newestFact: facts.length > 0 ? facts[0]!.createdAt : null,
+      oldestFact: toDate(row?.oldest),
+      newestFact: toDate(row?.newest),
     };
   }
 }

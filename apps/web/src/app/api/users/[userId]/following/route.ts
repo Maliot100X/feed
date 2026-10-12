@@ -33,11 +33,6 @@
  *         schema:
  *           type: integer
  *         description: Results per page
- *       - in: query
- *         name: includeMutual
- *         schema:
- *           type: boolean
- *         description: Include mutual follow indicators
  *     responses:
  *       200:
  *         description: Following list retrieved successfully
@@ -75,10 +70,13 @@
  *                       tier:
  *                         type: string
  *                         nullable: true
- *                       isMutualFollow:
+ *                       viewerFollows:
  *                         type: boolean
  *                 count:
  *                   type: integer
+ *                   description: Total number of relations (all pages)
+ *                 hasMore:
+ *                   type: boolean
  *
  * @example
  * ```typescript
@@ -108,7 +106,6 @@ import {
 } from '@feed/db';
 import { StaticDataRegistry } from '@feed/engine';
 import {
-  logger,
   toISO,
   UserFollowersQuerySchema,
   UserIdParamSchema,
@@ -125,7 +122,8 @@ interface FollowingResponse {
   isActor: boolean;
   type?: 'user' | 'actor';
   tier?: string | null;
-  isMutualFollow?: boolean;
+  /** True when the authenticated viewer follows this entry. */
+  viewerFollows?: boolean;
 }
 
 /**
@@ -144,12 +142,10 @@ export const GET = withErrorHandling(
 
     // Validate query parameters
     const { searchParams } = new URL(request.url);
-    const queryParams = {
-      page: searchParams.get('page'),
-      limit: searchParams.get('limit'),
-      includeMutual: searchParams.get('includeMutual'),
-    };
-    UserFollowersQuerySchema.parse(queryParams);
+    const { page, limit } = UserFollowersQuerySchema.parse({
+      page: searchParams.get('page') ?? undefined,
+      limit: searchParams.get('limit') ?? undefined,
+    });
 
     // Find target (user or actor) - throws NotFoundError if neither exists
     const { actor: targetActor, targetId } =
@@ -292,7 +288,7 @@ export const GET = withErrorHandling(
           followedAt: toISO(f.createdAt),
           type: 'user' as const,
           tier: null,
-          isMutualFollow: mutualFollowMap.get(f.followingId) || false,
+          viewerFollows: mutualFollowMap.get(f.followingId) || false,
         })),
         ...actorFollowsList.map((f) => {
           if (!f.actorName) {
@@ -306,7 +302,7 @@ export const GET = withErrorHandling(
               followedAt: toISO(f.createdAt),
               type: 'actor' as const,
               tier: null,
-              isMutualFollow: mutualFollowMap.get(f.actorId) || false,
+              viewerFollows: mutualFollowMap.get(f.actorId) || false,
             };
           }
 
@@ -320,7 +316,7 @@ export const GET = withErrorHandling(
             followedAt: toISO(f.createdAt),
             type: 'actor' as const,
             tier: f.actorTier || null,
-            isMutualFollow: mutualFollowMap.get(f.actorId) || false,
+            viewerFollows: mutualFollowMap.get(f.actorId) || false,
           };
         }),
       ].sort(
@@ -329,15 +325,15 @@ export const GET = withErrorHandling(
       );
     }
 
-    logger.info(
-      'Following list fetched successfully',
-      { targetId, count: followingList.length, isActor: !!targetActor },
-      'GET /api/users/[userId]/following'
-    );
+    // Apply pagination after merging/sorting all relation sources.
+    const total = followingList.length;
+    const offset = (page - 1) * limit;
+    const pageItems = followingList.slice(offset, offset + limit);
 
     return successResponse({
-      following: followingList,
-      count: followingList.length,
+      following: pageItems,
+      count: total,
+      hasMore: offset + pageItems.length < total,
     });
   }
 );

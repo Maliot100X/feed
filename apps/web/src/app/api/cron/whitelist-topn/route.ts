@@ -18,13 +18,10 @@ import {
   recordCronExecution,
   requireCronAuth,
   successResponse,
-  verifyCronAuth,
   withErrorHandling,
 } from '@feed/api';
 import { autoWhitelistCurrentTopN } from '@feed/api/services/whitelist-service';
-import { logger } from '@feed/shared';
 import type { NextRequest } from 'next/server';
-import { NextResponse } from 'next/server';
 
 export const dynamic = 'force-dynamic';
 
@@ -45,19 +42,5 @@ export const POST = withErrorHandling(async (request: NextRequest) => {
   });
 });
 
-// The Cloudflare cron Worker uses GET; forward to POST after auth verification.
-export const GET = withErrorHandling(async (request: NextRequest) => {
-  if (!verifyCronAuth(request, { jobName: 'WhitelistTopNCron' })) {
-    logger.warn(
-      'Unauthorized GET request to cron endpoint',
-      undefined,
-      'WhitelistTopNCron'
-    );
-    return NextResponse.json(
-      { error: 'Unauthorized cron request' },
-      { status: 401 }
-    );
-  }
-
-  return POST(request);
-});
+// Cron schedulers may use GET; it runs the same authenticated handler.
+export const GET = POST;

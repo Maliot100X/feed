@@ -68,7 +68,7 @@ export const userWalletProvider: Provider = {
 
 💰 Balance: $${balance.balance}
 ⭐ Points: ${balance.reputationPoints} pts
-${isProfitable ? '📈' : '📉'} Lifetime P&L: ${isProfitable ? '+' : ''}$${lifetimePnL}
+${isProfitable ? '📈' : lifetimePnL < 0 ? '📉' : '➖'} Lifetime P&L: ${isProfitable ? '+' : ''}$${lifetimePnL}
 💵 Total Deposited: $${balance.totalDeposited}
 💸 Total Withdrawn: $${balance.totalWithdrawn}
 
@@ -103,7 +103,9 @@ ${positions.marketPositions
 ${
   isProfitable
     ? `This user appears to be a profitable trader with $${lifetimePnL} in gains.`
-    : `This user has $${Math.abs(lifetimePnL)} in losses.`
+    : lifetimePnL < 0
+      ? `This user has $${Math.abs(lifetimePnL)} in losses.`
+      : 'This user is break-even (no realized gains or losses).'
 }`,
     };
   },

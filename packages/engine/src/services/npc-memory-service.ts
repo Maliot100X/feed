@@ -80,6 +80,27 @@ function isTransientError(error: unknown): boolean {
  * - Query recent memories for prompt context
  * - Track relationships between actors
  */
+function assertMemoryLimit(limit: number): void {
+  if (!Number.isInteger(limit) || limit < 0) {
+    throw new Error(`Invalid memory limit: ${limit}`);
+  }
+}
+
+/**
+ * Select the `limit` most recent memories (stored oldest-first), newest first.
+ * `limit` must be a non-negative integer; 0 returns no memories.
+ */
+export function selectRecentMemories(
+  memories: NpcMemory[],
+  limit: number
+): NpcMemory[] {
+  assertMemoryLimit(limit);
+  if (limit === 0) {
+    return [];
+  }
+  return memories.slice(-limit).reverse();
+}
+
 export class NpcMemoryService {
   /**
    * Add a memory to an NPC's memory store.
@@ -116,6 +137,13 @@ export class NpcMemoryService {
 
         // Parse memories with Zod validation - handles corrupted data gracefully
         const memories = parseMemoriesSafe(state.recentMemories, { actorId });
+
+        // A previous attempt may have committed before its acknowledgement was
+        // lost (e.g. connection drop). The ID is stable across retries, so an
+        // existing entry means this memory is already stored.
+        if (memories.some((m) => m.id === memoryId)) {
+          return true;
+        }
 
         // Create new memory with pre-generated ID
         const newMemory: NpcMemory = {
@@ -212,6 +240,7 @@ export class NpcMemoryService {
     limit = 10,
     types?: NpcMemory['type'][]
   ): Promise<NpcMemory[]> {
+    assertMemoryLimit(limit);
     try {
       const [state] = await db
         .select({
@@ -233,8 +262,7 @@ export class NpcMemoryService {
         memories = memories.filter((m) => types.includes(m.type));
       }
 
-      // Return most recent first, limited
-      return memories.slice(-limit).reverse();
+      return selectRecentMemories(memories, limit);
     } catch (error) {
       logger.error(
         `Failed to get memories for ${actorId}`,
@@ -634,7 +662,7 @@ export class NpcMemoryService {
     limit = 10
   ): NpcMemory[] {
     const memories = parseMemoriesSafe(rawMemories, { actorId });
-    return memories.slice(-limit).reverse();
+    return selectRecentMemories(memories, limit);
   }
 
   /**
@@ -668,6 +696,9 @@ export class NpcMemoryService {
         : new Date();
     const then = new Date(timestamp);
     const diffMs = currentTime.getTime() - then.getTime();
+    if (!Number.isFinite(diffMs)) {
+      return 'unknown time';
+    }
 
     // Handle future timestamps (negative diff)
     if (diffMs < 0) {

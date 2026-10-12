@@ -50,6 +50,16 @@ import {
 import { SignalExtractionService } from '@feed/engine';
 import type { NextRequest } from 'next/server';
 import { NextResponse } from 'next/server';
+import { z } from 'zod';
+
+// Strict decimal digits only (parseInt accepted "12abc" and NaN).
+const QuerySchema = z.object({
+  questionNumber: z
+    .string()
+    .regex(/^\d+$/)
+    .transform(Number)
+    .pipe(z.number().int().positive().max(Number.MAX_SAFE_INTEGER)),
+});
 
 export const dynamic = 'force-dynamic';
 
@@ -57,27 +67,29 @@ export const GET = withErrorHandling(async (request: NextRequest) => {
   const admin = await requireAdmin(request);
 
   const { searchParams } = new URL(request.url);
-  const questionNumber = searchParams.get('questionNumber');
+  const parsed = QuerySchema.safeParse({
+    questionNumber: searchParams.get('questionNumber') ?? undefined,
+  });
+
+  if (!parsed.success) {
+    return NextResponse.json(
+      { error: 'questionNumber must be a positive integer' },
+      { status: 400 }
+    );
+  }
+  const { questionNumber } = parsed.data;
 
   // Audit log the view
-  logAdminView({
+  await logAdminView({
     adminId: admin.userId,
     ipAddress: getClientIp(request.headers) ?? undefined,
     resourceType: 'signal_analysis',
     metadata: { action: 'view_signal_analysis', questionNumber },
   });
 
-  if (!questionNumber) {
-    return NextResponse.json(
-      { error: 'questionNumber parameter required' },
-      { status: 400 }
-    );
-  }
-
   // Extract signal (admin only, for debugging)
-  const signal = await SignalExtractionService.extractMarketSignal(
-    Number.parseInt(questionNumber, 10)
-  );
+  const signal =
+    await SignalExtractionService.extractMarketSignal(questionNumber);
 
   return NextResponse.json({
     success: true,

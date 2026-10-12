@@ -97,21 +97,23 @@ import {
 import { asSystem } from '@feed/db';
 import { generateSnowflakeId, logger, toISO, toISOOrNull } from '@feed/shared';
 import type { NextRequest } from 'next/server';
+import { z } from 'zod';
 
-interface ControlRequest {
-  action: 'start' | 'pause';
-}
+const ControlRequestSchema = z.object({
+  action: z.enum(['start', 'pause']),
+});
 
 export const POST = withErrorHandling(async (request: NextRequest) => {
   // Require admin authentication (uses secure dev token in dev mode)
   await requireAdmin(request);
 
-  const body = (await request.json()) as ControlRequest;
-  const { action } = body;
-
-  if (!action || !['start', 'pause'].includes(action)) {
+  const parsedBody = ControlRequestSchema.safeParse(
+    await request.json().catch(() => null)
+  );
+  if (!parsedBody.success) {
     throw new BadRequestError('Action must be "start" or "pause"');
   }
+  const { action } = parsedBody.data;
 
   // Get or create the continuous game - system operation (admin)
   const game = await asSystem(async (db) => {
@@ -144,15 +146,18 @@ export const POST = withErrorHandling(async (request: NextRequest) => {
       const updateData: {
         isRunning: boolean;
         startedAt?: Date;
-        pausedAt?: Date;
+        pausedAt?: Date | null;
       } = {
         isRunning,
       };
 
       if (action === 'start') {
         updateData.startedAt = gameState.startedAt || new Date();
-        updateData.pausedAt = undefined;
-      } else {
+        // Explicitly clear the pause timestamp (undefined would leave it set).
+        updateData.pausedAt = null;
+      } else if (gameState.isRunning || !gameState.pausedAt) {
+        // Only stamp pausedAt on an actual running -> paused transition so
+        // retried pause requests keep the original pause time.
         updateData.pausedAt = new Date();
       }
 

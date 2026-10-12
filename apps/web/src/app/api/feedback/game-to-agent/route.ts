@@ -91,7 +91,17 @@ export const POST = withErrorHandling(async (request: NextRequest) => {
 
   const body = parsed;
 
-  const agent = await requireUserByIdentifier(body.agentId);
+  const agent = await requireUserByIdentifier(body.agentId, {
+    id: true,
+    isAgent: true,
+  });
+
+  if (!agent.isAgent) {
+    return NextResponse.json(
+      { success: false, error: 'AGENT_REQUIRED' },
+      { status: 400 }
+    );
+  }
 
   // Check if feedback already exists for this game
   const existingFeedback = await db.feedback.findFirst({
@@ -145,15 +155,6 @@ export const POST = withErrorHandling(async (request: NextRequest) => {
   await updateFeedbackMetrics(agent.id, body.score, {
     category: 'game_performance',
     interactionType: 'game_to_agent',
-  });
-
-  // Agent0 feedback submission removed (Agent0 deleted in Phase 1)
-  void (() => {
-    logger.debug('Agent0 feedback submission skipped (Agent0 removed)', {
-      feedbackId: feedback.id,
-      agentId: agent.id,
-      gameId: body.gameId,
-    });
   });
 
   const metrics = await db.agentPerformanceMetrics.findUnique({

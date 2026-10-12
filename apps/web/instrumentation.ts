@@ -38,13 +38,7 @@ export async function register() {
     // This makes it easy for developers to authenticate with admin APIs
     logDevCredentials();
 
-    // Initialize agent service container with required services
-    // Uses globalThis to persist across module instances
-    const { setServiceContainer, agentRegistry, npcBootstrapService } =
-      await import('@feed/agents');
-    setServiceContainer({
-      agentRegistry,
-    });
+    const { npcBootstrapService } = await import('@feed/agents');
 
     const { setGeneratedImageStorage } = await import('@feed/engine');
     setGeneratedImageStorage(async (url) => {

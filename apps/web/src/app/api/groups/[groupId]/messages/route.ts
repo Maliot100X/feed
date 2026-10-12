@@ -15,9 +15,15 @@ import { asUser } from '@feed/db';
 import { StaticDataRegistry } from '@feed/engine';
 import { logger } from '@feed/shared';
 import type { NextRequest } from 'next/server';
+import { z } from 'zod';
 
 const DEFAULT_LIMIT = 50;
 const MAX_LIMIT = 100;
+
+const MessagesQuerySchema = z.object({
+  cursor: z.string().trim().min(1).max(100).optional(),
+  limit: z.coerce.number().int().min(1).max(MAX_LIMIT).default(DEFAULT_LIMIT),
+});
 
 export const GET = withErrorHandling(
   async (
@@ -27,14 +33,14 @@ export const GET = withErrorHandling(
     const user = await authenticate(request);
     const { groupId } = await params;
     const { searchParams } = new URL(request.url);
-    const cursor = searchParams.get('cursor');
-    const limit = Math.min(
-      MAX_LIMIT,
-      Math.max(
-        1,
-        Number.parseInt(searchParams.get('limit') ?? String(DEFAULT_LIMIT), 10)
-      )
-    );
+    const query = MessagesQuerySchema.safeParse({
+      cursor: searchParams.get('cursor') ?? undefined,
+      limit: searchParams.get('limit') ?? undefined,
+    });
+    if (!query.success) {
+      throw new ApiError('Invalid cursor or limit', 400);
+    }
+    const { cursor, limit } = query.data;
 
     const result = await asUser(user, async (db) => {
       const group = await db.group.findUnique({
@@ -67,12 +73,18 @@ export const GET = withErrorHandling(
         throw new ApiError('Group chat not found', 404);
       }
 
+      // The cursor must be a message in this group's chat; an unknown cursor
+      // is an error rather than silently restarting from the latest page.
       const cursorMessage = cursor
-        ? await db.message.findUnique({
-            where: { id: cursor },
+        ? await db.message.findFirst({
+            where: { id: cursor, chatId: groupChat.id },
             select: { createdAt: true },
           })
         : null;
+
+      if (cursor && !cursorMessage) {
+        throw new ApiError('Invalid cursor', 400);
+      }
 
       const messages = await db.message.findMany({
         where: {

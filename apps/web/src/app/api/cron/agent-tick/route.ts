@@ -178,7 +178,6 @@ export const GET = withErrorHandling(async function GET(req: NextRequest) {
  * @throws {401} Invalid or missing CRON_SECRET
  */
 export const POST = withErrorHandling(async function POST(_req: NextRequest) {
-  ensureEngineServices();
   const requestedAgentIds = getRequestedAgentIds(_req);
 
   // 0. Verify cron authorization using centralized auth
@@ -193,6 +192,9 @@ export const POST = withErrorHandling(async function POST(_req: NextRequest) {
       { status: 401 }
     );
   }
+
+  // Initialize engine services only after the caller is authorized.
+  ensureEngineServices();
 
   const integrationProbe = _req.headers.get('x-integration-probe') === '1';
   if (integrationProbe) {

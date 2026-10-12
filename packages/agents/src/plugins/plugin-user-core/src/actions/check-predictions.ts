@@ -18,16 +18,19 @@ import type {
   State,
 } from '@elizaos/core';
 import { PredictionPricing } from '@feed/core/markets/prediction/client';
-import { db, desc, eq, gte, markets } from '@feed/db';
+import { db, desc, eq, markets } from '@feed/db';
 import type { MessageTag } from '@feed/shared';
 import { logger } from '../../../../shared/logger';
+import {
+  parsePredictionListLimit,
+  parsePredictionStatus,
+  predictionStatusCondition,
+} from '../../../../shared/prediction-list-query';
 
 /** Extended ActionResult with optional tag for UI */
 interface ActionResultWithTag extends ActionResult {
   tag?: MessageTag;
 }
-
-type StatusFilter = 'active' | 'resolved' | 'all';
 
 function getDaysUntil(date: Date | null): number | null {
   if (!date) return null;
@@ -112,15 +115,15 @@ export const checkPredictionsAction: Action = {
       | { marketId?: string; status?: string; limit?: number }
       | undefined;
     const marketId = actionParams?.marketId;
-    // Validate status against allowed StatusFilter values
-    const validStatusFilters: StatusFilter[] = ['active', 'resolved', 'all'];
-    const rawStatus = actionParams?.status;
-    const statusFilter: StatusFilter = validStatusFilters.includes(
-      rawStatus as StatusFilter
-    )
-      ? (rawStatus as StatusFilter)
-      : 'active';
-    const limit = Math.min(Math.max(actionParams?.limit ?? 10, 1), 20);
+    const statusFilter = parsePredictionStatus(actionParams?.status);
+    const limit = parsePredictionListLimit(actionParams?.limit);
+    if (statusFilter === null || limit === null) {
+      return {
+        success: false,
+        text: 'Invalid parameters: status must be active, resolved or all; limit must be an integer.',
+        error: 'Invalid parameters',
+      };
+    }
 
     // Fail-fast: let errors from db queries, PredictionPricing, getDaysUntil propagate
     // =========================================================================
@@ -212,20 +215,11 @@ export const checkPredictionsAction: Action = {
     // LIST MODE: When no marketId provided
     // =========================================================================
 
-    // Build query based on status filter
-    let query = db.select().from(markets);
-
-    if (statusFilter === 'active') {
-      query = query.where(eq(markets.resolved, false)) as typeof query;
-      // Also filter for markets that haven't ended
-      const now = new Date();
-      query = query.where(gte(markets.endDate, now)) as typeof query;
-    } else if (statusFilter === 'resolved') {
-      query = query.where(eq(markets.resolved, true)) as typeof query;
-    }
-    // 'all' - no filter
-
-    const predictions = await query
+    // Single combined predicate (chained .where() calls overwrite each other)
+    const predictions = await db
+      .select()
+      .from(markets)
+      .where(predictionStatusCondition(statusFilter, new Date()))
       .orderBy(desc(markets.createdAt))
       .limit(limit);
 

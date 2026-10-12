@@ -10,17 +10,14 @@
  * **Test Coverage:**
  * - Question resolution detection (by date)
  * - Days until resolution calculation
- * - Resolution time constraints (1-7 days)
  * - Question status transitions (active → resolved)
  * - Active vs resolved question filtering
- * - Maximum 20 questions enforcement
  *
  * **Key Features Tested:**
  * - Date-based resolution triggering
  * - Day calculation accuracy
  * - Status tracking (active/resolved)
  * - Question filtering utilities
- * - Constraint validation (max questions)
  *
  * **Testing Approach:**
  * - Unit tests with mock LLM client
@@ -35,7 +32,6 @@ import { describe, expect, test } from 'bun:test';
 import type { FeedLLMClient } from '../llm/openai-client';
 import { QuestionManager } from '../QuestionManager';
 import type { Question } from '../types/shared';
-import { toDateString } from '../utils/date-utils';
 
 /**
  * Mock LLM client interface for testing
@@ -117,21 +113,6 @@ describe('QuestionManager', () => {
     expect(diffDays).toBe(4);
   });
 
-  test('enforces resolution time constraints (1-7 days)', () => {
-    // Test that resolution dates are set correctly
-    const createdDate = new Date('2025-11-01');
-
-    // Test 1 day
-    const oneDay = new Date(createdDate);
-    oneDay.setDate(oneDay.getDate() + 1);
-    expect(toDateString(oneDay)).toBe('2025-11-02');
-
-    // Test 7 days
-    const sevenDays = new Date(createdDate);
-    sevenDays.setDate(sevenDays.getDate() + 7);
-    expect(toDateString(sevenDays)).toBe('2025-11-08');
-  });
-
   test('tracks question status transitions', () => {
     const manager = new QuestionManager(mockLLM);
     const question: Question = {
@@ -187,23 +168,5 @@ describe('QuestionManager', () => {
 
     expect(active.length).toBe(2);
     expect(resolved.length).toBe(1);
-  });
-
-  test('max 20 questions constraint', () => {
-    // Generate 25 questions
-    const questions: Question[] = Array.from({ length: 25 }, (_, i) => ({
-      id: i + 1,
-      text: `Question ${i + 1}`,
-      scenario: 1,
-      outcome: true,
-      rank: i + 1,
-      status: 'active' as const,
-    }));
-
-    const activeQuestions = questions
-      .filter((q) => q.status === 'active')
-      .slice(0, 20);
-
-    expect(activeQuestions.length).toBe(20);
   });
 });

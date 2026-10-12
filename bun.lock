@@ -189,7 +189,6 @@
         "@feed/db": "workspace:*",
         "@feed/engine": "workspace:*",
         "@feed/shared": "workspace:*",
-        "@feed/testing": "workspace:*",
         "@feed/training": "workspace:*",
         "@hookform/resolvers": "^5.2.2",
         "@huggingface/hub": "^2.6.12",

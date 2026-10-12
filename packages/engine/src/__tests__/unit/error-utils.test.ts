@@ -9,10 +9,8 @@ import {
   formatError,
   formatErrorWithStack,
   handleNonCritical,
-  handleNonCriticalWithDefault,
   hasErrorCode,
   isTransientError,
-  safeExecute,
   withRetry,
 } from '../../utils/error-utils';
 
@@ -116,24 +114,6 @@ describe('Error Utilities', () => {
     });
   });
 
-  describe('safeExecute', () => {
-    test('returns result on success', async () => {
-      const result = await safeExecute(
-        () => Promise.resolve('success'),
-        'test operation'
-      );
-      expect(result).toBe('success');
-    });
-
-    test('returns null on error', async () => {
-      const result = await safeExecute(
-        () => Promise.reject(new Error('failure')),
-        'test operation'
-      );
-      expect(result).toBeNull();
-    });
-  });
-
   describe('handleNonCritical', () => {
     test('returns result on success', async () => {
       const result = await handleNonCritical(
@@ -149,26 +129,6 @@ describe('Error Utilities', () => {
         'test operation'
       );
       expect(result).toBeNull();
-    });
-  });
-
-  describe('handleNonCriticalWithDefault', () => {
-    test('returns result on success', async () => {
-      const result = await handleNonCriticalWithDefault(
-        () => Promise.resolve(42),
-        0,
-        'test operation'
-      );
-      expect(result).toBe(42);
-    });
-
-    test('returns default value on error', async () => {
-      const result = await handleNonCriticalWithDefault(
-        () => Promise.reject(new Error('failure')),
-        -1,
-        'test operation'
-      );
-      expect(result).toBe(-1);
     });
   });
 
@@ -232,6 +192,23 @@ describe('Error Utilities', () => {
         )
       ).rejects.toThrow('Connection timeout');
       expect(attempts).toBe(3);
+    });
+
+    test('rejects non-positive or non-integer attempt counts', async () => {
+      for (const bad of [0, -1, Number.NaN, 1.5]) {
+        let attempts = 0;
+        await expect(
+          withRetry(
+            async () => {
+              attempts++;
+              return 'never';
+            },
+            bad,
+            'test operation'
+          )
+        ).rejects.toThrow('maxAttempts must be a positive integer');
+        expect(attempts).toBe(0);
+      }
     });
   });
 });

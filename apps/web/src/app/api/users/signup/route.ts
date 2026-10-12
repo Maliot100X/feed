@@ -86,7 +86,6 @@
  * @see {@link /lib/onboarding/types} Onboarding types
  */
 
-import type { JsonValue } from '@feed/api';
 import {
   authenticate,
   ConflictError,
@@ -114,7 +113,6 @@ import {
   withTransaction,
 } from '@feed/db';
 import { UserAlphaGroupAssignmentService } from '@feed/engine';
-import type { OnboardingProfilePayload } from '@feed/shared';
 import {
   generateSnowflakeId,
   logger,
@@ -125,19 +123,6 @@ import {
 import type { NextRequest } from 'next/server';
 import { z } from 'zod';
 import { trackServerEvent } from '@/lib/posthog/server';
-
-interface SignupRequestBody {
-  username: string;
-  displayName: string;
-  bio?: string | null;
-  profileImageUrl?: string | null;
-  coverImageUrl?: string | null;
-  referralCode?: string | null;
-  identityToken?: string | null;
-  isWaitlist?: boolean; // Mark user as waitlist during signup
-  tosAccepted?: boolean;
-  privacyPolicyAccepted?: boolean;
-}
 
 const SignupSchema = OnboardingProfileSchema.extend({
   identityToken: z
@@ -152,32 +137,23 @@ export const POST = withErrorHandling(async (request: NextRequest) => {
   const authUser = await authenticate(request);
   const privyId = authUser.privyId ?? authUser.userId;
 
-  const body = (await request.json()) as
-    | SignupRequestBody
-    | Record<string, JsonValue>;
-
-  const parsedBody = SignupSchema.parse(body);
+  // identityToken is a deprecated field still accepted from older clients; it is
+  // ignored. Social import fields (importedFrom/twitterId/twitterUsername) only
+  // pre-fill display data on the client and never establish a linked account:
+  // the onboarding import redirect is not a server-side proof of ownership.
+  // Twitter linking goes through the verified /api/auth/twitter OAuth flow.
   const {
     identityToken: _identityToken,
     referralCode: rawReferralCode,
     isWaitlist,
-    ...profileData
-  } = parsedBody;
-  const parsedProfile = profileData as OnboardingProfilePayload;
+    ...parsedProfile
+  } = SignupSchema.parse(await request.json());
   const referralCode = rawReferralCode?.trim() || null;
 
   const canonicalUserId = authUser.dbUserId ?? authUser.userId;
 
   // Capture and hash IP address for self-referral detection
   const registrationIpHash = getHashedClientIp(request.headers);
-  let identityTwitterUsername: string | undefined;
-  const adminEmailResult = {
-    adminEmail: null as string | null,
-    allVerifiedEmails: [] as string[],
-  };
-
-  // Check for imported social data from onboarding flow
-  const importedTwitter = parsedProfile.importedFrom === 'twitter';
 
   // Wrap transaction with retry logic for connection errors
   const result = await withRetry(
@@ -246,21 +222,12 @@ export const POST = withErrorHandling(async (request: NextRequest) => {
           );
         }
 
-        const normalizedProfileEmail =
-          parsedProfile.email?.trim().toLowerCase() || null;
-        const profileEmailVerified = normalizedProfileEmail
-          ? adminEmailResult.allVerifiedEmails.some(
-              (verifiedEmail) =>
-                verifiedEmail.toLowerCase() === normalizedProfileEmail
-            )
-          : false;
-
+        // Email is owned by the auth provider (set at login); signup never
+        // writes email/emailVerified so an existing verified email is preserved.
         const baseUserData: Partial<typeof users.$inferInsert> = {
           username: parsedProfile.username,
           referralCode: parsedProfile.username,
           displayName: parsedProfile.displayName,
-          email: normalizedProfileEmail,
-          emailVerified: profileEmailVerified,
           bio: parsedProfile.bio ?? '',
           profileImageUrl: parsedProfile.profileImageUrl ?? null,
           coverImageUrl: parsedProfile.coverImageUrl ?? null,
@@ -271,8 +238,6 @@ export const POST = withErrorHandling(async (request: NextRequest) => {
             parsedProfile.bio && parsedProfile.bio.trim().length > 0
           ),
           hasProfileImage: Boolean(parsedProfile.profileImageUrl),
-          // Waitlist users start with 100 points instead of 1000
-          ...(isWaitlist ? { reputationPoints: 100 } : {}),
           // Store IP hash for self-referral detection
           ...(registrationIpHash ? { registrationIpHash } : {}),
           // Legal acceptance (GDPR compliance)
@@ -305,16 +270,6 @@ export const POST = withErrorHandling(async (request: NextRequest) => {
           );
         }
 
-        // Handle Twitter from Privy identity or onboarding import
-        if (identityTwitterUsername || importedTwitter) {
-          baseUserData.hasTwitter = true;
-          baseUserData.twitterUsername =
-            parsedProfile.twitterUsername ?? identityTwitterUsername;
-          if (parsedProfile.twitterId) {
-            baseUserData.twitterId = parsedProfile.twitterId;
-          }
-        }
-
         // Upsert user (insert or update)
         let user: typeof users.$inferSelect;
         const [existingUserRecord] = await tx
@@ -324,31 +279,17 @@ export const POST = withErrorHandling(async (request: NextRequest) => {
           .limit(1);
 
         if (existingUserRecord) {
-          // Update existing user
-          // Also check if user should be auto-promoted to admin (for existing users with new verified email)
-          // Check ALL linked emails, not just the primary one
-          const { adminEmail, allVerifiedEmails } = adminEmailResult;
-          const shouldPromoteToAdmin =
-            !existingUserRecord.isAdmin && adminEmail !== null;
-
-          if (shouldPromoteToAdmin) {
-            logger.info(
-              'Auto-promoting existing user to admin during signup based on verified email domain',
-              {
-                userId: canonicalUserId,
-                emailDomain: adminEmail?.split('@')[1] ?? null,
-                emailCount: allVerifiedEmails.length,
-              },
-              'POST /api/users/signup'
-            );
-          }
-
+          // Waitlist users start with 100 points instead of 1000. Only apply on
+          // the first profile completion so a signup replay never resets an
+          // accumulated balance.
+          const applyWaitlistStart =
+            isWaitlist && !existingUserRecord.profileComplete;
           const [updatedUser] = await tx
             .update(users)
             .set({
               ...baseUserData,
+              ...(applyWaitlistStart ? { reputationPoints: 100 } : {}),
               referredBy: resolvedReferrerId ?? existingUserRecord.referredBy,
-              isAdmin: shouldPromoteToAdmin ? true : existingUserRecord.isAdmin,
               updatedAt: new Date(),
             })
             .where(eq(users.id, canonicalUserId))
@@ -359,34 +300,14 @@ export const POST = withErrorHandling(async (request: NextRequest) => {
           user = updatedUser;
         } else {
           // Create new user
-          // Check if user should be auto-promoted to admin based on email domain
-          // SECURITY: Use Privy-verified email, not user-supplied email from parsedProfile
-          // This prevents attackers from submitting fake admin emails in the request body
-          // Check ALL linked emails, not just the primary one
-          const { adminEmail: newUserAdminEmail, allVerifiedEmails } =
-            adminEmailResult;
-          const shouldBeAdmin = newUserAdminEmail !== null;
-
-          if (shouldBeAdmin) {
-            logger.info(
-              'Auto-promoting new signup user to admin based on verified email domain',
-              {
-                userId: canonicalUserId,
-                emailDomain: newUserAdminEmail?.split('@')[1] ?? null,
-                emailCount: allVerifiedEmails.length,
-              },
-              'POST /api/users/signup'
-            );
-          }
-
           const [newUser] = await tx
             .insert(users)
             .values({
               id: canonicalUserId,
               privyId,
               ...baseUserData,
+              ...(isWaitlist ? { reputationPoints: 100 } : {}),
               referredBy: resolvedReferrerId,
-              isAdmin: shouldBeAdmin,
               updatedAt: new Date(),
             })
             .returning();
@@ -488,10 +409,7 @@ export const POST = withErrorHandling(async (request: NextRequest) => {
     );
   }
 
-  // Award reputation for social account linking.
   const reputationBreakdown = {
-    twitter: 0,
-    wallet: 0,
     profile: 0,
     referral: 0,
     referralBonus: 0,
@@ -576,26 +494,6 @@ export const POST = withErrorHandling(async (request: NextRequest) => {
           referrerId: result.referrerId,
           referredUserId: result.user.id,
           error: referralResult.error,
-        },
-        'POST /api/users/signup'
-      );
-    }
-  }
-  if (identityTwitterUsername || importedTwitter) {
-    const twitterUsername =
-      parsedProfile.twitterUsername ?? identityTwitterUsername;
-    if (twitterUsername) {
-      const pointsResult = await ReputationService.awardTwitterLink(
-        result.user.id,
-        twitterUsername
-      );
-      reputationBreakdown.twitter = pointsResult.reputationAwarded;
-      logger.info(
-        'Awarded Twitter link reputation',
-        {
-          userId: result.user.id,
-          username: twitterUsername,
-          reputation: pointsResult.reputationAwarded,
         },
         'POST /api/users/signup'
       );

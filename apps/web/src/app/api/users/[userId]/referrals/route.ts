@@ -213,9 +213,6 @@ export const GET = withErrorHandling(
         profileImageUrl: users.profileImageUrl,
         createdAt: users.createdAt,
         reputationPoints: users.reputationPoints,
-        profileComplete: users.profileComplete,
-        email: users.email,
-        twitterUsername: users.twitterUsername,
       })
       .from(users)
       .where(
@@ -324,8 +321,6 @@ export const GET = withErrorHandling(
       isFollowing: followingUserIds.has(u.id),
       joinedAt: null,
       status: 'pending' as const,
-      email: u.email,
-      twitterUsername: u.twitterUsername,
     }));
 
     // Use username as referral code (without @)

@@ -183,6 +183,56 @@ import { authenticateUser, withErrorHandling } from '@feed/api';
 import { logger, toISO, toISOOrNull } from '@feed/shared';
 import type { NextRequest } from 'next/server';
 import { NextResponse } from 'next/server';
+import { z } from 'zod';
+
+/** Bio entries persisted in messageExamples are expected to be strings. */
+function stringEntries(value: unknown): string[] | null {
+  const parsed: unknown = typeof value === 'string' ? JSON.parse(value) : value;
+  if (!Array.isArray(parsed)) return null;
+  return parsed.filter(
+    (entry): entry is string =>
+      typeof entry === 'string' && entry.trim().length > 0
+  );
+}
+
+const UpdateAgentSchema = z
+  .object({
+    name: z.string().max(100).optional(),
+    description: z.string().max(5000).optional(),
+    profileImageUrl: z.string().max(2048).optional(),
+    coverImageUrl: z.string().max(2048).optional(),
+    system: z.string().max(20000).optional(),
+    bio: z
+      .union([
+        z.array(z.string().max(2000)).max(50),
+        z
+          .string()
+          .max(20000)
+          .transform((bio) => bio.split('\n').filter((b) => b.trim())),
+      ])
+      .optional(),
+    personality: z.string().max(10000).optional(),
+    tradingStrategy: z.string().max(10000).optional(),
+    modelTier: z.enum(['free', 'pro']).optional(),
+    // Both names are accepted: autonomousEnabled (UI) and autonomousTrading (documented).
+    autonomousEnabled: z.boolean().optional(),
+    autonomousTrading: z.boolean().optional(),
+    autonomousPosting: z.boolean().optional(),
+    autonomousCommenting: z.boolean().optional(),
+    autonomousDMs: z.boolean().optional(),
+    autonomousGroupChats: z.boolean().optional(),
+    a2aEnabled: z.boolean().optional(),
+  })
+  .refine(
+    (body) =>
+      body.autonomousEnabled === undefined ||
+      body.autonomousTrading === undefined ||
+      body.autonomousEnabled === body.autonomousTrading,
+    {
+      message: 'autonomousEnabled and autonomousTrading disagree',
+      path: ['autonomousTrading'],
+    }
+  );
 
 export const GET = withErrorHandling(async function GET(
   req: NextRequest,
@@ -191,23 +241,34 @@ export const GET = withErrorHandling(async function GET(
   const user = await authenticateUser(req);
   const { agentId } = await params;
 
-  const [agent, performance, config] = await Promise.all([
-    agentService.getAgent(agentId, user.id),
+  // Ownership first (throws AuthorizationError for agents owned by others).
+  const agent = await agentService.getAgent(agentId, user.id);
+  if (!agent) {
+    return NextResponse.json(
+      { success: false, error: 'Agent not found' },
+      { status: 404 }
+    );
+  }
+
+  const [performance, config] = await Promise.all([
     agentService.getPerformance(agentId),
     getAgentConfig(agentId),
   ]);
+  const bioEntries = config?.messageExamples
+    ? stringEntries(config.messageExamples)
+    : null;
 
   const tradingEnabled = isAutonomousTradingEnabled(config);
 
   return NextResponse.json({
     success: true,
     agent: {
-      id: agent!.id,
-      username: agent!.username,
-      name: agent!.displayName,
-      description: agent!.bio,
-      profileImageUrl: agent!.profileImageUrl,
-      coverImageUrl: agent!.coverImageUrl,
+      id: agent.id,
+      username: agent.username,
+      name: agent.displayName,
+      description: agent.bio,
+      profileImageUrl: agent.profileImageUrl,
+      coverImageUrl: agent.coverImageUrl,
       // Parse trading strategy from system prompt if it was appended
       system: (() => {
         const system = config?.systemPrompt || '';
@@ -220,34 +281,12 @@ export const GET = withErrorHandling(async function GET(
         }
         return system;
       })(),
-      bio: (() => {
-        // Use messageExamples (ElizaOS bio array) if available, otherwise fall back to bio string
-        if (config?.messageExamples) {
-          const parsed =
-            typeof config.messageExamples === 'string'
-              ? JSON.parse(config.messageExamples)
-              : config.messageExamples;
-          if (Array.isArray(parsed)) {
-            return parsed.filter((b: string) => b && b.trim());
-          }
-        }
-        return agent!.bio ? agent!.bio.split('\n').filter((b) => b.trim()) : [];
-      })(),
-      personality:
-        config?.personality ||
-        (() => {
-          // If personality is not set but bio array exists, join it for display
-          if (config?.messageExamples) {
-            const parsed =
-              typeof config.messageExamples === 'string'
-                ? JSON.parse(config.messageExamples)
-                : config.messageExamples;
-            if (Array.isArray(parsed)) {
-              return parsed.filter((b: string) => b && b.trim()).join('\n');
-            }
-          }
-          return '';
-        })(),
+      // Use messageExamples (ElizaOS bio array) if available, otherwise fall back to bio string
+      bio:
+        bioEntries ??
+        (agent.bio ? agent.bio.split('\n').filter((b) => b.trim()) : []),
+      // If personality is not set but a bio array exists, join it for display
+      personality: config?.personality || (bioEntries ?? []).join('\n'),
       tradingStrategy:
         config?.tradingStrategy ||
         (() => {
@@ -258,11 +297,11 @@ export const GET = withErrorHandling(async function GET(
           );
           return tradingStrategyMatch ? tradingStrategyMatch[1]!.trim() : '';
         })(),
-      virtualBalance: Number(agent!.virtualBalance ?? 0),
+      virtualBalance: Number(agent.virtualBalance ?? 0),
       totalDeposited:
-        agent!.totalDeposited == null ? null : Number(agent!.totalDeposited),
+        agent.totalDeposited == null ? null : Number(agent.totalDeposited),
       totalWithdrawn:
-        agent!.totalWithdrawn == null ? null : Number(agent!.totalWithdrawn),
+        agent.totalWithdrawn == null ? null : Number(agent.totalWithdrawn),
       isActive: config?.status === 'active',
       autonomousEnabled: tradingEnabled,
       autonomousTrading: tradingEnabled,
@@ -274,16 +313,16 @@ export const GET = withErrorHandling(async function GET(
       modelTier: config?.modelTier === 'pro' ? 'pro' : 'free',
       status: config?.status ?? 'idle',
       errorMessage: config?.errorMessage ?? null,
-      lifetimePnL: agent!.lifetimePnL.toString(),
+      lifetimePnL: agent.lifetimePnL.toString(),
       totalTrades: performance.totalTrades,
       profitableTrades: performance.profitableTrades,
       winRate: performance.winRate,
       lastTickAt: toISOOrNull(config?.lastTickAt),
       lastChatAt: toISOOrNull(config?.lastChatAt),
-      walletAddress: agent!.walletAddress,
+      walletAddress: agent.walletAddress,
       agent0TokenId: null, // TODO: source from AgentRegistry table
-      createdAt: toISO(agent!.createdAt),
-      updatedAt: toISO(agent!.updatedAt),
+      createdAt: toISO(agent.createdAt),
+      updatedAt: toISO(agent.updatedAt),
     },
   });
 });
@@ -294,56 +333,15 @@ export const PUT = withErrorHandling(async function PUT(
 ) {
   const user = await authenticateUser(req);
   const { agentId } = await params;
-  const body = (await req.json()) as Record<string, unknown>;
+  const { autonomousEnabled, autonomousTrading, ...fields } =
+    UpdateAgentSchema.parse(await req.json());
 
-  const {
-    name,
-    description,
-    profileImageUrl,
-    coverImageUrl,
-    system,
-    bio,
-    personality,
-    tradingStrategy,
-    modelTier,
-    isActive,
-    autonomousEnabled,
-    autonomousPosting,
-    autonomousCommenting,
-    autonomousDMs,
-    autonomousGroupChats,
-    a2aEnabled,
-  } = body;
-
-  const updates: Record<string, unknown> = {};
-  if (name !== undefined) updates.name = name;
-  if (description !== undefined) updates.description = description;
-  if (profileImageUrl !== undefined) updates.profileImageUrl = profileImageUrl;
-  if (coverImageUrl !== undefined) updates.coverImageUrl = coverImageUrl;
-  if (system !== undefined) updates.system = system;
-  if (bio !== undefined) {
-    if (Array.isArray(bio)) {
-      updates.bio = bio;
-    } else if (bio !== null && typeof bio === 'string') {
-      updates.bio = bio.split('\n').filter((b: string) => b.trim());
-    } else {
-      updates.bio = [];
-    }
-  }
-  if (personality !== undefined) updates.personality = personality;
-  if (tradingStrategy !== undefined) updates.tradingStrategy = tradingStrategy;
-  if (modelTier !== undefined) updates.modelTier = modelTier;
-  if (isActive !== undefined) updates.isActive = isActive;
-  if (autonomousEnabled !== undefined)
-    updates.autonomousTrading = autonomousEnabled;
-  if (autonomousPosting !== undefined)
-    updates.autonomousPosting = autonomousPosting;
-  if (autonomousCommenting !== undefined)
-    updates.autonomousCommenting = autonomousCommenting;
-  if (autonomousDMs !== undefined) updates.autonomousDMs = autonomousDMs;
-  if (autonomousGroupChats !== undefined)
-    updates.autonomousGroupChats = autonomousGroupChats;
-  if (a2aEnabled !== undefined) updates.a2aEnabled = a2aEnabled;
+  const updates: Parameters<typeof agentService.updateAgent>[2] = {
+    ...fields,
+    ...((autonomousTrading ?? autonomousEnabled) !== undefined
+      ? { autonomousTrading: autonomousTrading ?? autonomousEnabled }
+      : {}),
+  };
 
   const agent = await agentService.updateAgent(agentId, user.id, updates);
   const updatedConfig = await getAgentConfig(agentId);

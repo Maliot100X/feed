@@ -263,7 +263,7 @@ export class PerpDbAdapter implements PerpDbPort {
         | 'unrealizedPnLPercent'
       >
     >
-  ): Promise<void> {
+  ): Promise<boolean> {
     const closedAt = updates.closedAt ?? new Date();
     // Only set fields that are explicitly provided (not undefined)
     const setFields: Record<string, unknown> = {
@@ -279,12 +279,14 @@ export class PerpDbAdapter implements PerpDbPort {
       setFields.realizedPnL = updates.realizedPnL;
     }
 
-    await this.dbClient
+    const closed = await this.dbClient
       .update(perpPositions)
       .set(setFields)
       .where(
         and(eq(perpPositions.id, positionId), isNull(perpPositions.closedAt))
-      );
+      )
+      .returning({ id: perpPositions.id });
+    return closed.length > 0;
   }
 
   async updateMarketStats(
@@ -315,14 +317,100 @@ export class PerpDbAdapter implements PerpDbPort {
       >
     >
   ): Promise<void> {
-    const now = new Date();
-    const existing = await this.dbClient
+    await this.withRowLockTransaction(async (client) => {
+      const now = new Date();
+      const current = await this.lockSnapshot(client, ticker);
+      const rotation = computeSnapshotRotation(current, now, {
+        currentPrice: updates.currentPrice,
+      });
+
+      // Write only explicitly requested fields (plus 24h rotation bookkeeping)
+      // so concurrent writers updating other fields are not overwritten with
+      // stale values.
+      const setFields: Partial<typeof perpMarketSnapshots.$inferInsert> = {
+        ...definedEntries(updates),
+        price24hAgo: rotation.price24hAgo ?? updates.price24hAgo,
+        price24hAgoUpdatedAt: rotation.price24hAgoUpdatedAt,
+        metrics24hResetAt: rotation.metrics24hResetAt,
+        updatedAt: now,
+      };
+      if (rotation.metricsReset) {
+        setFields.high24h = updates.high24h ?? rotation.resetPrice;
+        setFields.low24h = updates.low24h ?? rotation.resetPrice;
+        setFields.volume24h = updates.volume24h ?? 0;
+      }
+
+      await client
+        .update(perpMarketSnapshots)
+        .set(definedEntries(setFields))
+        .where(eq(perpMarketSnapshots.ticker, ticker));
+    });
+  }
+
+  async applyMarketDeltas(
+    ticker: string,
+    deltas: { openInterest?: number; volume24h?: number }
+  ): Promise<{ openInterest: number; volume24h: number }> {
+    for (const [field, value] of Object.entries(deltas)) {
+      if (value !== undefined && !Number.isFinite(value)) {
+        throw new Error(`Invalid ${field} delta for ${ticker}: ${value}`);
+      }
+    }
+
+    return this.withRowLockTransaction(async (client) => {
+      const now = new Date();
+      const current = await this.lockSnapshot(client, ticker);
+      const rotation = computeSnapshotRotation(current, now, {});
+
+      const openInterest = Math.max(
+        0,
+        current.openInterest + (deltas.openInterest ?? 0)
+      );
+      const volume24h =
+        (rotation.metricsReset ? 0 : current.volume24h) +
+        (deltas.volume24h ?? 0);
+
+      await client
+        .update(perpMarketSnapshots)
+        .set({
+          openInterest,
+          volume24h,
+          price24hAgo: rotation.price24hAgo ?? current.price24hAgo,
+          price24hAgoUpdatedAt: rotation.price24hAgoUpdatedAt,
+          metrics24hResetAt: rotation.metrics24hResetAt,
+          ...(rotation.metricsReset
+            ? { high24h: rotation.resetPrice, low24h: rotation.resetPrice }
+            : {}),
+          updatedAt: now,
+        })
+        .where(eq(perpMarketSnapshots.ticker, ticker));
+
+      return { openInterest, volume24h };
+    });
+  }
+
+  /**
+   * Run `fn` in a transaction so a SELECT ... FOR UPDATE row lock is held
+   * until the write commits. Reuses the current transaction if already in one.
+   */
+  private async withRowLockTransaction<T>(
+    fn: (client: DrizzleClient) => Promise<T>
+  ): Promise<T> {
+    if (this.dbClient !== defaultDb) {
+      return fn(this.dbClient);
+    }
+    return defaultDb.transaction((txClient) => fn(txClient));
+  }
+
+  private async lockSnapshot(client: DrizzleClient, ticker: string) {
+    const [current] = await client
       .select()
       .from(perpMarketSnapshots)
       .where(eq(perpMarketSnapshots.ticker, ticker))
-      .limit(1);
+      .limit(1)
+      .for('update');
 
-    if (existing.length === 0) {
+    if (!current) {
       // Snapshot must be seeded separately - this method only updates existing snapshots
       // Use init-snapshots script in @feed/engine to seed from static organization data
       throw new Error(
@@ -330,69 +418,7 @@ export class PerpDbAdapter implements PerpDbPort {
           'Run perp market seeding to create snapshots from static organization data.'
       );
     }
-
-    const current = existing[0]!;
-    const TWENTY_FOUR_HOURS = 24 * 60 * 60 * 1000;
-
-    // Rotate price24hAgo if more than 24 hours have passed since last rotation
-    let price24hAgo = updates.price24hAgo ?? current.price24hAgo;
-    let price24hAgoUpdatedAt = current.price24hAgoUpdatedAt;
-
-    if (
-      !price24hAgoUpdatedAt ||
-      now.getTime() - price24hAgoUpdatedAt.getTime() >= TWENTY_FOUR_HOURS
-    ) {
-      // Time to rotate: current price becomes price24hAgo
-      price24hAgo = current.currentPrice;
-      price24hAgoUpdatedAt = now;
-    }
-
-    // Reset 24h metrics (high/low/volume) if more than 24 hours have passed
-    let high24h = updates.high24h ?? current.high24h;
-    let low24h = updates.low24h ?? current.low24h;
-    let volume24h = updates.volume24h ?? current.volume24h;
-    let metrics24hResetAt = current.metrics24hResetAt;
-
-    if (
-      !metrics24hResetAt ||
-      now.getTime() - metrics24hResetAt.getTime() >= TWENTY_FOUR_HOURS
-    ) {
-      // Reset: use current price as starting point for high/low, zero volume
-      const currentPrice = updates.currentPrice ?? current.currentPrice;
-      high24h = updates.high24h ?? currentPrice;
-      low24h = updates.low24h ?? currentPrice;
-      volume24h = updates.volume24h ?? 0;
-      metrics24hResetAt = now;
-    }
-
-    await this.dbClient
-      .update(perpMarketSnapshots)
-      .set({
-        currentPrice: updates.currentPrice ?? current.currentPrice,
-        price24hAgo,
-        price24hAgoUpdatedAt,
-        metrics24hResetAt,
-        change24h: updates.change24h ?? current.change24h,
-        changePercent24h: updates.changePercent24h ?? current.changePercent24h,
-        high24h,
-        low24h,
-        volume24h,
-        openInterest: updates.openInterest ?? current.openInterest,
-        fundingRate: updates.fundingRate ?? current.fundingRate,
-        maxLeverage: updates.maxLeverage ?? current.maxLeverage,
-        minOrderSize: updates.minOrderSize ?? current.minOrderSize,
-        bidPrice: updates.bidPrice ?? current.bidPrice,
-        askPrice: updates.askPrice ?? current.askPrice,
-        spreadBps: updates.spreadBps ?? current.spreadBps,
-        bidDepth: updates.bidDepth ?? current.bidDepth,
-        askDepth: updates.askDepth ?? current.askDepth,
-        liquidityRegime: updates.liquidityRegime ?? current.liquidityRegime,
-        quoteUpdatedAt: updates.quoteUpdatedAt ?? current.quoteUpdatedAt,
-        markPrice: updates.markPrice ?? current.markPrice,
-        indexPrice: updates.indexPrice ?? current.indexPrice,
-        updatedAt: now,
-      })
-      .where(eq(perpMarketSnapshots.ticker, ticker));
+    return current;
   }
 
   /**
@@ -410,6 +436,54 @@ export class PerpDbAdapter implements PerpDbPort {
       return fn(txAdapter);
     });
   }
+}
+
+const TWENTY_FOUR_HOURS_MS = 24 * 60 * 60 * 1000;
+
+/**
+ * Compute 24h rotation bookkeeping for a snapshot row:
+ * - price24hAgo rotates to the current price once per 24h
+ * - high/low/volume reset once per 24h
+ */
+function computeSnapshotRotation(
+  current: {
+    currentPrice: number;
+    price24hAgoUpdatedAt: Date | null;
+    metrics24hResetAt: Date | null;
+  },
+  now: Date,
+  updates: { currentPrice?: number }
+): {
+  price24hAgo: number | undefined;
+  price24hAgoUpdatedAt: Date | null;
+  metrics24hResetAt: Date | null;
+  metricsReset: boolean;
+  resetPrice: number;
+} {
+  const priceRotationDue =
+    !current.price24hAgoUpdatedAt ||
+    now.getTime() - current.price24hAgoUpdatedAt.getTime() >=
+      TWENTY_FOUR_HOURS_MS;
+  const metricsReset =
+    !current.metrics24hResetAt ||
+    now.getTime() - current.metrics24hResetAt.getTime() >= TWENTY_FOUR_HOURS_MS;
+
+  return {
+    price24hAgo: priceRotationDue ? current.currentPrice : undefined,
+    price24hAgoUpdatedAt: priceRotationDue ? now : current.price24hAgoUpdatedAt,
+    metrics24hResetAt: metricsReset ? now : current.metrics24hResetAt,
+    metricsReset,
+    resetPrice: updates.currentPrice ?? current.currentPrice,
+  };
+}
+
+/** Drop undefined values so they are not written as NULL/defaults. */
+function definedEntries<T extends Record<string, unknown>>(
+  value: T
+): Partial<T> {
+  return Object.fromEntries(
+    Object.entries(value).filter(([, v]) => v !== undefined)
+  ) as Partial<T>;
 }
 
 function mapPosition(pos: DbPerpPosition): PerpPositionRecord {

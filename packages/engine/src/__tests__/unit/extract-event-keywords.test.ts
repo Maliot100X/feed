@@ -10,7 +10,7 @@
  * - Action extraction (crash, surge, launch)
  */
 
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it } from 'bun:test';
 
 import { extractEventKeywords } from '../../services/lookahead-generation-service';
 

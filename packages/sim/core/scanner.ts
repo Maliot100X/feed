@@ -5,7 +5,9 @@
 import { existsSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { logger } from '@feed/shared';
-import { type Import, scanDirExports } from 'unimport';
+import { scanDirExports } from 'unimport';
+import { FrameworkError } from './errors';
+import { resolveModuleSystems } from './runtime';
 import type { FeedSystem } from './types';
 
 export interface ScanResult {
@@ -13,17 +15,29 @@ export interface ScanResult {
   files: string[];
 }
 
+export interface ScanOptions {
+  /**
+   * Bypass the module cache for discovered system files (dev hot-reload).
+   * Only the system files themselves are re-evaluated; their transitive
+   * imports may still be served from the module cache.
+   */
+  fresh?: boolean;
+}
+
 /**
- * Scan a directory for files exporting FeedSystem instances.
- * Each file should export a default or named object that satisfies the FeedSystem interface.
+ * Scan a directory for files exporting FeedSystem instances or classes.
+ *
+ * A missing directory yields no systems. Any failure to scan the directory,
+ * load a file, or construct an exported system class rejects with the file
+ * path so broken startup is never mistaken for an empty system set.
  */
 export async function scanSystems(
   systemsDir: string,
-  rootDir: string
+  rootDir: string,
+  options: ScanOptions = {}
 ): Promise<ScanResult> {
   const absoluteDir = resolve(rootDir, systemsDir);
   const systems: FeedSystem[] = [];
-  const files: string[] = [];
 
   if (!existsSync(absoluteDir)) {
     logger.warn(
@@ -34,102 +48,36 @@ export async function scanSystems(
     return { systems: [], files: [] };
   }
 
-  let exports: Import[];
-  try {
-    exports = await scanDirExports([absoluteDir], {
-      filePatterns: ['*.ts', '*.js', '*.mts', '*.mjs'],
-    });
-  } catch (err) {
-    logger.error(
-      `Failed to scan systems directory at ${absoluteDir}`,
-      err instanceof Error ? err : new Error(String(err)),
-      'Runtime'
-    );
-    return { systems: [], files: [] };
-  }
+  const exports = await scanDirExports([absoluteDir], {
+    filePatterns: ['*.ts', '*.js', '*.mts', '*.mjs'],
+  });
+  const files = [...new Set(exports.map((exp) => exp.from))];
 
-  // Group exports by file
-  const fileExports = new Map<string, Import[]>();
-  for (const exp of exports) {
-    const from = exp.from;
-    if (!fileExports.has(from)) fileExports.set(from, []);
-    fileExports.get(from)!.push(exp);
-  }
-
-  for (const [filePath, fileExps] of fileExports) {
-    files.push(filePath);
-
+  for (const filePath of files) {
+    if (options.fresh) {
+      // Bun shares its module registry with require.cache; evicting the entry
+      // forces the next import() to re-evaluate the changed file.
+      delete require.cache[filePath];
+    }
+    let mod: Record<string, unknown>;
     try {
-      const mod = await import(filePath);
-
-      // Try default export first, then named exports
-      const candidates: unknown[] = [];
-      if (mod.default) candidates.push(mod.default);
-      for (const exp of fileExps) {
-        if (exp.name !== 'default' && mod[exp.name]) {
-          candidates.push(mod[exp.name]);
-        }
-      }
-
-      const seen = new Set<string>();
-      for (const candidate of candidates) {
-        const instance = resolveSystem(candidate);
-        if (instance && !seen.has(instance.id)) {
-          seen.add(instance.id);
-          systems.push(instance);
-          logger.info(
-            `Discovered system "${instance.id}" from ${filePath}`,
-            undefined,
-            'Runtime'
-          );
-        }
-      }
+      mod = await import(filePath);
     } catch (err) {
-      logger.error(
-        `Failed to load system from ${filePath}`,
-        err instanceof Error ? err : new Error(String(err)),
-        'Runtime'
+      const message = err instanceof Error ? err.message : String(err);
+      throw new FrameworkError(
+        `Failed to load system file ${filePath}: ${message}`
       );
     }
-  }
 
-  return { systems, files };
-}
-
-/**
- * Resolve a candidate export to a FeedSystem instance.
- * Handles both class constructors and pre-instantiated objects.
- */
-function resolveSystem(candidate: unknown): FeedSystem | null {
-  if (!candidate) return null;
-
-  // Already an instance with the right shape
-  if (isFeedSystem(candidate)) return candidate;
-
-  // Class constructor — instantiate it
-  if (typeof candidate === 'function') {
-    try {
-      const instance = new (candidate as new () => unknown)();
-      if (isFeedSystem(instance)) return instance;
-    } catch (err) {
-      logger.warn(
-        `Failed to instantiate candidate constructor: ${err instanceof Error ? err.message : String(err)}`,
+    for (const instance of resolveModuleSystems(mod, filePath)) {
+      systems.push(instance);
+      logger.info(
+        `Discovered system "${instance.id}" from ${filePath}`,
         undefined,
         'Runtime'
       );
     }
   }
 
-  return null;
-}
-
-function isFeedSystem(obj: unknown): obj is FeedSystem {
-  if (!obj || typeof obj !== 'object') return false;
-  const m = obj as Record<string, unknown>;
-  return (
-    typeof m.id === 'string' &&
-    typeof m.name === 'string' &&
-    typeof m.phase === 'number' &&
-    typeof m.onTick === 'function'
-  );
+  return { systems, files };
 }

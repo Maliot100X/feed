@@ -21,6 +21,8 @@ import { createHash } from 'crypto';
 type DuplicateRecord = {
   contentHash: string;
   timestamp: number;
+  /** Per-record expiry so cleanup honors custom (longer) windows */
+  expiresAt: number;
 };
 
 type DuplicateConfig = {
@@ -93,7 +95,11 @@ export function checkDuplicate(
     };
   }
 
-  recentRecords.push({ contentHash, timestamp: now });
+  recentRecords.push({
+    contentHash,
+    timestamp: now,
+    expiresAt: now + config.windowMs,
+  });
 
   logger.debug(
     'Content uniqueness check passed',
@@ -120,14 +126,11 @@ export function clearAllDuplicates(): void {
 
 export function cleanupDuplicates(): void {
   const now = Date.now();
-  const maxAge = 10 * 60 * 1000; // 10 minutes (longer than any window)
 
   let cleanedCount = 0;
 
   for (const [key, records] of duplicateStore.entries()) {
-    const validRecords = records.filter(
-      (record) => now - record.timestamp < maxAge
-    );
+    const validRecords = records.filter((record) => record.expiresAt > now);
     if (validRecords.length === 0) {
       duplicateStore.delete(key);
       cleanedCount++;
@@ -156,7 +159,8 @@ export function getDuplicateStats(): {
   let totalRecords = 0;
 
   for (const [key, records] of duplicateStore.entries()) {
-    const actionType = key.split(':')[1] ?? 'unknown';
+    // Keys are `${userId}:${actionType}`; user IDs may contain colons.
+    const actionType = key.slice(key.lastIndexOf(':') + 1) || 'unknown';
     totalRecords += records.length;
     recordsByType[actionType] =
       (recordsByType[actionType] ?? 0) + records.length;
@@ -171,7 +175,8 @@ export function getDuplicateStats(): {
 
 // Best-effort periodic cleanup (no-op in environments without setInterval)
 if (typeof setInterval !== 'undefined' && process.env.NODE_ENV !== 'test') {
-  setInterval(cleanupDuplicates, 5 * 60 * 1000);
+  // unref so this best-effort timer never keeps a process alive on its own
+  setInterval(cleanupDuplicates, 5 * 60 * 1000).unref?.();
 }
 
 // =============================================================================
@@ -179,9 +184,9 @@ if (typeof setInterval !== 'undefined' && process.env.NODE_ENV !== 'test') {
 // =============================================================================
 
 type RateLimitRecord = {
-  count: number;
-  windowStart: number;
   recentActions: number[];
+  /** Window of the most recent check, so cleanup honors custom windows */
+  windowMs: number;
 };
 
 export type RateLimitConfig = {
@@ -333,9 +338,10 @@ function checkRateLimitMemory(
 
   let record = memoryFallbackStore.get(key);
   if (!record) {
-    record = { count: 0, windowStart: now, recentActions: [] };
+    record = { recentActions: [], windowMs: config.windowMs };
     memoryFallbackStore.set(key, record);
   }
+  record.windowMs = config.windowMs;
 
   const windowStart = now - config.windowMs;
   record.recentActions = record.recentActions.filter(
@@ -364,8 +370,6 @@ function checkRateLimitMemory(
   }
 
   record.recentActions.push(now);
-  record.count = record.recentActions.length;
-  record.windowStart = now;
 
   const remaining = config.maxRequests - record.recentActions.length;
 
@@ -480,13 +484,12 @@ export function getRateLimitStatus(
 
 export function cleanupMemoryRateLimits(): void {
   const now = Date.now();
-  const maxAge = 5 * 60 * 1000;
 
   let cleanedCount = 0;
 
   for (const [key, record] of memoryFallbackStore.entries()) {
     const hasRecentActions = record.recentActions.some(
-      (timestamp) => now - timestamp < maxAge
+      (timestamp) => now - timestamp < record.windowMs
     );
     if (!hasRecentActions) {
       memoryFallbackStore.delete(key);

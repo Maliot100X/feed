@@ -15,27 +15,24 @@
  */
 
 import { describe, expect, test } from 'bun:test';
+import { SeededRandom } from '../../utils/entropy';
 import {
   ActionDiversityTracker,
   createDiscourseActionDeck,
   shuffleWithNoConsecutive,
 } from '../../utils/feed-diversity';
 
+/** Deterministic rng via the canonical engine SeededRandom. */
+const createSeededRandom = (seed: number) => {
+  const rng = new SeededRandom(seed);
+  return () => rng.next();
+};
+
 // =============================================================================
 // TESTS: shuffleWithNoConsecutive
 // =============================================================================
 
 describe('shuffleWithNoConsecutive', () => {
-  // Deterministic random for testing (Mulberry32 PRNG)
-  const createSeededRandom = (seed: number) => {
-    let t = seed + 0x6d2b79f5;
-    return () => {
-      t = Math.imul(t ^ (t >>> 15), t | 1);
-      t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
-      return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
-    };
-  };
-
   test('returns empty array for empty input', () => {
     const result = shuffleWithNoConsecutive([], Math.random);
     expect(result).toEqual([]);
@@ -167,24 +164,20 @@ describe('shuffleWithNoConsecutive', () => {
 // =============================================================================
 
 describe('createDiscourseActionDeck', () => {
-  // Deterministic random for testing (Mulberry32 PRNG)
-  const createSeededRandom = (seed: number) => {
-    let t = seed + 0x6d2b79f5;
-    return () => {
-      t = Math.imul(t ^ (t >>> 15), t | 1);
-      t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
-      return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
-    };
-  };
-
   test('returns empty array for zero slots', () => {
     const result = createDiscourseActionDeck(0, 0.3, Math.random);
     expect(result).toEqual([]);
   });
 
-  test('returns empty array for negative slots', () => {
-    const result = createDiscourseActionDeck(-5, 0.3, Math.random);
-    expect(result).toEqual([]);
+  test('rejects invalid slot counts and ratios', () => {
+    expect(() => createDiscourseActionDeck(-5, 0.3, Math.random)).toThrow();
+    expect(() => createDiscourseActionDeck(2.5, 0.3, Math.random)).toThrow();
+    expect(() =>
+      createDiscourseActionDeck(Number.POSITIVE_INFINITY, 0.3, Math.random)
+    ).toThrow();
+    expect(() =>
+      createDiscourseActionDeck(4, Number.NaN, Math.random)
+    ).toThrow();
   });
 
   test('creates correct ratio of quotes to replies', () => {

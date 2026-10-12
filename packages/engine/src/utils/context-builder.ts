@@ -12,10 +12,11 @@
  * - Relationship context
  */
 
-import { and, db, desc, gte, lte, worldEvents } from '@feed/db';
+import { and, db, desc, gte, inArray, lte, worldEvents } from '@feed/db';
 import { RelationshipEvolutionEngine } from '../RelationshipEvolutionEngine';
 import { parseStringArraySafe } from '../services/jsonb-validators';
 import { MarketContextService } from '../services/market-context-service';
+import { StaticDataRegistry } from '../services/static-data-registry';
 import { isSimulationMode } from '../storage-bridge';
 import type { Actor, FeedPost, Question, WorldEvent } from '../types/shared';
 import { CONTEXT_LIMITS, truncateArray, truncateText } from './context-limits';
@@ -35,7 +36,10 @@ export interface ComprehensiveNPCContext {
   recentEvents: Array<{
     type: string;
     description: string;
-    timestamp: string;
+    /** Real timestamp (DB events); absent for simulation-day events */
+    timestamp?: string;
+    /** Simulation day (in-memory events) */
+    day?: number;
     actors?: string[];
     pointsToward?: string | null;
   }>;
@@ -70,6 +74,13 @@ export interface ComprehensiveNPCContext {
     side: string;
     pnl?: number;
   }>;
+}
+
+/** World-event visibilities that belong in general (non-privileged) context */
+const WORLD_VISIBLE = ['public', 'leaked'] as const;
+
+function isWorldVisible(visibility: string | undefined): boolean {
+  return (WORLD_VISIBLE as readonly string[]).includes(visibility ?? 'public');
 }
 
 /**
@@ -108,9 +119,11 @@ export async function buildComprehensiveNPCContext(
   }));
 
   let recentEvents: ComprehensiveNPCContext['recentEvents'] = [];
-  if (allPreviousEvents && allPreviousEvents.length > 0) {
+  // An explicitly provided list (even empty) is the event source; only an
+  // absent list falls back to the database.
+  if (allPreviousEvents !== undefined) {
     const filteredEvents = allPreviousEvents
-      .filter((e) => e.day < currentDay)
+      .filter((e) => e.day < currentDay && isWorldVisible(e.visibility))
       .slice(-CONTEXT_LIMITS.MAX_EVENTS_RECENT * 2);
 
     const shuffledEvents = shuffleArray(filteredEvents);
@@ -123,7 +136,7 @@ export async function buildComprehensiveNPCContext(
         e.description || e.type,
         CONTEXT_LIMITS.MAX_EVENT_DESCRIPTION_LENGTH
       ),
-      timestamp: `2025-10-${String(e.day).padStart(2, '0')}T12:00:00Z`,
+      day: e.day,
       actors: truncateArray(
         shuffleArray(e.actors || []),
         CONTEXT_LIMITS.MAX_ACTORS_PER_EVENT
@@ -142,7 +155,8 @@ export async function buildComprehensiveNPCContext(
       .where(
         and(
           gte(worldEvents.timestamp, sevenDaysAgo),
-          lte(worldEvents.timestamp, now)
+          lte(worldEvents.timestamp, now),
+          inArray(worldEvents.visibility, [...WORLD_VISIBLE])
         )
       )
       .orderBy(desc(worldEvents.timestamp))
@@ -244,7 +258,8 @@ export async function buildComprehensiveNPCContext(
                 : 'weak';
 
           return {
-            otherActorName: otherActorId,
+            otherActorName:
+              StaticDataRegistry.getActor(otherActorId)?.name ?? otherActorId,
             type: rel.relationshipType,
             sentiment: sentimentDesc,
             strength: strengthDesc,
@@ -260,10 +275,11 @@ export async function buildComprehensiveNPCContext(
       ? shuffleArray(npcContext.currentPositions)
           .slice(0, 5)
           .map((pos) => ({
-            market: ('ticker' in pos ? pos.ticker : 'unknown') as string,
-            side: ('side' in pos ? pos.side : 'unknown') as string,
-            pnl:
-              'pnl' in pos && typeof pos.pnl === 'number' ? pos.pnl : undefined,
+            market: pos.ticker ?? pos.marketId ?? 'unknown',
+            side: pos.side,
+            pnl: Number.isFinite(pos.unrealizedPnL)
+              ? pos.unrealizedPnL
+              : undefined,
           }))
       : [];
   }
@@ -272,7 +288,12 @@ export async function buildComprehensiveNPCContext(
 
   // Build ongoing narratives from recent event patterns (last 5 days)
   const narrativeEvents = (allPreviousEvents || [])
-    .filter((e) => e.day >= currentDay - 5)
+    .filter(
+      (e) =>
+        e.day >= currentDay - 5 &&
+        e.day < currentDay &&
+        isWorldVisible(e.visibility)
+    )
     .slice(-10);
   const ongoingNarratives =
     narrativeEvents.length > 0
@@ -290,6 +311,7 @@ export async function buildComprehensiveNPCContext(
       type: e.type || 'unknown',
       description: e.description,
       timestamp: e.timestamp,
+      day: e.day,
       actors: e.actors,
       pointsToward: e.pointsToward || undefined,
     })),
@@ -363,7 +385,8 @@ export function formatComprehensiveContext(
       maxRecentEvents
     )
       .map((e, i) => {
-        const day = extractDayFromTimestamp(e.timestamp);
+        const day =
+          e.day ?? (e.timestamp ? extractDayFromTimestamp(e.timestamp) : 0);
         const actors =
           e.actors && e.actors.length > 0
             ? ` (involved: ${truncateArray(e.actors, CONTEXT_LIMITS.MAX_ACTORS_PER_EVENT).join(', ')})`
@@ -524,7 +547,8 @@ export function formatComprehensiveContext(
     sections.push(truncateText(sectionText, CONTEXT_LIMITS.MAX_SECTION_LENGTH));
   }
 
-  const shuffledSections = shuffleArray(sections);
-  const fullContext = shuffledSections.join('\n\n');
+  // Sections are pushed in priority order; keep that order so truncation
+  // drops the lowest-priority sections, not random ones.
+  const fullContext = sections.join('\n\n');
   return truncateText(fullContext, CONTEXT_LIMITS.MAX_TOTAL_CONTEXT_LENGTH);
 }

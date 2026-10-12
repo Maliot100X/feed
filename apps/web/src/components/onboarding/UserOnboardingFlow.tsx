@@ -213,14 +213,17 @@ export function UserOnboardingFlow({
       setIsLoadingDefaults(true);
 
       const [profileResult, assetsResult] = await Promise.allSettled([
-        apiFetch('/api/onboarding/generate-profile', { auth: false }),
+        apiFetch('/api/onboarding/generate-profile', { method: 'POST' }),
         apiFetch('/api/onboarding/random-assets', { auth: false }),
       ]);
 
       if (profileResult.status === 'fulfilled' && profileResult.value.ok) {
         const generated =
           (await profileResult.value.json()) as GeneratedProfileResponse;
-        setUsername(generated.username);
+        setUsername(
+          generated.username ||
+            `user_${Math.random().toString(36).slice(2, 10)}`
+        );
       } else {
         setUsername(`user_${Math.random().toString(36).slice(2, 10)}`);
       }

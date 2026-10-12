@@ -191,11 +191,33 @@ export class NPCPersonaGenerator {
   ): Map<string, PersonaAssignment> {
     const personas = new Map<string, PersonaAssignment>();
 
+    const seenIds = new Set<string>();
+    for (const actor of actors) {
+      if (seenIds.has(actor.id)) {
+        throw new Error(
+          `Duplicate actor ID in persona assignment: ${actor.id}`
+        );
+      }
+      seenIds.add(actor.id);
+    }
+
+    if (actors.length === 0) {
+      logger.info(
+        'No actors to assign personas to',
+        undefined,
+        'NPCPersonaGenerator'
+      );
+      return personas;
+    }
+
+    // Built once per assignment instead of once per actor
+    const validOrgIds = new Set(organizations.map((o) => o.id));
+
     for (const actor of actors) {
       const persona = this.generatePersonaForActor(
         actor,
         actors,
-        organizations,
+        validOrgIds,
         rng
       );
       personas.set(actor.id, persona);
@@ -223,7 +245,7 @@ export class NPCPersonaGenerator {
   private generatePersonaForActor(
     actor: Actor,
     allActors: Actor[],
-    organizations: Organization[],
+    validOrgIds: ReadonlySet<string>,
     rng: RngFunction
   ): PersonaAssignment {
     // Determine base reliability from role/personality/domain
@@ -280,19 +302,20 @@ export class NPCPersonaGenerator {
     }
 
     // Insiders get higher reliability about their orgs
-    const insiderOrgs = actor.affiliations || [];
+    // Copies: persona arrays must not alias (or let callers mutate) actor data
+    const insiderOrgs = [...new Set(actor.affiliations || [])];
     if (insiderOrgs.length > 0) {
       baseReliability = Math.max(baseReliability, 0.7); // Insiders minimum 0.7
     }
 
     // Expertise from domain
-    const expertise = actor.domain || [];
+    const expertise = [...(actor.domain || [])];
 
     // Determine favors/opposes from affiliations
-    const favorsOrgs = insiderOrgs;
+    const favorsOrgs = [...insiderOrgs];
 
     // Find competitor orgs from correlations data
-    const opposesOrgs = this.findCompetitorOrgs(insiderOrgs, organizations);
+    const opposesOrgs = this.findCompetitorOrgs(insiderOrgs, validOrgIds);
 
     // Find actors with shared affiliations (colleagues = allies)
     const favorsActors = this.findActorsWithSharedAffiliations(
@@ -425,16 +448,15 @@ export class NPCPersonaGenerator {
    * Uses the precomputed competitor map for O(1) lookup per affiliation.
    *
    * @param affiliations - The actor's affiliated organization IDs
-   * @param organizations - All organizations (for validation)
+   * @param validOrgIds - IDs of organizations in the current game
    * @returns Array of competitor organization IDs
    */
   private findCompetitorOrgs(
     affiliations: string[],
-    organizations: Organization[]
+    validOrgIds: ReadonlySet<string>
   ): string[] {
     if (affiliations.length === 0) return [];
 
-    const validOrgIds = new Set(organizations.map((o) => o.id));
     const competitors = new Set<string>();
     const competitorMap = this.getCompetitorMap();
 

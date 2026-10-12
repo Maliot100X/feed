@@ -21,6 +21,7 @@ import {
   desc,
   eq,
   isNull,
+  lte,
   posts,
   shares,
   users,
@@ -44,11 +45,13 @@ interface CommentWithAuthor {
   authorProfileImageUrl?: string | null;
 }
 
+/** Upper bound on comments read per post detail (newest first). */
+const MAX_COMMENTS = 200;
+
 interface CommentThread {
   id: string;
   author: string;
   content: string;
-  depth: number;
   createdAt: Date;
   replies: CommentThread[];
 }
@@ -66,7 +69,6 @@ function buildCommentTree(flatComments: CommentWithAuthor[]): CommentThread[] {
       id: comment.id,
       author: comment.authorName,
       content: comment.content,
-      depth: 0,
       createdAt: comment.createdAt,
       replies: [],
     });
@@ -80,7 +82,6 @@ function buildCommentTree(flatComments: CommentWithAuthor[]): CommentThread[] {
     if (comment.parentCommentId) {
       const parent = commentMap.get(comment.parentCommentId);
       if (parent) {
-        node.depth = parent.depth + 1;
         parent.replies.push(node);
       } else {
         // Parent not found, treat as root
@@ -221,7 +222,14 @@ export const checkPostDetailAction: Action = {
         })
         .from(posts)
         .leftJoin(users, eq(posts.authorId, users.id))
-        .where(eq(posts.id, postId))
+        // Deleted or future-scheduled posts are not observable.
+        .where(
+          and(
+            eq(posts.id, postId),
+            isNull(posts.deletedAt),
+            lte(posts.timestamp, new Date())
+          )
+        )
         .limit(1);
 
       if (!post) {
@@ -246,8 +254,17 @@ export const checkPostDetailAction: Action = {
         })
         .from(comments)
         .leftJoin(users, eq(comments.authorId, users.id))
-        .where(and(eq(comments.postId, postId), isNull(comments.deletedAt)))
-        .orderBy(desc(comments.createdAt));
+        .where(
+          and(
+            eq(comments.postId, postId),
+            isNull(comments.deletedAt),
+            lte(comments.createdAt, new Date())
+          )
+        )
+        .orderBy(desc(comments.createdAt), desc(comments.id))
+        .limit(MAX_COMMENTS + 1);
+      const commentsTruncated = postComments.length > MAX_COMMENTS;
+      if (commentsTruncated) postComments.length = MAX_COMMENTS;
 
       // Helper to get author info from StaticDataRegistry or user data
       const getAuthorInfo = (
@@ -327,7 +344,7 @@ export const checkPostDetailAction: Action = {
       const formattedView = `POST [ID: ${post.id}] by @${postAuthorName}:
 "${post.content.substring(0, 500)}${post.content.length > 500 ? '...' : ''}"
 
-${postComments.length > 0 ? `COMMENTS (${postComments.length}):\n${formattedComments}` : 'No comments yet.'}`;
+${postComments.length > 0 ? `COMMENTS (${postComments.length}${commentsTruncated ? `, newest ${MAX_COMMENTS} shown; older comments omitted` : ''}):\n${formattedComments}` : 'No comments yet.'}`;
 
       logger.info(
         `[CHECK_POST_DETAIL] Retrieved post ${postId} with ${postComments.length} comments`,

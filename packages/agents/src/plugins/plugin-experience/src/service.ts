@@ -678,6 +678,7 @@ export class ExperienceService extends Service {
 
     for (const experience of toRemove) {
       this.experiences.delete(experience.id);
+      this.relationshipManager.removeExperience(experience.id);
 
       // Remove from domain index
       const domainSet = this.experiencesByDomain.get(experience.domain);

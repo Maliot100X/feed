@@ -438,81 +438,32 @@ The deploy command requires `COMMIT_SHA` and all runtime secrets. `/__deployment
 reports the deployed commit; check it, `/api/health`, login, authenticated writes,
 uploads, SSE, agent actions, and Surplus generation on staging before promotion.
 
-### Data and cutover
+### Data and infrastructure
 
-The target architecture uses Railway PostgreSQL and Redis, replacing Neon, with
-Cloudflare hosting the web app, uploads, and scheduler. The initially empty
-`the-feed` Railway project now has separate `staging` and `production` environments,
-each with PostgreSQL 18 and Redis 8.2 services and persistent volumes. Daily and
-weekly volume backups are configured. The source databases are Neon PostgreSQL 17
-with no extensions beyond `plpgsql`; preserve them until verified restoration,
-schema reconciliation, and cutover finish. The private `feed-migration-backups` R2
-bucket receives migration snapshots. Database secrets must not switch to Railway
-until the restored datasets and application connections pass validation.
+Production and staging run on Cloudflare Workers (`feed-web-*`, plus the
+queue-backed `feed-cron-*` scheduler) with Railway PostgreSQL 18 and Redis 8.2.
+Each environment started from a fresh database migrated with
+`0000_fresh_baseline` and seeded with `bun run db:seed`; Railway takes daily and
+weekly volume backups.
 
-The temporary Railway jobs in `scripts/cloudflare/migration` stream read-only
-source dumps to private R2 using credentials restricted to one environment prefix.
-Restore jobs wait for the completion manifest, read back and verify the complete
-SHA-256, require an empty target, and restore in one transaction. They connect
-over Railway's private network with the target's pinned CA and save table counts
-and a restore receipt to R2. Remove these jobs and their temporary credentials
-after the final restore is accepted.
+- **PostgreSQL** reaches Workers only through Hyperdrive (`HYPERDRIVE` binding),
+  which verifies TLS against each Railway service's private CA (`verify-ca`,
+  query caching off). The Worker derives `DATABASE_URL` from the binding; deploys
+  reject a `DATABASE_URL` Worker secret. Node processes (seed, scripts,
+  migrations) connect through Railway's TCP proxy and pin the CA with
+  `DATABASE_CA_CERT` (or `sslrootcert` for drizzle-kit).
+- **Redis** (`infra/redis-tls`) serves TLS only, with a Let's Encrypt certificate
+  for `redis.feed.fun` / `redis-staging.feed.fun` issued via DNS-01, renewed
+  daily and hot-reloaded. `REDIS_URL` uses `rediss://`.
+- **Uploads** are served from R2 at `/media/<key>`; training artifacts use
+  `r2://training/<key>`. GPU training runs outside the Worker with separately
+  scoped R2 S3 credentials.
 
-The additive SQL in `scripts/cloudflare/sql` was tested against schema-only copies
-of both source databases. Staging needs 20 tables and eight trajectory columns;
-production needs two wallet-transfer tables and the coordinator message enum
-value. Apply these scripts once to the restored databases, then verify constraints,
-indexes, application behavior, and data. Existing extra tables and JSONB columns
-are retained; do not reset migration history or push a destructive schema diff.
-
-Authentication remains a cutover gate. Preserve the configured Steward tenant
-identity and verify credentials against the live provider. Register feed origins
-and callback URLs through an owner/admin session with recent MFA. The client
-uses one-time OAuth codes with PKCE, email codes, and explicit MFA challenges;
-verify real sign-in and cookie renewal before enabling deployment.
-
-Cloudflare connections require publicly trusted TLS certificates. Railway's
-default PostgreSQL certificate is self-signed, and its Redis template starts
-without TLS; finish certificate issuance, renewal, and connection verification
-before connecting the Workers. Keep Redis private until TLS is configured.
-
-Copy legacy Vercel Blob uploads into the uploads R2 bucket and training artifacts
-into the private training bucket, verify counts/checksums, and update stored URLs
-using a reviewed manifest. The 2026-10-10 inventory found 1,077 public images
-(566,522,262 bytes), shared across the old environments.
-All 1,077 objects have been copied into both uploads buckets and verified by
-SHA-256 readback. Stored database URLs still require migration, and a fresh Blob
-inventory/delta copy is required immediately before cutover.
-`bun scripts/cloudflare/copy-uploads.ts staging inventory.json manifest.jsonl --audit`
-validates an inventory exported by the Blob SDK. Set `LEGACY_BLOB_HOST` to the
-audited store hostname. With `--copy` and Cloudflare account/token credentials,
-the script copies missing objects, verifies SHA-256 by reading R2 back, and refuses
-to overwrite different objects. Keep the inventory and manifest outside Git;
-this command does not update database references. Public uploads use `/media/<key>`; training references
-use `r2://training/<key>`. Keep old objects until references and backups are verified.
-External training jobs require separately scoped R2 S3 credentials. GPU training
-execution is not hosted by the web Worker.
-
-Schema changes are manual via `Apply database migrations`, using checked-in SQL.
-Verify the existing migration-history baseline and backup before running it;
-there is no automatic destructive schema push during deployment. The current journal has
-non-increasing timestamps (including migrations 0068/0069), so a preflight blocks
-SQL execution until the live baseline is reconciled. Staging was missing 20 tables
-and production two wallet-transfer tables during the 2026-10-10 audit. Database
-connections worked; approximate database sizes were 20 GB staging and 37 GB production.
-Staging also lacked eight trajectory columns; production had no missing columns
-on existing tables, but type/nullability differences still need review.
-
-The scheduler preserves all 17 schedules in `workers/cron/src/schedule.ts`,
-dispatches through a service binding, and authenticates with `CRON_SECRET`.
-It starts with `CRON_ENABLED=false`. Validate job duration, failure/retry handling,
-and idempotency before enabling it. Stop Vercel cron before enabling Cloudflare cron
-to prevent duplicate game ticks. Drain/reconcile pending messages before rollback.
-
-After staging acceptance, deploy production, configure `feed.fun` and
-`staging.feed.fun` custom domains, verify live TLS and commit identity, then disable
-Vercel's Git integration and old schedules. Retain the old deployment for rollback
-until live acceptance passes. Do not run both schedulers against the same database.
+Schema changes are applied manually via the `Apply database migrations`
+workflow from checked-in SQL; the journal guard blocks out-of-order history.
+`staging` and `production` deploy automatically after CI passes
+(`CLOUDFLARE_DEPLOY_ENABLED`); a deploy verifies `/__deployment` and
+`/api/health` on the new version before finishing.
 
 Surplus is the preferred inference provider for text, embeddings, and images when
 `SURPLUS_API_KEY` is present. Models/base URL are configured in `.env.example`.

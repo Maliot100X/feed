@@ -54,7 +54,7 @@ interface OllamaListResponse {
  * Mapping of agent archetypes to their trained Ollama model names
  * Updated when new models are trained, benchmarked, and deployed
  */
-const ARCHETYPE_MODELS: Record<string, string> = {
+const ARCHETYPE_MODELS: Readonly<Record<string, string>> = {
   trader: 'feed-trader:latest',
   'social-butterfly': 'feed-social:latest',
   scammer: 'feed-scammer:latest',
@@ -94,17 +94,6 @@ export interface OllamaCallParams {
 }
 
 /**
- * Check if Ollama is available
- */
-export async function isOllamaAvailable(): Promise<boolean> {
-  const response = await fetch(`${OLLAMA_BASE_URL}/api/tags`, {
-    method: 'GET',
-    signal: AbortSignal.timeout(2000),
-  });
-  return response.ok;
-}
-
-/**
  * List available Ollama models
  */
 export async function listOllamaModels(): Promise<OllamaModelInfo[]> {
@@ -117,8 +106,11 @@ export async function listOllamaModels(): Promise<OllamaModelInfo[]> {
     throw new Error(`Ollama API error: ${response.status}`);
   }
 
-  const data = (await response.json()) as OllamaListResponse;
-  return data.models || [];
+  const data = (await response.json()) as Partial<OllamaListResponse> | null;
+  if (!data || !Array.isArray(data.models)) {
+    throw new Error('Ollama /api/tags returned an unexpected response shape');
+  }
+  return data.models;
 }
 
 /**
@@ -180,6 +172,20 @@ export async function callOllama(params: OllamaCallParams): Promise<string> {
     model = DEFAULT_MODEL;
   }
 
+  // Capture the trajectory step before the request so a concurrent step
+  // change cannot attach this result to the wrong step.
+  let stepId: string | null = null;
+  if (params.runtime) {
+    const activeStep = await ensureTrajectoryStep(params.runtime);
+    if (activeStep) {
+      trajectoryLogger = activeStep.logger;
+      trajectoryId = activeStep.trajectoryId;
+      stepId = activeStep.stepId;
+    }
+  } else if (trajectoryLogger && trajectoryId) {
+    stepId = trajectoryLogger.getCurrentStepId(trajectoryId);
+  }
+
   const startTime = Date.now();
 
   // Build messages for chat format
@@ -203,8 +209,7 @@ export async function callOllama(params: OllamaCallParams): Promise<string> {
   };
   let responseText: string;
   let data: {
-    message?: { content: string };
-    response?: string;
+    message?: { content?: unknown };
     prompt_eval_count?: number;
     eval_count?: number;
   };
@@ -233,16 +238,32 @@ export async function callOllama(params: OllamaCallParams): Promise<string> {
       throw new Error(`Ollama API error: ${response.status} - ${errorText}`);
     }
 
-    data = (await response.json()) as {
-      message?: { content: string };
-      response?: string;
-      prompt_eval_count?: number;
-      eval_count?: number;
-    };
+    data = (await response.json()) as typeof data;
 
-    responseText = data.message?.content || data.response || '';
+    const content = data?.message?.content;
+    if (typeof content !== 'string') {
+      throw new Error('Ollama /api/chat response is missing message.content');
+    }
+    responseText = content;
     if (!responseText.trim()) throw new Error('Ollama returned empty content');
   } catch (error) {
+    if (trajectoryLogger && stepId) {
+      trajectoryLogger.logLLMCall(stepId, {
+        model,
+        systemPrompt: params.system || '',
+        userPrompt: params.prompt,
+        response: '',
+        temperature: params.temperature ?? 0.7,
+        maxTokens: params.maxTokens ?? 8192,
+        purpose: params.purpose || 'action',
+        actionType: params.actionType,
+        latencyMs: Date.now() - startTime,
+        metadata: {
+          success: false,
+          error: error instanceof Error ? error.message : String(error),
+        },
+      });
+    }
     getAgentLLMBridge()?.({
       ...callMetadata,
       rawResponse: '',
@@ -263,19 +284,6 @@ export async function callOllama(params: OllamaCallParams): Promise<string> {
     durationMs: latencyMs,
     success: true,
   });
-
-  // Log to trajectory if available (CRITICAL for RL training data collection)
-  let stepId: string | null = null;
-  if (params.runtime) {
-    const activeStep = await ensureTrajectoryStep(params.runtime);
-    if (activeStep) {
-      trajectoryLogger = activeStep.logger;
-      trajectoryId = activeStep.trajectoryId;
-      stepId = activeStep.stepId;
-    }
-  } else if (trajectoryLogger && trajectoryId) {
-    stepId = trajectoryLogger.getCurrentStepId(trajectoryId);
-  }
 
   if (trajectoryLogger && trajectoryId && stepId) {
     const reasoningMetadata = buildReasoningTraceMetadata(responseText);
@@ -307,72 +315,4 @@ export async function callOllama(params: OllamaCallParams): Promise<string> {
   );
 
   return responseText;
-}
-
-/**
- * Update the model mapping for an archetype
- *
- * Called when a new model is trained, benchmarked, and ready for deployment
- */
-export function updateArchetypeModel(
-  archetype: string,
-  modelName: string
-): void {
-  ARCHETYPE_MODELS[archetype] = modelName;
-  logger.info(
-    'Updated archetype model',
-    { archetype, modelName },
-    'OllamaProvider'
-  );
-}
-
-/**
- * Get current archetype model mappings
- */
-export function getArchetypeModels(): Record<string, string> {
-  return { ...ARCHETYPE_MODELS };
-}
-
-/**
- * Import a trained model into Ollama
- *
- * Converts a trained model (safetensors/pytorch) to Ollama format
- * and imports it for local inference.
- */
-export async function importModelToOllama(params: {
-  modelPath: string;
-  modelName: string;
-  baseModel?: string;
-}): Promise<boolean> {
-  // Create Modelfile for Ollama
-  const modelfile = `FROM ${params.baseModel || 'qwen2.5:7b-instruct'}
-ADAPTER ${params.modelPath}
-PARAMETER temperature 0.7
-PARAMETER num_predict 8192
-`;
-
-  // Create the model in Ollama
-  const response = await fetch(`${OLLAMA_BASE_URL}/api/create`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      name: params.modelName,
-      modelfile,
-      stream: false,
-    }),
-    signal: AbortSignal.timeout(600000), // 10 minute timeout for model creation
-  });
-
-  if (!response.ok) {
-    const errorText = await response.text();
-    throw new Error(`Failed to create Ollama model: ${errorText}`);
-  }
-
-  logger.info(
-    'Successfully imported model to Ollama',
-    { modelName: params.modelName },
-    'OllamaProvider'
-  );
-
-  return true;
 }

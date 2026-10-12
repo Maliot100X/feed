@@ -48,21 +48,12 @@ import type {
 } from '@feed/shared';
 import { existsSync } from 'fs';
 import { join } from 'path';
-import { actors as actorsData } from '../data/actors';
-import { organizations as organizationsData } from '../data/organizations';
 
-let defaultPackLoaded = false;
-function tryLoadDefaultPack(registry: typeof StaticDataRegistry): void {
-  if (defaultPackLoaded) return;
-  defaultPackLoaded = true;
-  if (defaultPackManifest && defaultPackActors && defaultPackOrganizations) {
-    registry.loadPack({
-      manifest: defaultPackManifest,
-      actors: defaultPackActors,
-      organizations: defaultPackOrganizations,
-    });
-  }
-}
+const DEFAULT_PACK: PackData = {
+  manifest: defaultPackManifest,
+  actors: defaultPackActors,
+  organizations: defaultPackOrganizations,
+};
 
 // =============================================================================
 // TYPES
@@ -183,243 +174,14 @@ export class StaticDataRegistry {
   // INITIALIZATION
   // ==========================================================================
 
+  /**
+   * Lazily load the default pack. The default pack is the single source of
+   * static data; a different pack can be installed with loadPack(), and
+   * clearCache() returns the registry to this default state.
+   */
   private static initialize(): void {
     if (this.actorMap !== null) return;
-    // Skip legacy initialization if pack already loaded
-    if (this.packManifest) return;
-
-    // Try to auto-load the default pack before falling back to legacy imports
-    tryLoadDefaultPack(this);
-    if (this.packManifest) return;
-
-    this.actorMap = new Map();
-    this.actorByUsername = new Map();
-    this.actorList = [];
-    this.actorsByTier = new Map([
-      ['S_TIER', []],
-      ['A_TIER', []],
-      ['B_TIER', []],
-      ['C_TIER', []],
-      ['NONE', []],
-    ]);
-    this.actorsByDomain = new Map();
-
-    // Load actors from TypeScript data
-    for (const actor of actorsData) {
-      // Use type assertion to access optional properties safely
-      const actorAny = actor as {
-        id: string;
-        name: string;
-        username?: string;
-        realName?: string;
-        description?: string;
-        profileDescription?: string;
-        domain?: string[];
-        ignoreTopics?: string[];
-        engagementThreshold?: number;
-        personality?: string;
-        voice?: string;
-        tier?: string;
-        affiliations?: string[];
-        postStyle?: string;
-        postExample?: string[];
-        role?: string;
-        initialLuck?: string;
-        initialMood?: number;
-        tierOverrides?: ActorTierOverrides;
-        pfpDescription?: string;
-        profileBanner?: string;
-      };
-
-      const staticActor: StaticActor = {
-        id: actorAny.id,
-        name: actorAny.name,
-        username: actorAny.username,
-        realName: actorAny.realName,
-        description: actorAny.description,
-        profileDescription: actorAny.profileDescription,
-        domain: actorAny.domain ?? [],
-        ignoreTopics: actorAny.ignoreTopics,
-        engagementThreshold: actorAny.engagementThreshold,
-        personality: actorAny.personality,
-        voice: actorAny.voice,
-        tier: (actorAny.tier as ActorTier) ?? null,
-        affiliations: actorAny.affiliations ?? [],
-        postStyle: actorAny.postStyle,
-        postExample: actorAny.postExample ?? [],
-        role: actorAny.role,
-        initialLuck: actorAny.initialLuck ?? 'medium',
-        initialMood: actorAny.initialMood ?? 0,
-        profileImageUrl: this.getActorImageUrl(actorAny.id),
-        isTest: actorAny.id.startsWith('test-'),
-        tierOverrides: actorAny.tierOverrides,
-        pfpDescription: actorAny.pfpDescription,
-        profileBanner: actorAny.profileBanner,
-      };
-
-      this.actorMap.set(actor.id, staticActor);
-      this.actorList.push(staticActor);
-
-      // Index by username for lookup by username
-      if (staticActor.username) {
-        this.actorByUsername.set(
-          staticActor.username.toLowerCase(),
-          staticActor
-        );
-      }
-
-      // Index by tier
-      const tierKey = (staticActor.tier ?? 'NONE') as ActorTier | 'NONE';
-      this.actorsByTier.get(tierKey)?.push(staticActor);
-
-      // Index by domain
-      for (const domain of staticActor.domain) {
-        if (!this.actorsByDomain.has(domain)) {
-          this.actorsByDomain.set(domain, []);
-        }
-        this.actorsByDomain.get(domain)?.push(staticActor);
-      }
-    }
-
-    this.orgMap = new Map();
-    this.orgList = [];
-
-    // Load organizations from TypeScript data
-    for (const org of organizationsData) {
-      // Use type assertion to access optional properties safely
-      const orgAny = org as {
-        id: string;
-        name: string;
-        ticker?: string;
-        description?: string;
-        type?: string;
-        canBeInvolved?: boolean;
-        initialPrice?: number;
-        originalName?: string;
-        originalHandle?: string;
-        postStyle?: string;
-        pfpDescription?: string;
-        bannerDescription?: string;
-        profileDescription?: string;
-      };
-
-      const staticOrg: StaticOrganization = {
-        id: orgAny.id,
-        name: orgAny.name,
-        ticker: orgAny.ticker,
-        description: orgAny.description ?? '',
-        type: (orgAny.type as OrgType) ?? 'company',
-        canBeInvolved: orgAny.canBeInvolved !== false,
-        initialPrice: orgAny.initialPrice ?? null,
-        imageUrl: this.getOrgImageUrl(orgAny.id),
-        originalName: orgAny.originalName,
-        originalHandle: orgAny.originalHandle,
-        postStyle: orgAny.postStyle,
-        pfpDescription: orgAny.pfpDescription,
-        bannerDescription: orgAny.bannerDescription,
-        profileDescription: orgAny.profileDescription,
-      };
-
-      this.orgMap.set(orgAny.id, staticOrg);
-      this.orgList.push(staticOrg);
-    }
-
-    // Build character mappings
-    this.charMappings = new Map();
-    for (const actor of this.actorList) {
-      if (actor.realName) {
-        const mapping: CharacterMapping = {
-          realName: actor.realName,
-          parodyName: actor.name,
-          category: this.mapDomainToCategory(actor.domain),
-          aliases: this.generateActorAliases(actor),
-          priority: this.mapTierToPriority(actor.tier),
-        };
-        this.charMappings.set(actor.realName.toLowerCase(), mapping);
-      }
-    }
-
-    // Build organization mappings
-    this.orgMappings = new Map();
-    for (const org of this.orgList) {
-      if (org.originalName) {
-        const mapping: OrganizationMapping = {
-          realName: org.originalName,
-          parodyName: org.name,
-          category: this.mapOrgTypeToCategory(org.type),
-          aliases: org.originalHandle ? [org.originalHandle] : [],
-          priority: this.getOrganizationPriority(org.originalName, org.type),
-        };
-        this.orgMappings.set(org.originalName.toLowerCase(), mapping);
-      }
-    }
-
-    // Add fallback mappings for common social platforms not in static data
-    const fallbackMappings: OrganizationMapping[] = [
-      {
-        realName: 'Discord',
-        parodyName: 'DIscord',
-        category: 'platform',
-        aliases: [],
-        priority: 80,
-      },
-      {
-        realName: 'Reddit',
-        parodyName: 'AIeddit',
-        category: 'platform',
-        aliases: [],
-        priority: 80,
-      },
-      {
-        realName: 'LinkedIn',
-        parodyName: 'LinkAIdIn',
-        category: 'platform',
-        aliases: [],
-        priority: 80,
-      },
-      {
-        realName: 'TikTok',
-        parodyName: 'TikTAIk',
-        category: 'platform',
-        aliases: [],
-        priority: 80,
-      },
-      {
-        realName: 'Instagram',
-        parodyName: 'InstAIgram',
-        category: 'platform',
-        aliases: [],
-        priority: 80,
-      },
-      {
-        realName: 'YouTube',
-        parodyName: 'YoutAIbe',
-        category: 'platform',
-        aliases: [],
-        priority: 80,
-      },
-      {
-        realName: 'Facebook',
-        parodyName: 'FAIcebook',
-        category: 'platform',
-        aliases: [],
-        priority: 80,
-      },
-      {
-        realName: 'Twitter',
-        parodyName: 'XAI',
-        category: 'platform',
-        aliases: ['X'],
-        priority: 80,
-      },
-    ];
-
-    for (const mapping of fallbackMappings) {
-      const key = mapping.realName.toLowerCase();
-      if (!this.orgMappings.has(key)) {
-        this.orgMappings.set(key, mapping);
-      }
-    }
+    this.loadPack(DEFAULT_PACK);
   }
 
   // ==========================================================================
@@ -427,21 +189,14 @@ export class StaticDataRegistry {
   // ==========================================================================
 
   /**
-   * Load all static data from a pack instead of legacy imports.
+   * Load all static data from a pack, replacing whatever is loaded.
    * Clears existing caches and populates all internal maps from pack data.
    */
   static loadPack(pack: PackData): void {
     const { manifest, actors, organizations } = pack;
 
-    // Store raw pack data
-    this.packManifest = manifest;
-    this.packActors = actors;
-    this.packOrganizations = organizations;
-
-    // Clear existing caches
     this.clearCache();
 
-    // Re-set pack data (clearCache nulls it)
     this.packManifest = manifest;
     this.packActors = actors;
     this.packOrganizations = organizations;
@@ -576,6 +331,7 @@ export class StaticDataRegistry {
    * Get the loaded pack ID, or null if no pack is loaded.
    */
   static getPackId(): string | null {
+    this.initialize();
     return this.packManifest?.id ?? null;
   }
 
@@ -583,6 +339,7 @@ export class StaticDataRegistry {
    * Get rivalries from the loaded pack manifest.
    */
   static getRivalries(): [string, string][] {
+    this.initialize();
     return this.packManifest?.rivalries ?? [];
   }
 
@@ -590,6 +347,7 @@ export class StaticDataRegistry {
    * Get organization priorities from the loaded pack manifest.
    */
   static getOrgPriorities(): PackManifest['orgPriorities'] | null {
+    this.initialize();
     return this.packManifest?.orgPriorities ?? null;
   }
 
@@ -597,6 +355,7 @@ export class StaticDataRegistry {
    * Get organization correlations from the loaded pack manifest.
    */
   static getCorrelations(): OrgCorrelation[] {
+    this.initialize();
     return this.packManifest?.correlations ?? [];
   }
 
@@ -604,6 +363,7 @@ export class StaticDataRegistry {
    * Get the full pack manifest, or null if no pack is loaded.
    */
   static getPackManifest(): PackManifest | null {
+    this.initialize();
     return this.packManifest;
   }
 
@@ -611,6 +371,7 @@ export class StaticDataRegistry {
    * Get the original PackActor by ID for full character data.
    */
   static getPackActor(id: string): PackActor | undefined {
+    this.initialize();
     return this.packActors.find((a) => a.id === id);
   }
 
@@ -618,6 +379,7 @@ export class StaticDataRegistry {
    * Get the original PackOrganization by ID for full org data.
    */
   static getPackOrganization(id: string): PackOrganization | undefined {
+    this.initialize();
     return this.packOrganizations.find((o) => o.id === id);
   }
 
@@ -901,7 +663,8 @@ export class StaticDataRegistry {
   // ==========================================================================
 
   /**
-   * Clear all caches (useful for testing)
+   * Clear all caches. The next access reloads the default pack (also after a
+   * custom pack was installed with loadPack()).
    */
   static clearCache(): void {
     this.actorMap = null;

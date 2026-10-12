@@ -7,7 +7,8 @@
  * Prerequisites:
  * - PostgreSQL running (DATABASE_URL set)
  * - Next.js dev server running at TEST_BASE_URL (default: http://localhost:3000)
- * - ALLOW_TEST_PRIVY_DID_AUTH=true (auto in NODE_ENV=development|test)
+ * - STEWARD_JWT_SECRET matching the server (requests carry signed Steward
+ *   tokens, so this works against production builds)
  *
  * Run:
  *   bun test integration/waitlist-email-bonus-api.integration.test.ts \
@@ -25,6 +26,7 @@ import {
 import { db, eq, inArray, pointsTransactions, users } from '@feed/db';
 import { generateSnowflakeId } from '@feed/shared';
 import { waitForEndpointAvailability } from './helpers';
+import { createStewardTestToken } from './helpers/steward-auth';
 
 const BASE_URL =
   process.env.TEST_API_URL ||
@@ -37,8 +39,14 @@ let serverAvailable = false;
 let dbAvailable = false;
 const testUserIds: string[] = [];
 
-function devUserHeader(userId: string): Record<string, string> {
-  return { 'x-dev-user-id': userId };
+function stewardIdFor(userId: string): string {
+  return `email-bonus-${userId}`;
+}
+
+async function authHeader(userId: string): Promise<Record<string, string>> {
+  return {
+    Authorization: `Bearer ${await createStewardTestToken(stewardIdFor(userId))}`,
+  };
 }
 
 async function post(
@@ -50,7 +58,7 @@ async function post(
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
-      ...devUserHeader(userId),
+      ...(await authHeader(userId)),
       ...extraHeaders,
     },
     body: JSON.stringify(body),
@@ -62,7 +70,7 @@ async function createTestUser(overrides: Record<string, unknown> = {}) {
   const userId = await generateSnowflakeId();
   await db.insert(users).values({
     id: userId,
-    privyId: `did:privy:test-${userId}`,
+    stewardId: stewardIdFor(userId),
     username: `test-email-bonus-${userId}`,
     displayName: 'Test Email Bonus User',
     reputationPoints: 100,
@@ -263,7 +271,7 @@ describe('POST /api/waitlist/bonus/email', () => {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
-          ...devUserHeader(userId),
+          ...(await authHeader(userId)),
         },
         body: 'not json {{',
         signal: AbortSignal.timeout(15000),

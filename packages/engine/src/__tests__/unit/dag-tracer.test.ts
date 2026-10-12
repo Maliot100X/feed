@@ -11,6 +11,8 @@ import type { LLMCallInput, NPCDecision } from '../../dag-trace/types';
 
 // Helper to create a minimal LLM call input
 function makeLLMCall(overrides: Partial<LLMCallInput> = {}): LLMCallInput {
+  const inputTokens = overrides.inputTokens ?? 100;
+  const outputTokens = overrides.outputTokens ?? 50;
   return {
     provider: 'groq',
     model: 'llama-3.3-70b',
@@ -22,12 +24,13 @@ function makeLLMCall(overrides: Partial<LLMCallInput> = {}): LLMCallInput {
     userPrompt: 'Do something.',
     rawResponse: '{"action": "test"}',
     parsedResponse: { action: 'test' },
-    inputTokens: 100,
-    outputTokens: 50,
-    totalTokens: 150,
     durationMs: 500,
     success: true,
     ...overrides,
+    // Keep token statistics internally consistent unless a test sets all three
+    inputTokens,
+    outputTokens,
+    totalTokens: overrides.totalTokens ?? inputTokens + outputTokens,
   };
 }
 
@@ -200,20 +203,22 @@ describe('TickTracer', () => {
       startTrace('tick-12', 12);
       const tracer = getActiveTracer()!;
 
-      tracer.startNode('node-a');
-      // Even though node-a is current, explicitly attribute to node-b
       tracer.startNode('node-b');
-      const callId = tracer.recordLLMCall(makeLLMCall(), 'node-b');
       tracer.endNode('node-b');
+      // node-a is now current; the call is explicitly attributed to node-b
+      tracer.startNode('node-a');
+      const callId = tracer.recordLLMCall(makeLLMCall(), 'node-b');
       tracer.endNode('node-a');
 
       const trace = endTrace()!;
       const call = trace.llmCalls.find((c) => c.callId === callId);
       expect(call!.nodeId).toBe('node-b');
 
-      // node-b should have the call, not node-a
+      // node-b should have the call, not the current node-a
+      const nodeA = trace.nodes.find((n) => n.nodeId === 'node-a');
       const nodeB = trace.nodes.find((n) => n.nodeId === 'node-b');
       expect(nodeB!.llmCallIds).toContain(callId);
+      expect(nodeA!.llmCallIds).not.toContain(callId);
     });
 
     test('nodeId in LLMCallInput is used when no explicit override', () => {
@@ -221,12 +226,17 @@ describe('TickTracer', () => {
       const tracer = getActiveTracer()!;
 
       tracer.startNode('node-c');
-      const callId = tracer.recordLLMCall(makeLLMCall({ nodeId: 'node-c' }));
       tracer.endNode('node-c');
+      // node-d is current; the input's nodeId must win over it
+      tracer.startNode('node-d');
+      const callId = tracer.recordLLMCall(makeLLMCall({ nodeId: 'node-c' }));
+      tracer.endNode('node-d');
 
       const trace = endTrace()!;
       const call = trace.llmCalls.find((c) => c.callId === callId);
       expect(call!.nodeId).toBe('node-c');
+      const nodeD = trace.nodes.find((n) => n.nodeId === 'node-d');
+      expect(nodeD!.llmCallIds).not.toContain(callId);
     });
 
     test('orphaned call gets nodeId "unknown"', () => {

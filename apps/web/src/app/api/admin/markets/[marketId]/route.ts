@@ -13,6 +13,8 @@ import type { JsonValue } from '@feed/api';
 import {
   broadcastToChannel,
   checkRateLimitAndDuplicates,
+  errorResponse,
+  getClientIp,
   invalidateMarketsApiPredictionsList,
   invalidateMarketsApiPredictionsListAndAllPositions,
   logAdminModify,
@@ -26,6 +28,7 @@ import {
   PredictionMarketService,
 } from '@feed/core/markets/prediction';
 import {
+  and,
   db,
   desc,
   eq,
@@ -88,12 +91,26 @@ const buildPredictionService = (marketId: string) =>
     },
   });
 
-const MarketActionSchema = z.object({
-  action: z.enum(['resolve', 'extend', 'void']),
-  resolution: z.boolean().optional(), // true for YES, false for NO
-  newEndDate: z.string().optional(),
-  reason: z.string().optional(),
-});
+const Reason = z.string().trim().min(1).max(500).optional();
+
+const MarketActionSchema = z.discriminatedUnion('action', [
+  z.object({
+    action: z.literal('resolve'),
+    resolution: z.boolean({ message: 'Resolution required' }), // true = YES
+    reason: Reason,
+  }),
+  z.object({
+    action: z.literal('extend'),
+    // Must carry an explicit offset (e.g. toISOString()) so the server never
+    // reinterprets a browser-local wall-clock time in its own timezone.
+    newEndDate: z.iso.datetime({
+      offset: true,
+      message: 'New end date must be an ISO datetime with offset',
+    }),
+    reason: Reason,
+  }),
+  z.object({ action: z.literal('void'), reason: Reason }),
+]);
 
 export const GET = withErrorHandling(
   async (
@@ -116,7 +133,7 @@ export const GET = withErrorHandling(
       .limit(1);
 
     if (!market) {
-      return successResponse({ error: 'Market not found' }, 404);
+      return errorResponse('Market not found', 'NOT_FOUND', 404);
     }
 
     // Get positions for this market
@@ -185,16 +202,19 @@ export const POST = withErrorHandling(
     // Validate request body with Zod schema
     const parseResult = MarketActionSchema.safeParse(await request.json());
     if (!parseResult.success) {
-      return successResponse(
-        { error: 'Invalid request', details: parseResult.error.flatten() },
+      return errorResponse(
+        parseResult.error.issues[0]?.message ?? 'Invalid request',
+        'VALIDATION_ERROR',
         400
       );
     }
-    const { action, resolution, newEndDate, reason } = parseResult.data;
+    const body = parseResult.data;
+    const { action, reason } = body;
+    const ipAddress = getClientIp(request.headers) ?? undefined;
 
     logger.info(
       'Admin market action',
-      { marketId, action, resolution, adminId: admin.userId },
+      { marketId, action, adminId: admin.userId },
       'POST /api/admin/markets/[marketId]'
     );
 
@@ -205,16 +225,17 @@ export const POST = withErrorHandling(
       .limit(1);
 
     if (!market) {
-      return successResponse({ error: 'Market not found' }, 404);
+      return errorResponse('Market not found', 'NOT_FOUND', 404);
     }
 
-    if (action === 'resolve') {
-      if (resolution === undefined) {
-        return successResponse({ error: 'Resolution required' }, 400);
-      }
-
+    if (body.action === 'resolve') {
+      const { resolution } = body;
       if (market.resolved) {
-        return successResponse({ error: 'Market already resolved' }, 400);
+        return errorResponse(
+          'Market already resolved',
+          'ALREADY_RESOLVED',
+          400
+        );
       }
 
       // Use transaction to ensure atomic updates of market, positions, questions, and timeframedMarkets
@@ -277,7 +298,7 @@ export const POST = withErrorHandling(
         resourceId: marketId,
         previousValue: { resolved: false },
         newValue: { resolved: true, resolution, reason: reason ?? null },
-        ipAddress: request.headers.get('x-forwarded-for') ?? undefined,
+        ipAddress,
         userAgent: request.headers.get('user-agent') ?? undefined,
         metadata: { action: 'resolve', question: market.question },
       });
@@ -293,29 +314,53 @@ export const POST = withErrorHandling(
       });
     }
 
-    if (action === 'extend') {
-      if (!newEndDate) {
-        return successResponse({ error: 'New end date required' }, 400);
-      }
-
-      const newEnd = new Date(newEndDate);
-      if (newEnd <= new Date()) {
-        return successResponse(
-          { error: 'New end date must be in the future' },
+    if (body.action === 'extend') {
+      const newEnd = new Date(body.newEndDate);
+      if (market.resolved) {
+        return errorResponse(
+          'Resolved markets cannot be extended',
+          'ALREADY_RESOLVED',
           400
         );
       }
+      if (newEnd <= new Date()) {
+        return errorResponse(
+          'New end date must be in the future',
+          'INVALID_END_DATE',
+          400
+        );
+      }
+      if (newEnd <= new Date(market.endDate)) {
+        return errorResponse(
+          'New end date must be later than the current end date',
+          'INVALID_END_DATE',
+          400
+        );
+      }
+      // Compare-and-set: only extend a market that is still unresolved and
+      // still has the end date this decision was based on.
+      const extended = await db
+        .update(markets)
+        .set({
+          endDate: newEnd,
+          updatedAt: new Date(),
+        })
+        .where(
+          and(
+            eq(markets.id, marketId),
+            eq(markets.resolved, false),
+            eq(markets.endDate, market.endDate)
+          )
+        )
+        .returning({ id: markets.id });
 
-      // Use transaction to ensure atomic update
-      await withTransaction(async (tx) => {
-        await tx
-          .update(markets)
-          .set({
-            endDate: newEnd,
-            updatedAt: new Date(),
-          })
-          .where(eq(markets.id, marketId));
-      });
+      if (extended.length === 0) {
+        return errorResponse(
+          'Market changed concurrently; reload and retry',
+          'MARKET_CONFLICT',
+          409
+        );
+      }
 
       await logAdminModify({
         adminId: admin.userId,
@@ -323,7 +368,7 @@ export const POST = withErrorHandling(
         resourceId: marketId,
         previousValue: { endDate: toISO(market.endDate) },
         newValue: { endDate: toISO(newEnd), reason: reason ?? null },
-        ipAddress: request.headers.get('x-forwarded-for') ?? undefined,
+        ipAddress,
         userAgent: request.headers.get('user-agent') ?? undefined,
         metadata: { action: 'extend', question: market.question },
       });
@@ -338,76 +383,73 @@ export const POST = withErrorHandling(
       });
     }
 
-    if (action === 'void') {
-      // Use PredictionMarketService.cancel() to properly refund all positions
-      const service = buildPredictionService(marketId);
-      const result = await service.cancel({
-        marketId,
-        reason: reason || 'Market voided by admin',
-      });
+    // body.action === 'void'
+    // Use PredictionMarketService.cancel() to properly refund all positions
+    const service = buildPredictionService(marketId);
+    const result = await service.cancel({
+      marketId,
+      reason: reason || 'Market voided by admin',
+    });
 
-      // Also update questions and timeframedMarkets tables for consistency
-      const cancelledAt = new Date();
-      await withTransaction(async (tx) => {
-        // Update the question table (market.id matches question.id)
-        await tx
-          .update(questions)
-          .set({
-            status: 'cancelled',
-            updatedAt: cancelledAt,
-          })
-          .where(eq(questions.id, marketId));
-
-        // Update timeframedMarkets linked to this question
-        await tx
-          .update(timeframedMarkets)
-          .set({
-            isActive: false,
-            isResolved: true,
-            resolvedAt: cancelledAt,
-            updatedAt: cancelledAt,
-          })
-          .where(eq(timeframedMarkets.questionId, marketId));
-      });
-
-      logger.info(
-        'Market voided via cancel()',
-        {
-          marketId,
-          positionsRefunded: result.positionsRefunded,
-          totalRefunded: result.totalRefunded,
-          adminId: admin.userId,
-        },
-        'POST /api/admin/markets/[marketId]'
-      );
-
-      await logAdminModify({
-        adminId: admin.userId,
-        resourceType: 'market',
-        resourceId: marketId,
-        previousValue: { status: 'active' },
-        newValue: {
+    // Also update questions and timeframedMarkets tables for consistency
+    const cancelledAt = new Date();
+    await withTransaction(async (tx) => {
+      // Update the question table (market.id matches question.id)
+      await tx
+        .update(questions)
+        .set({
           status: 'cancelled',
-          reason: reason ?? null,
-          positionsRefunded: result.positionsRefunded,
-          totalRefunded: result.totalRefunded,
-        },
-        ipAddress: request.headers.get('x-forwarded-for') ?? undefined,
-        userAgent: request.headers.get('user-agent') ?? undefined,
-        metadata: { action: 'void', question: market.question },
-      });
+          updatedAt: cancelledAt,
+        })
+        .where(eq(questions.id, marketId));
 
-      void invalidateMarketsApiPredictionsListAndAllPositions();
+      // Update timeframedMarkets linked to this question
+      await tx
+        .update(timeframedMarkets)
+        .set({
+          isActive: false,
+          isResolved: true,
+          resolvedAt: cancelledAt,
+          updatedAt: cancelledAt,
+        })
+        .where(eq(timeframedMarkets.questionId, marketId));
+    });
 
-      return successResponse({
-        success: true,
-        action: 'void',
+    logger.info(
+      'Market voided via cancel()',
+      {
         marketId,
         positionsRefunded: result.positionsRefunded,
         totalRefunded: result.totalRefunded,
-      });
-    }
+        adminId: admin.userId,
+      },
+      'POST /api/admin/markets/[marketId]'
+    );
 
-    return successResponse({ error: 'Invalid action' }, 400);
+    await logAdminModify({
+      adminId: admin.userId,
+      resourceType: 'market',
+      resourceId: marketId,
+      previousValue: { status: 'active' },
+      newValue: {
+        status: 'cancelled',
+        reason: reason ?? null,
+        positionsRefunded: result.positionsRefunded,
+        totalRefunded: result.totalRefunded,
+      },
+      ipAddress,
+      userAgent: request.headers.get('user-agent') ?? undefined,
+      metadata: { action: 'void', question: market.question },
+    });
+
+    void invalidateMarketsApiPredictionsListAndAllPositions();
+
+    return successResponse({
+      success: true,
+      action: 'void',
+      marketId,
+      positionsRefunded: result.positionsRefunded,
+      totalRefunded: result.totalRefunded,
+    });
   }
 );

@@ -41,6 +41,16 @@ describe('Date Utilities', () => {
       expect(extractDayFromTimestamp('invalid')).toBe(0);
       expect(extractDayFromTimestamp('')).toBe(0);
     });
+
+    test('returns 0 for impossible calendar days', () => {
+      expect(extractDayFromTimestamp('2025-02-30T00:00:00Z')).toBe(0);
+      expect(extractDayFromTimestamp('2025-10-45T00:00:00Z')).toBe(0);
+      expect(extractDayFromTimestamp('2025-13-01T00:00:00Z')).toBe(0);
+    });
+
+    test('accepts the last day of a leap-year February', () => {
+      expect(extractDayFromTimestamp('2024-02-29T00:00:00Z')).toBe(29);
+    });
   });
 
   describe('extractDayFromEvent', () => {
@@ -145,10 +155,9 @@ describe('Date Utilities', () => {
       expect(toSafeDayNumber(2147483647)).toBe(2147483647);
     });
 
-    test('accepts floating-point values', () => {
-      // Documents current behavior: floats are accepted (not rejected)
-      expect(toSafeDayNumber(1.5)).toBe(1.5);
-      expect(toSafeDayNumber(99.9)).toBe(99.9);
+    test('rejects fractional values (int column)', () => {
+      expect(toSafeDayNumber(1.5)).toBeUndefined();
+      expect(toSafeDayNumber(99.9)).toBeUndefined();
     });
   });
 

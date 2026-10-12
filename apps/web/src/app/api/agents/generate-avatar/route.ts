@@ -25,6 +25,7 @@ import { generateAgentMonkeyProfileImage, initFalClient } from '@feed/engine';
 import { logger } from '@feed/shared';
 import type { NextRequest } from 'next/server';
 import { NextResponse } from 'next/server';
+import { z } from 'zod';
 
 const BUNDLED_REFERENCE = join(
   process.cwd(),
@@ -36,13 +37,25 @@ let bundledReferenceFalUrl: string | null | undefined;
 
 const IDEMPOTENCY_KEY_RE = /^[a-zA-Z0-9_.-]{8,200}$/;
 
+const GenerateAvatarBodySchema = z.object({
+  displayName: z.string().max(100).optional(),
+  idempotencyKey: z.string().max(200).optional(),
+});
+
+/**
+ * Resolve the idempotency key from the header and/or body. When both are
+ * present they must agree, so one key can never stand for two requests.
+ */
 function parseIdempotencyKey(
   req: NextRequest,
-  body: { idempotencyKey?: string }
+  body: z.infer<typeof GenerateAvatarBodySchema>
 ): string | null {
-  const header = req.headers.get('Idempotency-Key')?.trim();
-  const fromBody = body.idempotencyKey?.trim();
-  const raw = header || fromBody || '';
+  const header = req.headers.get('Idempotency-Key')?.trim() || undefined;
+  const fromBody = body.idempotencyKey?.trim() || undefined;
+  if (header && fromBody && header !== fromBody) {
+    return null;
+  }
+  const raw = header ?? fromBody ?? '';
   if (!IDEMPOTENCY_KEY_RE.test(raw)) {
     return null;
   }
@@ -77,12 +90,13 @@ async function resolveReferenceImageUrlForFal(): Promise<string | null> {
     bundledReferenceFalUrl = url;
     return url;
   } catch (error) {
+    // Not cached: a transient upload failure must not disable the reference
+    // image for the lifetime of the process.
     logger.warn(
       'Failed to upload bundled agent avatar reference to fal',
       { error: String(error) },
       'GenerateAgentAvatar'
     );
-    bundledReferenceFalUrl = null;
     return null;
   }
 }
@@ -90,22 +104,16 @@ async function resolveReferenceImageUrlForFal(): Promise<string | null> {
 export const POST = withErrorHandling(async function POST(req: NextRequest) {
   const user = await authenticateUser(req);
 
-  let body: { displayName?: string; idempotencyKey?: string } = {};
-  try {
-    body = (await req.json()) as {
-      displayName?: string;
-      idempotencyKey?: string;
-    };
-  } catch {
-    body = {};
-  }
+  // Malformed JSON surfaces as a 400 via withErrorHandling; wrong shapes
+  // (null body, non-string fields) fail the schema with a 400.
+  const body = GenerateAvatarBodySchema.parse(await req.json());
 
   const idempotencyKey = parseIdempotencyKey(req, body);
   if (!idempotencyKey) {
     return NextResponse.json(
       {
         error:
-          'Send Idempotency-Key header or JSON idempotencyKey (8–200 chars: letters, digits, _, ., -).',
+          'Send Idempotency-Key header or JSON idempotencyKey (8–200 chars: letters, digits, _, ., -); if both are sent they must match.',
       },
       { status: 400 }
     );
@@ -129,8 +137,7 @@ export const POST = withErrorHandling(async function POST(req: NextRequest) {
     return rateLimitError;
   }
 
-  const displayName =
-    typeof body.displayName === 'string' ? body.displayName : undefined;
+  const { displayName } = body;
 
   try {
     const { url } = await executeAgentAvatarOnce(

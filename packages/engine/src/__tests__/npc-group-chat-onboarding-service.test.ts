@@ -55,4 +55,50 @@ describe('planMultiChatSeedAssignments', () => {
       'chat-1'
     );
   });
+
+  test('duplicate user rows are planned once and never overassigned', () => {
+    const assignments = planMultiChatSeedAssignments({
+      users: [
+        { userId: 'user-1', activeGroupCount: 0 },
+        { userId: 'user-1', activeGroupCount: 0 },
+      ],
+      chatSlots: [
+        { chatId: 'chat-1', groupId: 'group-1', ownerId: 'npc-1', slots: 5 },
+      ],
+      targetChatsPerUser: 1,
+      rng: () => 0,
+    });
+    expect(assignments).toHaveLength(1);
+  });
+
+  test('assigns at most one chat per group', () => {
+    const assignments = planMultiChatSeedAssignments({
+      users: [{ userId: 'user-1', activeGroupCount: 0 }],
+      chatSlots: [
+        { chatId: 'chat-1a', groupId: 'group-1', ownerId: 'npc-1', slots: 5 },
+        { chatId: 'chat-1b', groupId: 'group-1', ownerId: 'npc-1', slots: 5 },
+        { chatId: 'chat-2', groupId: 'group-2', ownerId: 'npc-2', slots: 5 },
+      ],
+      targetChatsPerUser: 3,
+      rng: () => 0,
+    });
+    expect(new Set(assignments.map((a) => a.groupId)).size).toBe(
+      assignments.length
+    );
+    expect(assignments).toHaveLength(2);
+  });
+
+  test('existing membership in a group blocks its other chats', () => {
+    const assignments = planMultiChatSeedAssignments({
+      users: [{ userId: 'user-1', activeGroupCount: 1 }],
+      chatSlots: [
+        { chatId: 'chat-1a', groupId: 'group-1', ownerId: 'npc-1', slots: 5 },
+        { chatId: 'chat-1b', groupId: 'group-1', ownerId: 'npc-1', slots: 5 },
+      ],
+      existingMemberships: [{ userId: 'user-1', chatId: 'chat-1a' }],
+      targetChatsPerUser: 3,
+      rng: () => 0,
+    });
+    expect(assignments).toEqual([]);
+  });
 });

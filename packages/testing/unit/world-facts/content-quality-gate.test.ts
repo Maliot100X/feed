@@ -130,3 +130,14 @@ describe('ContentQualityGate.validateArticle', () => {
     expect(result.reasons.some((r) => r.includes('Too short'))).toBe(true);
   });
 });
+
+describe('ContentQualityGate entity counting', () => {
+  test('one unknown name repeated is counted once', async () => {
+    const fact =
+      'Zorblax Quentin announced a merger today. Analysts say Zorblax Quentin will expand further.';
+    const result = await ContentQualityGate.validateWorldFact(fact);
+    expect(result.reasons.some((r) => r.includes('unknown entities'))).toBe(
+      false
+    );
+  });
+});

@@ -6,12 +6,10 @@
  * @description
  * Comprehensive tests that validate NPC system behavior including:
  * - Investment manager portfolio allocation
- * - Portfolio strategy selection based on personality
  * - Persona generation and assignment
  * - Trading decision logic
  *
  * **Output Files:**
- * - .output/npc-portfolio-strategies-{timestamp}.json
  * - .output/npc-persona-assignments-{timestamp}.json
  * - .output/npc-trading-decisions-{timestamp}.json
  */
@@ -20,11 +18,7 @@ import { beforeAll, describe, expect, setDefaultTimeout, test } from 'bun:test';
 import { existsSync, mkdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 // Import NPC system components
-import {
-  NPCPersonaGenerator,
-  NPCPortfolioStrategy,
-  StaticDataRegistry,
-} from '@feed/engine';
+import { NPCPersonaGenerator, StaticDataRegistry } from '@feed/engine';
 import { logger } from '@feed/shared';
 
 // Set timeout
@@ -56,225 +50,6 @@ describe('NPC System Validation Tests', () => {
       undefined,
       'NPCTest'
     );
-  });
-
-  describe('NPCPortfolioStrategy', () => {
-    test('returns valid strategy for aggressive personality', () => {
-      const strategy = NPCPortfolioStrategy.getStrategy(
-        'erratic disaster profiteer'
-      );
-
-      expect(strategy).toBeDefined();
-      expect(strategy.name).toBe('Aggressive Growth');
-      expect(strategy.assetAllocation.perps).toBeGreaterThan(50);
-      expect(strategy.riskParameters.maxLeverage).toBeGreaterThan(5);
-      expect(strategy.holdingPeriod).toBe('short');
-    });
-
-    test('returns valid strategy for conservative personality', () => {
-      const strategy = NPCPortfolioStrategy.getStrategy(
-        'vampire yacht club member'
-      );
-
-      expect(strategy).toBeDefined();
-      expect(strategy.name).toBe('Conservative Wealth Preservation');
-      expect(strategy.assetAllocation.cash).toBeGreaterThan(10);
-      expect(strategy.riskParameters.maxLeverage).toBeLessThanOrEqual(2);
-      expect(strategy.holdingPeriod).toBe('long');
-    });
-
-    test('returns valid strategy for balanced personality', () => {
-      const strategy = NPCPortfolioStrategy.getStrategy('tech entrepreneur');
-
-      expect(strategy).toBeDefined();
-      expect(strategy.name).toBe('Balanced Growth');
-      expect(strategy.assetAllocation.perps).toBeGreaterThanOrEqual(40);
-      expect(strategy.assetAllocation.predictions).toBeGreaterThanOrEqual(30);
-    });
-
-    test('returns valid strategy for high volatility personality', () => {
-      const strategy = NPCPortfolioStrategy.getStrategy(
-        'memecoin degen nft collector'
-      );
-
-      expect(strategy).toBeDefined();
-      expect(strategy.name).toBe('High Volatility Trading');
-      expect(strategy.assetAllocation.perps).toBeGreaterThan(70);
-      expect(strategy.riskParameters.maxLeverage).toBeGreaterThan(10);
-    });
-
-    test('adjusts strategy for high volatility market conditions', () => {
-      const baseStrategy =
-        NPCPortfolioStrategy.getStrategy('tech entrepreneur');
-      const adjustedStrategy = NPCPortfolioStrategy.getStrategy(
-        'tech entrepreneur',
-        {
-          volatility: 0.9,
-          sentiment: 0,
-          trending: false,
-          volume: 0.5,
-        }
-      );
-
-      // High volatility should reduce leverage
-      expect(adjustedStrategy.riskParameters.maxLeverage).toBeLessThan(
-        baseStrategy.riskParameters.maxLeverage
-      );
-      // High volatility should increase cash allocation
-      expect(adjustedStrategy.assetAllocation.cash).toBeGreaterThan(
-        baseStrategy.assetAllocation.cash
-      );
-    });
-
-    test('adjusts strategy for negative sentiment market conditions', () => {
-      const baseStrategy =
-        NPCPortfolioStrategy.getStrategy('tech entrepreneur');
-      const adjustedStrategy = NPCPortfolioStrategy.getStrategy(
-        'tech entrepreneur',
-        {
-          volatility: 0.5,
-          sentiment: -0.7,
-          trending: false,
-          volume: 0.5,
-        }
-      );
-
-      // Negative sentiment should shift to predictions
-      expect(adjustedStrategy.assetAllocation.predictions).toBeGreaterThan(
-        baseStrategy.assetAllocation.predictions
-      );
-    });
-
-    test('calculates optimal position size using Kelly Criterion', () => {
-      const strategy = NPCPortfolioStrategy.getStrategy('balanced');
-
-      // High win probability, good payout
-      const highConfidence = NPCPortfolioStrategy.calculateOptimalPositionSize(
-        0.7, // 70% win probability
-        2.0, // 2:1 payout
-        strategy
-      );
-
-      // Low win probability
-      const lowConfidence = NPCPortfolioStrategy.calculateOptimalPositionSize(
-        0.4, // 40% win probability
-        2.0, // 2:1 payout
-        strategy
-      );
-
-      expect(highConfidence).toBeGreaterThan(lowConfidence);
-      expect(highConfidence).toBeLessThanOrEqual(
-        strategy.positionSizing.maxPositionSize
-      );
-      expect(lowConfidence).toBeGreaterThanOrEqual(
-        strategy.positionSizing.minPositionSize
-      );
-    });
-
-    test('determines when rebalancing is needed', () => {
-      const current = { perps: 60, predictions: 30, cash: 10 };
-      const target = { perps: 50, predictions: 40, cash: 10 };
-
-      // Should need rebalancing with 5% threshold (10% deviation)
-      expect(NPCPortfolioStrategy.shouldRebalance(current, target, 5)).toBe(
-        true
-      );
-
-      // Should not need rebalancing with 15% threshold
-      expect(NPCPortfolioStrategy.shouldRebalance(current, target, 15)).toBe(
-        false
-      );
-    });
-
-    test('generates rebalance plan correctly', () => {
-      const current = { perps: 60, predictions: 30, cash: 10 };
-      const target = { perps: 50, predictions: 40, cash: 10 };
-      const portfolioValue = 10000;
-
-      const plan = NPCPortfolioStrategy.generateRebalancePlan(
-        current,
-        target,
-        portfolioValue
-      );
-
-      expect(plan.perpAdjustment).toBe(-1000); // 10% decrease of 10000
-      expect(plan.predictionAdjustment).toBe(1000); // 10% increase of 10000
-      expect(plan.cashAdjustment).toBe(0); // No change
-    });
-
-    test('outputs all strategy configurations', () => {
-      const personalities = [
-        'erratic disaster profiteer',
-        'vampire yacht club',
-        'balanced entrepreneur',
-        'memecoin degen',
-        'philosopher investor',
-        null, // Default case
-      ];
-
-      const marketConditions = [
-        {
-          name: 'normal',
-          volatility: 0.5,
-          sentiment: 0,
-          trending: true,
-          volume: 0.5,
-        },
-        {
-          name: 'high_volatility',
-          volatility: 0.9,
-          sentiment: 0,
-          trending: false,
-          volume: 0.3,
-        },
-        {
-          name: 'bearish',
-          volatility: 0.6,
-          sentiment: -0.7,
-          trending: false,
-          volume: 0.4,
-        },
-        {
-          name: 'bullish',
-          volatility: 0.4,
-          sentiment: 0.7,
-          trending: true,
-          volume: 0.8,
-        },
-      ];
-
-      const strategyOutput: {
-        personality: string | null;
-        baseStrategy: ReturnType<typeof NPCPortfolioStrategy.getStrategy>;
-        adjustedStrategies: {
-          condition: string;
-          strategy: ReturnType<typeof NPCPortfolioStrategy.getStrategy>;
-        }[];
-      }[] = [];
-
-      for (const personality of personalities) {
-        const baseStrategy = NPCPortfolioStrategy.getStrategy(personality);
-        const adjustedStrategies = marketConditions.map((condition) => ({
-          condition: condition.name,
-          strategy: NPCPortfolioStrategy.getStrategy(personality, {
-            volatility: condition.volatility,
-            sentiment: condition.sentiment,
-            trending: condition.trending,
-            volume: condition.volume,
-          }),
-        }));
-
-        strategyOutput.push({
-          personality,
-          baseStrategy,
-          adjustedStrategies,
-        });
-      }
-
-      writeOutput('npc-portfolio-strategies', strategyOutput);
-
-      expect(strategyOutput.length).toBe(personalities.length);
-    });
   });
 
   describe('NPCPersonaGenerator', () => {
@@ -559,46 +334,6 @@ describe('NPC System Validation Tests', () => {
 
       expect(registryOutput.actorCount).toBeGreaterThan(0);
       expect(registryOutput.organizationCount).toBeGreaterThan(0);
-    });
-  });
-
-  describe('Strategy Evaluation', () => {
-    test('evaluates strategy performance metrics', () => {
-      // Simulated returns
-      const actualReturns = [
-        0.05, -0.02, 0.08, 0.03, -0.01, 0.06, 0.02, -0.03, 0.04, 0.01,
-      ];
-      const benchmarkReturns = [
-        0.03, -0.01, 0.04, 0.02, 0.01, 0.03, 0.02, -0.02, 0.03, 0.01,
-      ];
-
-      const metrics = NPCPortfolioStrategy.evaluateStrategy(
-        actualReturns,
-        benchmarkReturns,
-        0.02
-      );
-
-      expect(metrics.sharpeRatio).toBeDefined();
-      expect(metrics.maxDrawdown).toBeDefined();
-      expect(metrics.winRate).toBeDefined();
-      expect(metrics.alpha).toBeDefined();
-      expect(metrics.beta).toBeDefined();
-
-      // Win rate should be positive wins / total
-      expect(metrics.winRate).toBeGreaterThan(0);
-      expect(metrics.winRate).toBeLessThanOrEqual(100);
-
-      writeOutput('strategy-evaluation', {
-        actualReturns,
-        benchmarkReturns,
-        metrics,
-      });
-    });
-
-    test('holding period hours are correct', () => {
-      expect(NPCPortfolioStrategy.getHoldingPeriodHours('short')).toBe(24);
-      expect(NPCPortfolioStrategy.getHoldingPeriodHours('medium')).toBe(168);
-      expect(NPCPortfolioStrategy.getHoldingPeriodHours('long')).toBe(720);
     });
   });
 });

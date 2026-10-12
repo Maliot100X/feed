@@ -180,6 +180,7 @@
  * @see {@link /src/components/NotificationBell.tsx} Notification UI
  */
 
+import { createHash } from 'node:crypto';
 import {
   authenticate,
   CACHE_KEYS,
@@ -199,7 +200,11 @@ import {
   getBlockedUserIds,
   getMutedUserIds,
   inArray,
+  isNull,
+  notInArray,
   notifications,
+  or,
+  type SQL,
   users,
 } from '@feed/db';
 import {
@@ -214,7 +219,7 @@ import { getMissingNotificationSchemaErrorCode } from './schema-compat';
 
 const ClearNotificationsSchema = z
   .object({
-    notificationIds: z.array(z.string().min(1)).min(1).optional(),
+    notificationIds: z.array(z.string().min(1)).min(1).max(500).optional(),
     clearAll: z.boolean().optional(),
   })
   .refine(
@@ -313,9 +318,11 @@ export const GET = withErrorHandling(async (request: NextRequest) => {
   const validated = NotificationsQuerySchema.parse(queryParams);
   const {
     limit: validatedLimit,
+    page: validatedPage,
     unreadOnly: validatedUnreadOnly,
     type: validatedType,
   } = validated;
+  const offset = (validatedPage - 1) * validatedLimit;
 
   // Build where conditions
   const conditions = [eq(notifications.userId, authUser.userId)];
@@ -327,9 +334,6 @@ export const GET = withErrorHandling(async (request: NextRequest) => {
   if (validatedType) {
     conditions.push(eq(notifications.type, validatedType));
   }
-
-  // OPTIMIZED: Cache notifications with short TTL (high-frequency polling endpoint)
-  const cacheKey = `notifications:${authUser.userId}:${validatedUnreadOnly}:${validatedType}:${validatedLimit}`;
 
   // Keep moderation failures visible; only the notification-schema reads degrade.
   const [blockedIds, mutedIds, blockedByIds] = await Promise.all([
@@ -343,6 +347,27 @@ export const GET = withErrorHandling(async (request: NextRequest) => {
     ...mutedIds,
     ...blockedByIds,
   ]);
+  const excludedList = [...excludedUserIds].sort();
+
+  // Exclude blocked/muted actors in the query so pagination stays exact
+  // (system notifications have a null actor and are always kept).
+  if (excludedList.length > 0) {
+    conditions.push(
+      or(
+        isNull(notifications.actorId),
+        notInArray(notifications.actorId, excludedList)
+      ) as SQL
+    );
+  }
+
+  // OPTIMIZED: Cache notifications with short TTL (high-frequency polling endpoint).
+  // The key includes page and a fingerprint of the moderation set so a new
+  // block/mute never serves a cached page computed with the old set.
+  const moderationFingerprint = createHash('sha256')
+    .update(excludedList.join(','))
+    .digest('hex')
+    .slice(0, 16);
+  const cacheKey = `notifications:${authUser.userId}:${validatedUnreadOnly}:${validatedType}:${validatedLimit}:${validatedPage}:${moderationFingerprint}`;
 
   const { notificationsList, unreadCount, degraded } =
     await getCacheOrFetch<NotificationReadPayload>(
@@ -359,8 +384,9 @@ export const GET = withErrorHandling(async (request: NextRequest) => {
             .select()
             .from(notifications)
             .where(and(...conditions))
-            .orderBy(desc(notifications.createdAt))
-            .limit(validatedLimit * 2); // Fetch more to account for filtering
+            .orderBy(desc(notifications.createdAt), desc(notifications.id))
+            .limit(validatedLimit)
+            .offset(offset);
 
           // Get unread count
           const [unreadCountResult] = await db
@@ -401,7 +427,9 @@ export const GET = withErrorHandling(async (request: NextRequest) => {
         // Get actor IDs to fetch user info
         const actorIds = [
           ...new Set(
-            rows.map((n) => n.actorId).filter((id): id is string => id !== null)
+            rows
+              .map((n) => n.actorId)
+              .filter((id): id is string => typeof id === 'string')
           ),
         ];
 
@@ -421,14 +449,11 @@ export const GET = withErrorHandling(async (request: NextRequest) => {
 
         const actorMap = new Map(actorsResult.map((a) => [a.id, a]));
 
-        // Filter out notifications from blocked/muted users and add actor info
-        const notificationsList = rows
-          .filter((n) => !n.actorId || !excludedUserIds.has(n.actorId))
-          .slice(0, validatedLimit) // Limit to requested amount after filtering
-          .map((n) => ({
-            ...n,
-            actor: n.actorId ? actorMap.get(n.actorId) || null : null,
-          }));
+        // Blocked/muted actors are already excluded by the query
+        const notificationsList = rows.map((n) => ({
+          ...n,
+          actor: n.actorId ? actorMap.get(n.actorId) || null : null,
+        }));
 
         return {
           notificationsList,

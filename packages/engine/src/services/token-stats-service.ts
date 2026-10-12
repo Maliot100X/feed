@@ -120,11 +120,13 @@ class TickUsageCollector implements TokenUsageCollector {
         data.calls.length > 0 ? data.successCount / data.calls.length : 0,
     }));
 
-    // Aggregate by model
+    // Aggregate by model (provider/model kept as fields; model names such as
+    // Ollama tags may themselves contain ':')
     const modelMap = new Map<
       string,
       {
         provider: LLMProviderName;
+        model: string;
         calls: LLMCallTokenUsage[];
         totalInput: number;
         totalOutput: number;
@@ -133,9 +135,10 @@ class TickUsageCollector implements TokenUsageCollector {
     >();
 
     for (const call of calls) {
-      const key = `${call.provider}:${call.model}`;
+      const key = JSON.stringify([call.provider, call.model]);
       const existing = modelMap.get(key) ?? {
         provider: call.provider,
+        model: call.model,
         calls: [],
         totalInput: 0,
         totalOutput: 0,
@@ -148,27 +151,24 @@ class TickUsageCollector implements TokenUsageCollector {
       modelMap.set(key, existing);
     }
 
-    const byModel: ModelStats[] = Array.from(modelMap.entries()).map(
-      ([key, data]) => {
-        const [, model] = key.split(':');
-        return {
-          provider: data.provider,
-          model: model ?? 'unknown',
-          callCount: data.calls.length,
-          totalInputTokens: data.totalInput,
-          totalOutputTokens: data.totalOutput,
-          totalTokens: data.totalInput + data.totalOutput,
-          avgTokensPerCall:
-            data.calls.length > 0
-              ? Math.round(
-                  (data.totalInput + data.totalOutput) / data.calls.length
-                )
-              : 0,
-          successRate:
-            data.calls.length > 0 ? data.successCount / data.calls.length : 0,
-        };
-      }
-    );
+    const byModel: ModelStats[] = Array.from(modelMap.values()).map((data) => {
+      return {
+        provider: data.provider,
+        model: data.model,
+        callCount: data.calls.length,
+        totalInputTokens: data.totalInput,
+        totalOutputTokens: data.totalOutput,
+        totalTokens: data.totalInput + data.totalOutput,
+        avgTokensPerCall:
+          data.calls.length > 0
+            ? Math.round(
+                (data.totalInput + data.totalOutput) / data.calls.length
+              )
+            : 0,
+        successRate:
+          data.calls.length > 0 ? data.successCount / data.calls.length : 0,
+      };
+    });
 
     return {
       totalCalls,
@@ -177,7 +177,7 @@ class TickUsageCollector implements TokenUsageCollector {
       totalTokens,
       byPromptType,
       byModel,
-      calls,
+      calls: [...calls],
     };
   }
 
@@ -362,54 +362,76 @@ class TokenStatsServiceImpl {
     const avgOutputTokensPerTick = Math.round(totalOutputTokens / tickCount);
     const avgTotalTokensPerTick = Math.round(totalTokens / tickCount);
 
-    // Aggregate by prompt type
-    const promptTypeMap = new Map<string, PromptTypeStats>();
+    // Aggregate by prompt type. Rates/averages are re-weighted by call count
+    // (per-tick averages cannot simply be carried over from one tick).
+    const promptTypeMap = new Map<
+      string,
+      PromptTypeStats & { successCalls: number; durationTotal: number }
+    >();
     for (const tick of ticks) {
       for (const pt of tick.byPromptType) {
-        const existing = promptTypeMap.get(pt.promptType);
-        if (existing) {
-          existing.callCount += pt.callCount;
-          existing.totalInputTokens += pt.totalInputTokens;
-          existing.totalOutputTokens += pt.totalOutputTokens;
-          existing.totalTokens += pt.totalTokens;
-        } else {
-          promptTypeMap.set(pt.promptType, { ...pt });
-        }
+        const existing = promptTypeMap.get(pt.promptType) ?? {
+          ...pt,
+          callCount: 0,
+          totalInputTokens: 0,
+          totalOutputTokens: 0,
+          totalTokens: 0,
+          successCalls: 0,
+          durationTotal: 0,
+        };
+        existing.callCount += pt.callCount;
+        existing.totalInputTokens += pt.totalInputTokens;
+        existing.totalOutputTokens += pt.totalOutputTokens;
+        existing.totalTokens += pt.totalTokens;
+        existing.successCalls += pt.successRate * pt.callCount;
+        existing.durationTotal += pt.avgDurationMs * pt.callCount;
+        promptTypeMap.set(pt.promptType, existing);
       }
     }
 
-    // Recalculate averages for prompt types
-    const byPromptType = Array.from(promptTypeMap.values()).map((pt) => ({
+    const byPromptType: PromptTypeStats[] = Array.from(
+      promptTypeMap.values()
+    ).map(({ successCalls, durationTotal, ...pt }) => ({
       ...pt,
       avgInputTokens:
         pt.callCount > 0 ? Math.round(pt.totalInputTokens / pt.callCount) : 0,
       avgOutputTokens:
         pt.callCount > 0 ? Math.round(pt.totalOutputTokens / pt.callCount) : 0,
+      avgDurationMs:
+        pt.callCount > 0 ? Math.round(durationTotal / pt.callCount) : 0,
+      successRate: pt.callCount > 0 ? successCalls / pt.callCount : 0,
     }));
 
     // Aggregate by model
-    const modelMap = new Map<string, ModelStats>();
+    const modelMap = new Map<string, ModelStats & { successCalls: number }>();
     for (const tick of ticks) {
       for (const m of tick.byModel) {
-        const key = `${m.provider}:${m.model}`;
-        const existing = modelMap.get(key);
-        if (existing) {
-          existing.callCount += m.callCount;
-          existing.totalInputTokens += m.totalInputTokens;
-          existing.totalOutputTokens += m.totalOutputTokens;
-          existing.totalTokens += m.totalTokens;
-        } else {
-          modelMap.set(key, { ...m });
-        }
+        const key = JSON.stringify([m.provider, m.model]);
+        const existing = modelMap.get(key) ?? {
+          ...m,
+          callCount: 0,
+          totalInputTokens: 0,
+          totalOutputTokens: 0,
+          totalTokens: 0,
+          successCalls: 0,
+        };
+        existing.callCount += m.callCount;
+        existing.totalInputTokens += m.totalInputTokens;
+        existing.totalOutputTokens += m.totalOutputTokens;
+        existing.totalTokens += m.totalTokens;
+        existing.successCalls += m.successRate * m.callCount;
+        modelMap.set(key, existing);
       }
     }
 
-    // Recalculate averages for models
-    const byModel = Array.from(modelMap.values()).map((m) => ({
-      ...m,
-      avgTokensPerCall:
-        m.callCount > 0 ? Math.round(m.totalTokens / m.callCount) : 0,
-    }));
+    const byModel: ModelStats[] = Array.from(modelMap.values()).map(
+      ({ successCalls, ...m }) => ({
+        ...m,
+        avgTokensPerCall:
+          m.callCount > 0 ? Math.round(m.totalTokens / m.callCount) : 0,
+        successRate: m.callCount > 0 ? successCalls / m.callCount : 0,
+      })
+    );
 
     // Calculate estimated costs
     let estimatedInputCostUSD = 0;
@@ -456,7 +478,7 @@ class TokenStatsServiceImpl {
       this.currentCollector.recordCall(usage);
     } else {
       logger.debug(
-        'Manual token usage recorded (no tick in progress)',
+        'Manual token usage dropped (no tick in progress)',
         usage,
         'TokenStatsService'
       );

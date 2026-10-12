@@ -36,7 +36,6 @@ export type { FeedRuntime } from './plugins/feed/types';
 // Plugin utilities
 export { groqPlugin } from './plugins/groq';
 export * from './plugins/plugin-agent-core/src';
-export * from './plugins/plugin-autonomy/src';
 export * from './plugins/plugin-experience/src';
 // Plugin sub-exports for trajectory logging, autonomy, experience
 export * from './plugins/plugin-trajectory-logger/src';
@@ -72,4 +71,3 @@ export * from './types/agent-template';
 export * from './types/goals';
 // Utils
 export * from './utils/createTestAgent';
-export * from './utils/prompt-builder';

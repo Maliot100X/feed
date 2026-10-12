@@ -123,7 +123,7 @@ export const GET = withErrorHandling(async (request: NextRequest) => {
   if (stateParts.length < 2) {
     logger.warn(
       'Twitter callback invalid state format',
-      { state },
+      { stateLength: state.length },
       'TwitterCallback'
     );
     return NextResponse.redirect(
@@ -135,7 +135,7 @@ export const GET = withErrorHandling(async (request: NextRequest) => {
   if (!userId || !timestampStr) {
     logger.warn(
       'Twitter callback missing userId or timestamp in state',
-      { state },
+      { stateLength: state.length },
       'TwitterCallback'
     );
     return NextResponse.redirect(
@@ -147,7 +147,7 @@ export const GET = withErrorHandling(async (request: NextRequest) => {
   if (isNaN(stateTimestamp)) {
     logger.warn(
       'Twitter callback invalid timestamp in state',
-      { state, timestampStr },
+      { timestampStr },
       'TwitterCallback'
     );
     return NextResponse.redirect(
@@ -183,13 +183,28 @@ export const GET = withErrorHandling(async (request: NextRequest) => {
     logger.warn(
       'Twitter callback missing or expired PKCE state',
       {
-        state,
         userId,
         found: !!oauthState,
       },
       'TwitterCallback'
     );
 
+    return NextResponse.redirect(
+      new URL(`${OAUTH_REDIRECT_PATH}?error=invalid_state`, baseUrl)
+    );
+  }
+
+  // Atomically claim (consume) the state before contacting Twitter, so a
+  // concurrent or replayed callback cannot exchange the same state twice.
+  const claimedState = await db.oAuthState.delete({
+    where: { id: oauthState.id },
+  });
+  if (!claimedState) {
+    logger.warn(
+      'Twitter callback state already consumed',
+      { userId, stateId: oauthState.id },
+      'TwitterCallback'
+    );
     return NextResponse.redirect(
       new URL(`${OAUTH_REDIRECT_PATH}?error=invalid_state`, baseUrl)
     );
@@ -211,19 +226,6 @@ export const GET = withErrorHandling(async (request: NextRequest) => {
       code_verifier: oauthState.codeVerifier,
     }),
   });
-
-  // Clean up OAuth state after use
-  await db.oAuthState
-    .delete({
-      where: { id: oauthState.id },
-    })
-    .catch((error) => {
-      logger.warn(
-        'Failed to delete OAuth state',
-        { error, stateId: oauthState.id },
-        'TwitterCallback'
-      );
-    });
 
   if (!tokenResponse.ok) {
     const errorData = await tokenResponse.text();

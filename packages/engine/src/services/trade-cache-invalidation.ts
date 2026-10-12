@@ -55,30 +55,23 @@ export function setCacheInvalidationClient(
 export async function invalidatePredictionTradesCache(
   marketId: string
 ): Promise<void> {
-  if (cacheClient) {
-    // Support versioned keys (e.g. `prediction-trades:v2:<marketId>:...`).
-    const pattern = `market-trades:prediction-trades*:${marketId}:*`;
-    const deletedCount = await cacheClient.deleteByPattern(pattern);
-
-    if (deletedCount > 0) {
-      logger.debug(
-        `Deleted ${deletedCount} cache keys for market ${marketId}`,
-        undefined,
-        'TradeCache'
-      );
-    }
-  } else {
-    // If no cache client, cache is in-memory and will expire naturally
+  if (!cacheClient) {
+    // No cache client configured: nothing was invalidated; entries expire via TTL.
     logger.debug(
       'No cache client available, cache will expire naturally',
       { marketId },
       'TradeCache'
     );
+    return;
   }
+
+  // Support versioned keys (e.g. `prediction-trades:v2:<marketId>:...`).
+  const pattern = `market-trades:prediction-trades*:${marketId}:*`;
+  const deletedCount = await cacheClient.deleteByPattern(pattern);
 
   logger.info(
     `Invalidated prediction trades cache for market ${marketId}`,
-    undefined,
+    { deletedCount },
     'TradeCache'
   );
 }
@@ -90,29 +83,23 @@ export async function invalidatePredictionTradesCache(
  * @returns {Promise<void>}
  */
 export async function invalidatePerpTradesCache(ticker: string): Promise<void> {
-  if (cacheClient) {
-    const tickerKey = ticker.toLowerCase();
-    const pattern = `market-trades:perp-trades:${tickerKey}:*`;
-    const deletedCount = await cacheClient.deleteByPattern(pattern);
-
-    if (deletedCount > 0) {
-      logger.debug(
-        `Deleted ${deletedCount} cache keys for ticker ${ticker}`,
-        undefined,
-        'TradeCache'
-      );
-    }
-  } else {
+  if (!cacheClient) {
+    // No cache client configured: nothing was invalidated; entries expire via TTL.
     logger.debug(
       'No cache client available, cache will expire naturally',
       { ticker },
       'TradeCache'
     );
+    return;
   }
+
+  const tickerKey = ticker.toLowerCase();
+  const pattern = `market-trades:perp-trades:${tickerKey}:*`;
+  const deletedCount = await cacheClient.deleteByPattern(pattern);
 
   logger.info(
     `Invalidated perp trades cache for ticker ${ticker}`,
-    undefined,
+    { deletedCount },
     'TradeCache'
   );
 }

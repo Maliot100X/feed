@@ -203,4 +203,115 @@ describe('predictionTerminalState', () => {
     expect(first).not.toBe(second);
     expect(isSamePredictionLiveState(first, second)).toBe(true);
   });
+
+  function tradeEvent(
+    overrides: Partial<PredictionTradeSSE> = {}
+  ): PredictionTradeSSE {
+    return {
+      type: 'prediction_trade',
+      marketId: 'market-1',
+      yesPrice: 0.7,
+      noPrice: 0.3,
+      yesShares: 70,
+      noShares: 30,
+      trade: {
+        actorType: 'npc',
+        action: 'buy',
+        side: 'yes',
+        shares: 5,
+        amount: 3.5,
+        price: 0.7,
+        source: 'npc_trade',
+        timestamp: '2026-03-20T00:02:00.000Z',
+      },
+      ...overrides,
+    };
+  }
+
+  function resolutionEvent(
+    winningSide: 'yes' | 'no',
+    overrides: Partial<PredictionResolutionSSE> = {}
+  ): PredictionResolutionSSE {
+    return {
+      type: 'prediction_resolution',
+      marketId: 'market-1',
+      winningSide,
+      yesPrice: winningSide === 'yes' ? 1 : 0,
+      noPrice: winningSide === 'yes' ? 0 : 1,
+      yesShares: 50,
+      noShares: 50,
+      totalPayout: 100,
+      timestamp: '2026-03-20T00:01:00.000Z',
+      ...overrides,
+    };
+  }
+
+  it('sets status and resolvedOutcome together on resolution', () => {
+    const state = buildPredictionTerminalState(
+      baseMarket,
+      buildPredictionLiveStateFromResolution(resolutionEvent('yes'))
+    );
+    expect(state?.status).toBe('resolved');
+    expect(state?.resolvedOutcome).toBe(true);
+  });
+
+  it('retains a false (NO) outcome rather than treating it as missing', () => {
+    const state = buildPredictionTerminalState(
+      baseMarket,
+      buildPredictionLiveStateFromResolution(resolutionEvent('no'))
+    );
+    expect(state?.status).toBe('resolved');
+    expect(state?.resolution).toBe(false);
+    expect(state?.resolvedOutcome).toBe(false);
+  });
+
+  it('keeps resolution when a late trade event arrives', () => {
+    const resolved = buildPredictionLiveStateFromResolution(
+      resolutionEvent('no')
+    );
+    const afterLateTrade = buildPredictionLiveStateFromTrade(
+      tradeEvent(),
+      resolved
+    );
+    expect(afterLateTrade).toBe(resolved);
+
+    const state = buildPredictionTerminalState(baseMarket, afterLateTrade);
+    expect(state?.status).toBe('resolved');
+    expect(state?.resolved).toBe(true);
+    expect(state?.resolution).toBe(false);
+    expect(state?.noProbability).toBe(1);
+  });
+
+  it('a resolution for another market does not block trades on this one', () => {
+    const otherResolved = buildPredictionLiveStateFromResolution(
+      resolutionEvent('yes', { marketId: 'market-2' })
+    );
+    const next = buildPredictionLiveStateFromTrade(tradeEvent(), otherResolved);
+    expect(next.marketId).toBe('market-1');
+    expect(next.resolved).toBeUndefined();
+    expect(next.yesProbability).toBe(0.7);
+  });
+
+  it('does not reopen an already-resolved snapshot with a stale trade', () => {
+    const resolvedBase: PredictionMarket = {
+      ...baseMarket,
+      status: 'resolved',
+      resolvedOutcome: false,
+    };
+    const state = buildPredictionTerminalState(
+      resolvedBase,
+      buildPredictionLiveStateFromTrade(tradeEvent())
+    );
+    expect(state).toEqual(resolvedBase);
+  });
+
+  it('keeps base liquidity when live state has none', () => {
+    const baseWithLiquidity = { ...baseMarket, liquidity: 250 };
+    const state = buildPredictionTerminalState(
+      baseWithLiquidity,
+      buildPredictionLiveStateFromTrade(tradeEvent())
+    );
+    expect(state?.liquidity).toBe(250);
+    expect(state?.yesShares).toBe(70);
+  });
 });

@@ -2,14 +2,16 @@
  * Admin World Facts API
  *
  * @route GET /api/admin/world-facts - Get world facts
- * @route POST /api/admin/world-facts - Create/update world facts
- * @route DELETE /api/admin/world-facts - Delete world fact
+ * @route POST /api/admin/world-facts - Create/update/delete world facts and run admin actions
  * @access Admin
  *
  * @description
  * Manages world facts, RSS feeds, parody headlines, and character mappings.
- * GET returns all facts and related data. POST creates/updates facts.
- * DELETE removes a fact.
+ * GET returns all facts and related data. POST takes `{ action, data }`
+ * validated per action (update_fact, add_fact, delete_fact, fetch_rss,
+ * set_daily_topic_override, clear_daily_topic_override,
+ * recompute_daily_topic, generate_parodies, refresh_mappings,
+ * generate_world_facts).
  *
  * @openapi
  * /api/admin/world-facts:
@@ -52,31 +54,17 @@
  *         application/json:
  *           schema:
  *             type: object
+ *             required: [action]
+ *             properties:
+ *               action:
+ *                 type: string
+ *               data:
+ *                 type: object
  *     responses:
  *       200:
  *         description: Facts updated successfully
- *       401:
- *         description: Unauthorized
- *       403:
- *         description: Admin access required
- *   delete:
- *     tags:
- *       - Admin
- *     summary: Delete world fact
- *     description: Deletes a world fact (admin only)
- *     security:
- *       - BearerAuth: []
- *     requestBody:
- *       content:
- *         application/json:
- *           schema:
- *             type: object
- *             properties:
- *               factId:
- *                 type: string
- *     responses:
- *       200:
- *         description: Fact deleted successfully
+ *       400:
+ *         description: Unknown action or invalid data for the action
  *       401:
  *         description: Unauthorized
  *       403:
@@ -90,8 +78,12 @@
  * ```
  */
 
-import { requireAdmin, successResponse, withErrorHandling } from '@feed/api';
-// Removed fs and path imports - using TypeScript imports instead
+import {
+  errorResponse,
+  requireAdmin,
+  successResponse,
+  withErrorHandling,
+} from '@feed/api';
 import { db } from '@feed/db';
 import {
   characterMappingService,
@@ -103,6 +95,59 @@ import {
 } from '@feed/engine';
 import { generateSnowflakeId, logger } from '@feed/shared';
 import type { NextRequest } from 'next/server';
+import { z } from 'zod';
+
+const FactValue = z.string().trim().min(1).max(2000);
+const OptionalDate = z
+  .object({
+    date: z
+      .string()
+      .refine((value) => !Number.isNaN(Date.parse(value)), 'Invalid date')
+      .optional(),
+  })
+  .optional();
+const NoData = z.object({}).optional();
+
+const WorldFactsActionSchema = z.discriminatedUnion('action', [
+  z.object({
+    action: z.literal('update_fact'),
+    data: z.object({ id: z.string().min(1), value: FactValue }),
+  }),
+  z.object({
+    action: z.literal('add_fact'),
+    data: z.object({
+      value: FactValue,
+      category: z.literal('general').default('general'),
+    }),
+  }),
+  z.object({
+    action: z.literal('delete_fact'),
+    data: z.object({ id: z.string().min(1) }),
+  }),
+  z.object({ action: z.literal('fetch_rss'), data: NoData }),
+  z.object({
+    action: z.literal('set_daily_topic_override'),
+    data: z.object({
+      topicLabel: z.string().trim().min(1, 'Missing topicLabel').max(200),
+      summary: z.string().trim().max(2000).default(''),
+      date: z
+        .string()
+        .refine((value) => !Number.isNaN(Date.parse(value)), 'Invalid date')
+        .optional(),
+    }),
+  }),
+  z.object({
+    action: z.literal('clear_daily_topic_override'),
+    data: OptionalDate,
+  }),
+  z.object({ action: z.literal('recompute_daily_topic'), data: OptionalDate }),
+  z.object({ action: z.literal('generate_parodies'), data: NoData }),
+  z.object({ action: z.literal('refresh_mappings'), data: NoData }),
+  z.object({ action: z.literal('generate_world_facts'), data: NoData }),
+]);
+
+const toDate = (value: string | undefined) =>
+  value ? new Date(value) : new Date();
 
 /**
  * GET /api/admin/world-facts - Get all world facts and related data
@@ -146,38 +191,43 @@ export const GET = withErrorHandling(async (request: NextRequest) => {
 export const POST = withErrorHandling(async (request: NextRequest) => {
   await requireAdmin(request);
 
-  const body = await request.json();
-  const { action, data } = body;
+  const parsed = WorldFactsActionSchema.safeParse(await request.json());
+  if (!parsed.success) {
+    return errorResponse(
+      parsed.error.issues[0]?.message ?? 'Invalid request body',
+      'VALIDATION_ERROR',
+      400
+    );
+  }
+  const body = parsed.data;
 
-  switch (action) {
+  switch (body.action) {
     case 'update_fact': {
-      // Simple: just update by value (id is used to find the fact)
-      const { id, value } = data;
-      if (!id || !value) {
-        return successResponse({ error: 'Missing id or value' }, 400);
-      }
-
+      const { id, value } = body.data;
       const fact = await worldFactsService.updateFactById(id, value);
       logger.info(`Updated world fact: ${id}`, { fact }, 'WorldFactsAdmin');
       return successResponse({ fact });
     }
 
     case 'add_fact': {
-      // Add a new fact by value (simple string)
-      const { value, category } = data;
-      if (!value) {
-        return successResponse({ error: 'Missing value' }, 400);
-      }
-
-      // Use specified category or default to 'general'
-      const factCategory = category || 'general';
-      const key = value
-        .split(':')[0]
+      // Add a new fact by value (simple string). The key is derived from the
+      // text before the first ':'; facts with the same category+key are
+      // updated in place.
+      const { value, category: factCategory } = body.data;
+      const key = (value.split(':')[0] ?? '')
         .trim()
         .toLowerCase()
         .replace(/[^a-z0-9]+/g, '_')
+        .replace(/^_+|_+$/g, '')
         .substring(0, 50);
-      const label = value.split(':')[0].trim().substring(0, 60);
+      if (!key) {
+        return errorResponse(
+          'Fact must start with an ASCII label (e.g. "Label: value")',
+          'VALIDATION_ERROR',
+          400
+        );
+      }
+      const label = (value.split(':')[0] ?? '').trim().substring(0, 60);
 
       // Check if fact already exists
       const existing = await db.worldFact.findFirst({
@@ -219,28 +269,10 @@ export const POST = withErrorHandling(async (request: NextRequest) => {
       return successResponse({ fact });
     }
 
-    case 'bulk_update_facts': {
-      // Simple: array of strings
-      const { facts } = data;
-      if (!Array.isArray(facts)) {
-        return successResponse(
-          { error: 'facts must be an array of strings' },
-          400
-        );
-      }
-      await worldFactsService.bulkUpdateFacts(facts);
-      return successResponse({ success: true });
-    }
-
-    case 'toggle_fact': {
-      const fact = await worldFactsService.toggleFactActive(data.id);
-      return successResponse({ fact });
-    }
-
     case 'delete_fact': {
-      await worldFactsService.deleteFact(data.id);
+      await worldFactsService.deleteFact(body.data.id);
       logger.info(
-        `Deleted world fact: ${data.id}`,
+        `Deleted world fact: ${body.data.id}`,
         undefined,
         'WorldFactsAdmin'
       );
@@ -255,14 +287,9 @@ export const POST = withErrorHandling(async (request: NextRequest) => {
     }
 
     case 'set_daily_topic_override': {
-      const topicLabel = String(data?.topicLabel || '').trim();
-      const summary = String(data?.summary || '').trim();
-      if (!topicLabel) {
-        return successResponse({ error: 'Missing topicLabel' }, 400);
-      }
-
+      const { topicLabel, summary, date } = body.data;
       const topic = await dailyTopicService.setManualTopic({
-        date: data?.date ? new Date(data.date) : new Date(),
+        date: toDate(date),
         topicLabel,
         summary,
       });
@@ -271,14 +298,14 @@ export const POST = withErrorHandling(async (request: NextRequest) => {
 
     case 'clear_daily_topic_override': {
       const topic = await dailyTopicService.clearOverride(
-        data?.date ? new Date(data.date) : new Date()
+        toDate(body.data?.date)
       );
       return successResponse({ topic });
     }
 
     case 'recompute_daily_topic': {
       const topic = await dailyTopicService.recomputeTopicForDate(
-        data?.date ? new Date(data.date) : new Date()
+        toDate(body.data?.date)
       );
       return successResponse({ topic });
     }
@@ -317,27 +344,5 @@ export const POST = withErrorHandling(async (request: NextRequest) => {
       );
       return successResponse({ result });
     }
-
-    default:
-      return successResponse({ error: 'Unknown action' }, 400);
   }
-});
-
-/**
- * DELETE /api/admin/world-facts - Delete a world fact
- */
-export const DELETE = withErrorHandling(async (request: NextRequest) => {
-  await requireAdmin(request);
-
-  const { searchParams } = new URL(request.url);
-  const id = searchParams.get('id');
-
-  if (!id) {
-    return successResponse({ error: 'Missing id parameter' }, 400);
-  }
-
-  await worldFactsService.deleteFact(id);
-  logger.info(`Deleted world fact: ${id}`, undefined, 'WorldFactsAdmin');
-
-  return successResponse({ success: true });
 });

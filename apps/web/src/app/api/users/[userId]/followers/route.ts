@@ -32,11 +32,6 @@
  *         schema:
  *           type: integer
  *         description: Results per page
- *       - in: query
- *         name: includeMutual
- *         schema:
- *           type: boolean
- *         description: Include mutual follow indicators
  *     responses:
  *       200:
  *         description: Followers list retrieved successfully
@@ -71,6 +66,9 @@
  *                         type: string
  *                 count:
  *                   type: integer
+ *                   description: Total number of relations (all pages)
+ *                 hasMore:
+ *                   type: boolean
  *
  * @example
  * ```typescript
@@ -102,7 +100,6 @@ import {
 } from '@feed/db';
 import { StaticDataRegistry } from '@feed/engine';
 import {
-  logger,
   toISO,
   UserFollowersQuerySchema,
   UserIdParamSchema,
@@ -118,7 +115,8 @@ interface FollowerResponse {
   followedAt: string;
   isActor: boolean;
   tier?: string;
-  isMutualFollow?: boolean;
+  /** True when the authenticated viewer follows this entry. */
+  viewerFollows?: boolean;
 }
 
 /**
@@ -136,12 +134,10 @@ export const GET = withErrorHandling(
 
     // Validate query parameters
     const { searchParams } = new URL(request.url);
-    const queryParams = {
-      page: searchParams.get('page'),
-      limit: searchParams.get('limit'),
-      includeMutual: searchParams.get('includeMutual'),
-    };
-    UserFollowersQuerySchema.parse(queryParams);
+    const { page, limit } = UserFollowersQuerySchema.parse({
+      page: searchParams.get('page') ?? undefined,
+      limit: searchParams.get('limit') ?? undefined,
+    });
 
     // Find target (user or actor) - throws NotFoundError if neither exists
     const { actor: targetActor, targetId } =
@@ -285,6 +281,11 @@ export const GET = withErrorHandling(
       );
     }
 
+    // Apply pagination after merging/sorting all relation sources.
+    const total = followersList.length;
+    const offset = (page - 1) * limit;
+    followersList = followersList.slice(offset, offset + limit);
+
     // Check if authenticated user follows each follower (for showing follow/unfollow button state)
     if (authUser?.userId) {
       const followerIds = followersList
@@ -328,23 +329,18 @@ export const GET = withErrorHandling(
         }
       }
 
-      // Add isMutualFollow to each follower (true if auth user follows them)
+      // Add viewerFollows to each follower (true if auth user follows them)
       for (const follower of followersList) {
-        follower.isMutualFollow = follower.isActor
+        follower.viewerFollows = follower.isActor
           ? followedActorIds.has(follower.id)
           : followedUserIds.has(follower.id);
       }
     }
 
-    logger.info(
-      'Followers fetched successfully',
-      { targetId, count: followersList.length, isActor: !!targetActor },
-      'GET /api/users/[userId]/followers'
-    );
-
     return successResponse({
       followers: followersList,
-      count: followersList.length,
+      count: total,
+      hasMore: offset + followersList.length < total,
     });
   }
 );

@@ -10,7 +10,7 @@ import { ANTI_REPETITION_RULES, PARODY_NAME_RULES } from '../shared-sections';
  */
 export const trendingTopics = definePrompt({
   id: 'trending-topics',
-  version: '2.0.0',
+  version: '2.1.0',
   category: 'game',
   description: 'Generates trends with narrative context',
   temperature: 0.85,
@@ -36,7 +36,7 @@ ${PARODY_NAME_RULES}
 ${ANTI_REPETITION_RULES}
 
 === TRENDING REQUIREMENTS ===
-For each cluster, create:
+For each cluster, create (echo the cluster's tag exactly in <tag>):
 1) Catchy trend name (3-6 words, title case)
 2) Micro-summary (1-2 sentences)
 3) Connection to ongoing narratives
@@ -50,6 +50,7 @@ XML:
 <response>
   <trends>
     <trend>
+      <tag>exact tag of the cluster this trend describes</tag>
       <trendName>Catchy Title Here</trendName>
       <description>1-2 sentence satirical summary</description>
       <connectsTo>which narrative this relates to</connectsTo>

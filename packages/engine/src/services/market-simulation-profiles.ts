@@ -1,3 +1,4 @@
+import { clamp } from '../utils/math-utils';
 import type { StaticOrganization } from './static-data-registry';
 
 export interface MarketSimulationProfile {
@@ -95,10 +96,6 @@ const DEFAULT_GLOBAL_STATE: GlobalMarketSimulationState = {
   volatilityLevel: 1,
   riskSentiment: 0,
 };
-
-function clamp(value: number, min: number, max: number): number {
-  return Math.max(min, Math.min(max, value));
-}
 
 function stableUnit(seed: string): number {
   let hash = 2166136261;

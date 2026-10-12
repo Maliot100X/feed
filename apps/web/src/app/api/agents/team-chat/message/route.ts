@@ -167,12 +167,17 @@ Title:`;
 const messageSchema = z.object({
   content: z
     .string()
+    .trim()
     .min(1, 'Message content is required')
     .max(4000, 'Message too long. Maximum 4000 characters allowed.'),
+  // Explicit conversation target. Falls back to the active conversation for
+  // older clients; switching conversations mid-send must not redirect the
+  // message, so clients should always send it.
+  chatId: z.string().trim().min(1).max(100).optional(),
   // Target IDs for message routing in team chat
   // - Array of agent IDs when @mentioning agents
   // - Empty array or undefined = coordinator (no @mentions)
-  targetIds: z.array(z.string()).optional(),
+  targetIds: z.array(z.string().min(1).max(100)).max(50).optional(),
   // Reply to a specific message (Telegram/Discord-style)
   replyToMessageId: z.string().min(1).optional(),
 });
@@ -218,6 +223,7 @@ export const POST = withErrorHandling(async function POST(req: NextRequest) {
 
   const {
     content,
+    chatId: requestedChatId,
     targetIds: providedTargetIds,
     replyToMessageId,
   } = parseResult.data;
@@ -236,9 +242,33 @@ export const POST = withErrorHandling(async function POST(req: NextRequest) {
     );
   }
 
-  // Determine target IDs for message routing
-  const targetIds =
-    providedTargetIds && providedTargetIds.length > 0 ? providedTargetIds : [];
+  if (
+    requestedChatId &&
+    !(await teamChatService.validateTeamChatOwnership(user.id, requestedChatId))
+  ) {
+    return NextResponse.json(
+      { success: false, error: 'Conversation not found' },
+      { status: 404 }
+    );
+  }
+  const chatId = requestedChatId ?? teamChat.chatId;
+
+  // Determine target IDs for message routing: deduplicated, and only agents
+  // that are members of this user's team chat.
+  const targetIds = [...new Set(providedTargetIds ?? [])];
+  if (targetIds.length > 0) {
+    const teamAgentIds = new Set(
+      (await teamChatService.getTeamChatAgents(user.id, teamChat.groupId)).map(
+        (agent) => agent.id
+      )
+    );
+    if (targetIds.some((id) => !teamAgentIds.has(id))) {
+      return NextResponse.json(
+        { success: false, error: 'targetIds must be agents in your team chat' },
+        { status: 400 }
+      );
+    }
+  }
 
   // Validate reply target and build reply snippet (if replying)
   let replyToMessage: {
@@ -259,10 +289,7 @@ export const POST = withErrorHandling(async function POST(req: NextRequest) {
       .from(messages)
       .leftJoin(users, eq(users.id, messages.senderId))
       .where(
-        and(
-          eq(messages.id, replyToMessageId),
-          eq(messages.chatId, teamChat.chatId)
-        )
+        and(eq(messages.id, replyToMessageId), eq(messages.chatId, chatId))
       )
       .limit(1);
 
@@ -290,9 +317,9 @@ export const POST = withErrorHandling(async function POST(req: NextRequest) {
 
   await db.insert(messages).values({
     id: messageId,
-    chatId: teamChat.chatId,
+    chatId: chatId,
     senderId: user.id,
-    content: content.trim(),
+    content,
     type: 'user',
     createdAt: now,
     targetIds,
@@ -301,15 +328,17 @@ export const POST = withErrorHandling(async function POST(req: NextRequest) {
 
   logger.info(
     `Team chat message sent by user ${user.id}`,
-    { chatId: teamChat.chatId, messageId },
+    { chatId: chatId, messageId },
     'TeamChatMessageAPI'
   );
 
   // Broadcast the message via SSE
-  await broadcastChatMessage(teamChat.chatId, {
+  // The message is already committed: a broadcast failure must not turn into
+  // an error response (clients would retry and duplicate the message).
+  await broadcastChatMessage(chatId, {
     id: messageId,
-    content: content.trim(),
-    chatId: teamChat.chatId,
+    content,
+    chatId: chatId,
     senderId: user.id,
     type: 'user',
     createdAt: toISO(now),
@@ -317,25 +346,28 @@ export const POST = withErrorHandling(async function POST(req: NextRequest) {
     isDMChat: false,
     replyToMessageId: replyToMessageId ?? undefined,
     replyToMessage,
+  }).catch((error: Error) => {
+    logger.error(
+      'Team chat message broadcast failed after commit',
+      { chatId, messageId, error: error.message },
+      'TeamChatMessageAPI'
+    );
   });
 
   // Generate chat title on first message
   // Check if chat needs title (name is null) and this is the first user message
   let generatedTitle: string | null = null;
-  const needsTitle = await teamChatService.chatNeedsTitle(
-    teamChat.chatId,
-    user.id
-  );
+  const needsTitle = await teamChatService.chatNeedsTitle(chatId, user.id);
   if (needsTitle) {
     const messageCount = await teamChatService.getUserMessageCount(
-      teamChat.chatId,
+      chatId,
       user.id
     );
     // Only generate on first message (count is 1 after insert)
     if (messageCount === 1) {
       generatedTitle = await generateAndUpdateChatTitle(
-        teamChat.chatId,
-        content.trim(),
+        chatId,
+        content,
         user.id
       );
     }
@@ -350,8 +382,8 @@ export const POST = withErrorHandling(async function POST(req: NextRequest) {
       success: true,
       message: {
         id: messageId,
-        content: content.trim(),
-        chatId: teamChat.chatId,
+        content,
+        chatId: chatId,
         senderId: user.id,
         type: 'user',
         createdAt: toISO(now),

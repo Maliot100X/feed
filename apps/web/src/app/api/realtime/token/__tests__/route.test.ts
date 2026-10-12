@@ -1,430 +1,174 @@
 /**
- * Tests for Realtime Token API Route - Agent Channel Authorization
- *
- * @route POST /api/realtime/token
- *
- * Comprehensive tests covering:
- * - Agent channel authorization logic
- * - Ownership verification
- * - Channel deduplication
- * - Mixed channel types (agent, chat, public)
- * - Unauthorized agent rejection
- * - Edge cases
+ * Tests for POST /api/realtime/token using the production route handler and
+ * the real DM chat-id helper (DB and token signer are mocked).
  */
 
-import { describe, expect, it } from 'bun:test';
-
-// Types
-type RealtimeChannel = string;
-
-// Test constants
-const PUBLIC_CHANNELS: RealtimeChannel[] = [
-  'feed',
-  'markets',
-  'breaking-news',
-  'upcoming-events',
-];
+import { beforeEach, describe, expect, it, mock } from 'bun:test';
+import { NextRequest } from 'next/server';
 
 const USER_ID = 'user-123';
 
-// Helper functions (replicating route logic)
-const dedupe = <T>(items: T[]) => Array.from(new Set(items));
+interface ParticipantQuery {
+  where: { userId: string; chatId: { in: string[] }; isActive?: boolean };
+}
 
-const isDmChatId = (id: string, userId: string): boolean => {
-  if (!id.startsWith('dm-')) return false;
-  const parts = id.substring('dm-'.length).split('-').filter(Boolean);
-  if (parts.length !== 2) return false;
-  return parts.includes(userId);
-};
+let activeParticipantChatIds: string[] = [];
+let ownedAgentIds: string[] = [];
+const participantFindManyMock = mock(async (query: ParticipantQuery) =>
+  query.where.chatId.in
+    .filter((chatId) => activeParticipantChatIds.includes(chatId))
+    .map((chatId) => ({ chatId }))
+);
+const issueRealtimeTokenMock = mock(
+  (_input: { userId: string; channels: string[]; ttlSeconds: number }) =>
+    'signed-token'
+);
 
-describe('Agent Channel Extraction', () => {
-  it('should extract agent IDs from channel strings', () => {
-    const channels = ['agent:agent-123', 'agent:agent-456', 'feed', 'markets'];
-
-    const agentIds = channels
-      .filter((ch) => ch.startsWith('agent:'))
-      .map((ch) => ch.replace('agent:', ''));
-
-    expect(agentIds).toHaveLength(2);
-    expect(agentIds).toContain('agent-123');
-    expect(agentIds).toContain('agent-456');
-  });
-
-  it('should combine agentIds from params and channels', () => {
-    const agentIdsParam = ['agent-1', 'agent-2'];
-    const requestedChannels = ['agent:agent-2', 'agent:agent-3', 'feed'];
-
-    const derivedAgentIds = dedupe([
-      ...agentIdsParam,
-      ...requestedChannels
-        .filter((ch) => ch.startsWith('agent:'))
-        .map((ch) => ch.replace('agent:', '')),
-    ]).filter(Boolean);
-
-    expect(derivedAgentIds).toHaveLength(3);
-    expect(derivedAgentIds).toContain('agent-1');
-    expect(derivedAgentIds).toContain('agent-2');
-    expect(derivedAgentIds).toContain('agent-3');
-  });
-
-  it('should deduplicate agent IDs', () => {
-    const agentIdsParam = ['agent-1', 'agent-1', 'agent-2'];
-    const requestedChannels = ['agent:agent-1', 'agent:agent-2'];
-
-    const derivedAgentIds = dedupe([
-      ...agentIdsParam,
-      ...requestedChannels
-        .filter((ch) => ch.startsWith('agent:'))
-        .map((ch) => ch.replace('agent:', '')),
-    ]).filter(Boolean);
-
-    expect(derivedAgentIds).toHaveLength(2);
-  });
-
-  it('should filter out empty agent IDs', () => {
-    const agentIdsParam = ['agent-1', '', 'agent-2'];
-    const requestedChannels = ['agent:', 'agent:agent-3'];
-
-    const derivedAgentIds = dedupe([
-      ...agentIdsParam,
-      ...requestedChannels
-        .filter((ch) => ch.startsWith('agent:'))
-        .map((ch) => ch.replace('agent:', '')),
-    ]).filter(Boolean);
-
-    expect(derivedAgentIds).toHaveLength(3);
-    expect(derivedAgentIds).not.toContain('');
-  });
+const apiModulePath = new URL(
+  '../../../../../../../../packages/api/src/index.ts',
+  import.meta.url
+).pathname;
+const apiModuleFactory = () => ({
+  authenticate: async () => ({ userId: USER_ID, dbUserId: USER_ID }),
+  issueRealtimeToken: issueRealtimeTokenMock,
+  withErrorHandling: (handler: (...args: never[]) => unknown) => handler,
 });
 
-describe('Agent Ownership Verification', () => {
-  it('should filter to only owned agents', () => {
-    const requestedAgentIds = ['agent-1', 'agent-2', 'agent-3', 'agent-4'];
-    const ownedAgentIds = ['agent-1', 'agent-3']; // Only these are owned
-
-    const allowedAgentIds = new Set(ownedAgentIds);
-    const authorizedAgentIds = requestedAgentIds.filter((id) =>
-      allowedAgentIds.has(id)
-    );
-
-    expect(authorizedAgentIds).toHaveLength(2);
-    expect(authorizedAgentIds).toContain('agent-1');
-    expect(authorizedAgentIds).toContain('agent-3');
-    expect(authorizedAgentIds).not.toContain('agent-2');
-    expect(authorizedAgentIds).not.toContain('agent-4');
-  });
-
-  it('should return empty when user owns no requested agents', () => {
-    const requestedAgentIds = ['agent-1', 'agent-2'];
-    const ownedAgentIds: string[] = [];
-
-    const allowedAgentIds = new Set(ownedAgentIds);
-    const authorizedAgentIds = requestedAgentIds.filter((id) =>
-      allowedAgentIds.has(id)
-    );
-
-    expect(authorizedAgentIds).toHaveLength(0);
-  });
-
-  it('should handle all agents being owned', () => {
-    const requestedAgentIds = ['agent-1', 'agent-2', 'agent-3'];
-    const ownedAgentIds = ['agent-1', 'agent-2', 'agent-3'];
-
-    const allowedAgentIds = new Set(ownedAgentIds);
-    const authorizedAgentIds = requestedAgentIds.filter((id) =>
-      allowedAgentIds.has(id)
-    );
-
-    expect(authorizedAgentIds).toHaveLength(3);
-  });
+const dbModulePath = new URL(
+  '../../../../../../../../packages/db/src/index.ts',
+  import.meta.url
+).pathname;
+const dbModuleFactory = () => ({
+  and: () => undefined,
+  db: {
+    chatParticipant: { findMany: participantFindManyMock },
+    select: () => ({
+      from: () => ({
+        where: async () => ownedAgentIds.map((id) => ({ id })),
+      }),
+    }),
+  },
+  eq: () => undefined,
+  inArray: () => undefined,
+  users: {},
 });
 
-describe('Unauthorized Agent Handling', () => {
-  it('should identify unauthorized agents', () => {
-    const requestedAgentIds = ['agent-1', 'agent-2', 'agent-3'];
-    const ownedAgentIds = ['agent-1'];
+mock.module('@feed/api', apiModuleFactory);
+mock.module(apiModulePath, apiModuleFactory);
+mock.module('@feed/db', dbModuleFactory);
+mock.module(dbModulePath, dbModuleFactory);
 
-    const allowedAgentIds = new Set(ownedAgentIds);
-    const unauthorizedAgents = requestedAgentIds.filter(
-      (id) => !allowedAgentIds.has(id)
-    );
+function post(body?: object | string): NextRequest {
+  return new NextRequest('https://feed.example/api/realtime/token', {
+    method: 'POST',
+    body:
+      body === undefined
+        ? undefined
+        : typeof body === 'string'
+          ? body
+          : JSON.stringify(body),
+  });
+}
 
-    expect(unauthorizedAgents).toHaveLength(2);
-    expect(unauthorizedAgents).toContain('agent-2');
-    expect(unauthorizedAgents).toContain('agent-3');
+async function loadPost(): Promise<(req: NextRequest) => Promise<Response>> {
+  const module = await import('../route');
+  return module.POST;
+}
+
+describe('POST /api/realtime/token', () => {
+  beforeEach(() => {
+    activeParticipantChatIds = [];
+    ownedAgentIds = [];
+    participantFindManyMock.mockClear();
+    issueRealtimeTokenMock.mockClear();
   });
 
-  it('should have no unauthorized agents when all owned', () => {
-    const requestedAgentIds = ['agent-1', 'agent-2'];
-    const ownedAgentIds = ['agent-1', 'agent-2', 'agent-3'];
+  it('issues public channels plus notifications for an empty body', async () => {
+    const POST = await loadPost();
+    const response = await POST(post());
+    const body = (await response.json()) as { channels: string[] };
 
-    const allowedAgentIds = new Set(ownedAgentIds);
-    const unauthorizedAgents = requestedAgentIds.filter(
-      (id) => !allowedAgentIds.has(id)
-    );
-
-    expect(unauthorizedAgents).toHaveLength(0);
-  });
-
-  it('should silently exclude unauthorized agents (not fail request)', () => {
-    // Per implementation: agent auth is less strict than chat auth
-    const requestedAgentIds = ['agent-1', 'agent-unauthorized'];
-    const ownedAgentIds = ['agent-1'];
-
-    const allowedAgentIds = new Set(ownedAgentIds);
-    const authorizedAgentIds = requestedAgentIds.filter((id) =>
-      allowedAgentIds.has(id)
-    );
-    const unauthorizedAgents = requestedAgentIds.filter(
-      (id) => !allowedAgentIds.has(id)
-    );
-
-    // Should still get the authorized agent
-    expect(authorizedAgentIds).toHaveLength(1);
-    expect(authorizedAgentIds).toContain('agent-1');
-    expect(unauthorizedAgents).toHaveLength(1);
-    // Request doesn't fail, just excludes unauthorized
-  });
-});
-
-describe('Agent Channel Construction', () => {
-  it('should construct agent channels correctly', () => {
-    const authorizedAgentIds = ['agent-1', 'agent-2'];
-
-    const agentChannels = authorizedAgentIds.map((id) => `agent:${id}`);
-
-    expect(agentChannels).toHaveLength(2);
-    expect(agentChannels).toContain('agent:agent-1');
-    expect(agentChannels).toContain('agent:agent-2');
-  });
-
-  it('should handle empty authorized agents', () => {
-    const authorizedAgentIds: string[] = [];
-
-    const agentChannels = authorizedAgentIds.map((id) => `agent:${id}`);
-
-    expect(agentChannels).toHaveLength(0);
-  });
-});
-
-describe('Final Channel Assembly', () => {
-  it('should combine all channel types correctly', () => {
-    const baseChannels = [...PUBLIC_CHANNELS, `notifications:${USER_ID}`];
-    const chatChannels = ['chat:chat-123', 'chat:chat-456'];
-    const agentChannels = ['agent:agent-1', 'agent:agent-2'];
-
-    const finalChannels = dedupe([
-      ...baseChannels,
-      ...chatChannels,
-      ...agentChannels,
-    ]);
-
-    expect(finalChannels).toContain('feed');
-    expect(finalChannels).toContain('markets');
-    expect(finalChannels).toContain(`notifications:${USER_ID}`);
-    expect(finalChannels).toContain('chat:chat-123');
-    expect(finalChannels).toContain('agent:agent-1');
-  });
-
-  it('should deduplicate final channels', () => {
-    const baseChannels = ['feed', 'markets'];
-    const chatChannels = ['chat:chat-123'];
-    const agentChannels = ['agent:agent-1'];
-    const requestedPublic = ['feed', 'markets']; // duplicates
-
-    const finalChannels = dedupe([
-      ...baseChannels,
-      ...requestedPublic,
-      ...chatChannels,
-      ...agentChannels,
-    ]);
-
-    const feedCount = finalChannels.filter((c) => c === 'feed').length;
-    const marketsCount = finalChannels.filter((c) => c === 'markets').length;
-
-    expect(feedCount).toBe(1);
-    expect(marketsCount).toBe(1);
-  });
-
-  it('should handle no agent channels', () => {
-    const baseChannels = [...PUBLIC_CHANNELS];
-    const chatChannels = ['chat:chat-1'];
-    const agentChannels: string[] = [];
-
-    const finalChannels = dedupe([
-      ...baseChannels,
-      ...chatChannels,
-      ...agentChannels,
-    ]);
-
-    expect(finalChannels).not.toContain('agent:');
-    expect(finalChannels).toContain('chat:chat-1');
-    expect(finalChannels.length).toBe(PUBLIC_CHANNELS.length + 1);
-  });
-});
-
-describe('DM Chat Validation', () => {
-  it('should validate correct DM format', () => {
-    // Note: DM format is dm-{userId1}-{userId2} where IDs don't contain hyphens
-    // When using snowflake IDs like '1234567890', format is dm-1234567890-9876543210
-    const userId = '1234567890';
-    const dmChatId = 'dm-1234567890-9876543210';
-
-    expect(isDmChatId(dmChatId, userId)).toBe(true);
-  });
-
-  it('should reject DM where user is not participant', () => {
-    const userId = '9999999999';
-    const dmChatId = 'dm-1234567890-9876543210';
-
-    expect(isDmChatId(dmChatId, userId)).toBe(false);
-  });
-
-  it('should reject non-DM chat IDs', () => {
-    const userId = '1234567890';
-
-    expect(isDmChatId('group-chat-123', userId)).toBe(false);
-    expect(isDmChatId('chat-123', userId)).toBe(false);
-    expect(isDmChatId('agent:agent-1', userId)).toBe(false);
-  });
-
-  it('should reject malformed DM IDs', () => {
-    const userId = '1234567890';
-
-    expect(isDmChatId('dm-', userId)).toBe(false);
-    expect(isDmChatId('dm-1234567890', userId)).toBe(false); // Only 1 user
-    expect(isDmChatId('dm-123-456-789', userId)).toBe(false); // 3 parts
-  });
-});
-
-describe('Public Channel Validation', () => {
-  it('should include only known public channels', () => {
-    const requestedChannels = [
-      'feed',
-      'markets',
-      'unknown-channel',
-      'hacker-channel',
-    ];
-
-    const requestedPublic = requestedChannels.filter((ch) =>
-      PUBLIC_CHANNELS.includes(ch)
-    );
-
-    expect(requestedPublic).toHaveLength(2);
-    expect(requestedPublic).toContain('feed');
-    expect(requestedPublic).toContain('markets');
-    expect(requestedPublic).not.toContain('unknown-channel');
-    expect(requestedPublic).not.toContain('hacker-channel');
-  });
-
-  it('should handle all public channels being requested', () => {
-    const requestedChannels = [
+    expect(response.status).toBe(200);
+    expect(body.channels).toEqual([
       'feed',
       'markets',
       'breaking-news',
       'upcoming-events',
-    ];
+      `notifications:${USER_ID}`,
+    ]);
+  });
 
-    const requestedPublic = requestedChannels.filter((ch) =>
-      PUBLIC_CHANNELS.includes(ch)
+  it('only checks active chat participation', async () => {
+    activeParticipantChatIds = ['group-1'];
+    const POST = await loadPost();
+    const response = await POST(post({ chatIds: ['group-1'] }));
+
+    expect(response.status).toBe(200);
+    const [query] = participantFindManyMock.mock.calls[0] ?? [];
+    expect(query?.where.isActive).toBe(true);
+    const body = (await response.json()) as { channels: string[] };
+    expect(body.channels).toContain('chat:group-1');
+  });
+
+  it('rejects chats the user is not an active participant of', async () => {
+    const POST = await loadPost();
+    const response = await POST(post({ channels: ['chat:group-2'] }));
+
+    expect(response.status).toBe(403);
+    expect(issueRealtimeTokenMock).not.toHaveBeenCalled();
+  });
+
+  it('allows deterministic DM ids that include the user (hyphenated ids)', async () => {
+    const POST = await loadPost();
+    const response = await POST(
+      post({ chatIds: [`dm-${USER_ID}-other-user-9`] })
     );
-
-    expect(requestedPublic).toHaveLength(4);
-  });
-});
-
-describe('Empty Channel Handling', () => {
-  it('should handle empty request body', () => {
-    const channels: string[] = [];
-    const chatIds: string[] = [];
-    const agentIds: string[] = [];
-
-    expect(channels.length).toBe(0);
-    expect(chatIds.length).toBe(0);
-    expect(agentIds.length).toBe(0);
+    expect(response.status).toBe(200);
   });
 
-  it('should still include base channels when request is empty', () => {
-    const includeNotifications = true;
-    const baseChannels = includeNotifications
-      ? [...PUBLIC_CHANNELS, `notifications:${USER_ID}`]
-      : [...PUBLIC_CHANNELS];
-
-    expect(baseChannels.length).toBe(PUBLIC_CHANNELS.length + 1);
-    expect(baseChannels).toContain('feed');
-    expect(baseChannels).toContain(`notifications:${USER_ID}`);
+  it('rejects DM ids that do not include the user', async () => {
+    const POST = await loadPost();
+    const response = await POST(post({ chatIds: ['dm-alice-bob'] }));
+    expect(response.status).toBe(403);
   });
 
-  it('should not include notifications when disabled', () => {
-    const includeNotifications = false;
-    const baseChannels = includeNotifications
-      ? [...PUBLIC_CHANNELS, `notifications:${USER_ID}`]
-      : [...PUBLIC_CHANNELS];
-
-    expect(baseChannels.length).toBe(PUBLIC_CHANNELS.length);
-    expect(baseChannels).not.toContain(`notifications:${USER_ID}`);
-  });
-});
-
-describe('TTL Handling', () => {
-  it('should use default TTL when not provided', () => {
-    const providedTtl = undefined;
-    const defaultTtl = 900;
-    const actualTtl = providedTtl ?? defaultTtl;
-
-    expect(actualTtl).toBe(900);
-  });
-
-  it('should use provided TTL', () => {
-    const providedTtl = 3600;
-    const defaultTtl = 900;
-    const actualTtl = providedTtl ?? defaultTtl;
-
-    expect(actualTtl).toBe(3600);
-  });
-
-  it('should calculate expiry correctly', () => {
-    const now = Date.now();
-    const ttl = 900;
-    const expiresAt = now + ttl * 1000;
-
-    expect(expiresAt).toBe(now + 900000);
-    expect(expiresAt).toBeGreaterThan(now);
-  });
-});
-
-describe('Edge Cases', () => {
-  it('should handle agent ID with colons', () => {
-    // This tests for potentially malformed agent IDs
-    const channel = 'agent:agent:with:colons';
-    const agentId = channel.replace('agent:', '');
-
-    expect(agentId).toBe('agent:with:colons');
-  });
-
-  it('should handle very long agent IDs', () => {
-    const longAgentId = 'a'.repeat(100);
-    const channel = `agent:${longAgentId}`;
-
-    expect(channel).toBe(`agent:${'a'.repeat(100)}`);
-  });
-
-  it('should handle Unicode in agent IDs', () => {
-    const unicodeAgentId = 'agent-🤖-bot';
-    const channel = `agent:${unicodeAgentId}`;
-
-    expect(channel).toBe('agent:agent-🤖-bot');
-  });
-
-  it('should handle many agent requests efficiently', () => {
-    const manyAgentIds = Array.from({ length: 100 }, (_, i) => `agent-${i}`);
-    const ownedAgentIds = manyAgentIds.slice(0, 50); // Own half
-
-    const allowedAgentIds = new Set(ownedAgentIds);
-    const authorizedAgentIds = manyAgentIds.filter((id) =>
-      allowedAgentIds.has(id)
+  it('includes only owned agent channels', async () => {
+    ownedAgentIds = ['agent-1'];
+    const POST = await loadPost();
+    const response = await POST(
+      post({ agentIds: ['agent-1'], channels: ['agent:agent-2'] })
     );
+    const body = (await response.json()) as { channels: string[] };
 
-    expect(authorizedAgentIds).toHaveLength(50);
+    expect(body.channels).toContain('agent:agent-1');
+    expect(body.channels).not.toContain('agent:agent-2');
+  });
+
+  it('does not coerce the string "false" to true for includeNotifications', async () => {
+    const POST = await loadPost();
+    await expect(
+      POST(post({ includeNotifications: 'false' }))
+    ).rejects.toThrow();
+  });
+
+  it('omits notifications when includeNotifications is false', async () => {
+    const POST = await loadPost();
+    const response = await POST(post({ includeNotifications: false }));
+    const body = (await response.json()) as { channels: string[] };
+    expect(body.channels).not.toContain(`notifications:${USER_ID}`);
+  });
+
+  it('rejects oversized id arrays', async () => {
+    const POST = await loadPost();
+    const chatIds = Array.from({ length: 101 }, (_, i) => `c${i}`);
+    await expect(POST(post({ chatIds }))).rejects.toThrow();
+    expect(participantFindManyMock).not.toHaveBeenCalled();
+  });
+
+  it('passes the requested TTL to the signer', async () => {
+    const POST = await loadPost();
+    await POST(post({ ttlSeconds: 60 }));
+    const [input] = issueRealtimeTokenMock.mock.calls[0] ?? [];
+    expect(input?.ttlSeconds).toBe(60);
   });
 });

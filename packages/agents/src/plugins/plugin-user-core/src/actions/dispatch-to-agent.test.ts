@@ -24,6 +24,10 @@
  * - text uses agentUsername when available
  * - values contains dispatchedCommand, agentResponse, actionsExecuted
  * - Calls _callback with the ActionResult on all paths (success, failure, missing fields)
+ *   and awaits it before resolving
+ *
+ * Authorization (agent belongs to the owner's team) is enforced inside
+ * dispatchAgentChat and is not certified by these mocked tests.
  */
 
 import { beforeEach, describe, expect, it, mock } from 'bun:test';
@@ -90,7 +94,8 @@ const MOCK_RUNTIME = {} as IAgentRuntime;
 const MOCK_MESSAGE = {} as Memory;
 
 beforeEach(() => {
-  mockDispatchAgentChat.mockClear();
+  // Reset implementations too, so no case inherits another case's result
+  mockDispatchAgentChat.mockReset();
 });
 
 // ─── validate() ───────────────────────────────────────────────────────────────
@@ -190,88 +195,35 @@ describe('DISPATCH_TO_AGENT handler()', () => {
   // ── Missing required fields ─────────────────────────────────────────────
 
   describe('missing required state fields', () => {
-    it('returns failure when agentId is missing from actionParams', async () => {
-      const state = buildState({
-        actionParams: { command: 'open long', agentId: undefined },
+    const cases: Array<[string, Parameters<typeof buildState>[0]]> = [
+      ['agentId', { actionParams: { command: 'open long' } }],
+      ['command', { actionParams: { agentId: AGENT_ID } }],
+      [
+        'whitespace command',
+        { actionParams: { agentId: AGENT_ID, command: '   ' } },
+      ],
+      ['actionParams', { actionParams: undefined }],
+      ['ownerId', { ownerId: undefined }],
+      ['teamChatId', { teamChatId: undefined }],
+      ['broadcastFn', { broadcastFn: undefined }],
+    ];
+
+    for (const [missing, overrides] of cases) {
+      it(`fails without dispatching when ${missing} is missing`, async () => {
+        const callbackFn = mock(async () => []);
+        const result = await dispatchToAgentAction.handler!(
+          MOCK_RUNTIME,
+          MOCK_MESSAGE,
+          buildState(overrides),
+          {},
+          callbackFn
+        );
+        expect(result!.success).toBe(false);
+        expect(result!.text).toContain('Missing');
+        expect(mockDispatchAgentChat).not.toHaveBeenCalled();
+        expect(callbackFn).toHaveBeenCalledTimes(1);
       });
-      const result = await dispatchToAgentAction.handler!(
-        MOCK_RUNTIME,
-        MOCK_MESSAGE,
-        state,
-        {},
-        mock()
-      );
-      expect(result!.success).toBe(false);
-      expect(result!.text).toContain('Missing');
-      expect(mockDispatchAgentChat).not.toHaveBeenCalled();
-    });
-
-    it('returns failure when command is missing from actionParams', async () => {
-      const state = buildState({
-        actionParams: { agentId: AGENT_ID, command: undefined },
-      });
-      const result = await dispatchToAgentAction.handler!(
-        MOCK_RUNTIME,
-        MOCK_MESSAGE,
-        state,
-        {},
-        mock()
-      );
-      expect(result!.success).toBe(false);
-      expect(mockDispatchAgentChat).not.toHaveBeenCalled();
-    });
-
-    it('returns failure when actionParams is entirely absent', async () => {
-      const state = buildState({ actionParams: undefined });
-      const result = await dispatchToAgentAction.handler!(
-        MOCK_RUNTIME,
-        MOCK_MESSAGE,
-        state,
-        {},
-        mock()
-      );
-      expect(result!.success).toBe(false);
-      expect(mockDispatchAgentChat).not.toHaveBeenCalled();
-    });
-
-    it('returns failure when ownerId is missing from state.values', async () => {
-      const state = buildState({ ownerId: undefined });
-      const result = await dispatchToAgentAction.handler!(
-        MOCK_RUNTIME,
-        MOCK_MESSAGE,
-        state,
-        {},
-        mock()
-      );
-      expect(result!.success).toBe(false);
-      expect(mockDispatchAgentChat).not.toHaveBeenCalled();
-    });
-
-    it('returns failure when teamChatId is missing from state.values', async () => {
-      const state = buildState({ teamChatId: undefined });
-      const result = await dispatchToAgentAction.handler!(
-        MOCK_RUNTIME,
-        MOCK_MESSAGE,
-        state,
-        {},
-        mock()
-      );
-      expect(result!.success).toBe(false);
-      expect(mockDispatchAgentChat).not.toHaveBeenCalled();
-    });
-
-    it('returns failure when broadcastFn is missing from state.data', async () => {
-      const state = buildState({ broadcastFn: undefined });
-      const result = await dispatchToAgentAction.handler!(
-        MOCK_RUNTIME,
-        MOCK_MESSAGE,
-        state,
-        {},
-        mock()
-      );
-      expect(result!.success).toBe(false);
-      expect(mockDispatchAgentChat).not.toHaveBeenCalled();
-    });
+    }
   });
 
   // ── Successful dispatch ─────────────────────────────────────────────────
@@ -340,8 +292,8 @@ describe('DISPATCH_TO_AGENT handler()', () => {
       expect(result!.text).toContain(LONG_RESPONSE.slice(0, 100));
     });
 
-    it('text is truncated to 300 chars from the response', async () => {
-      const veryLongResponse = 'X'.repeat(500);
+    it('text embeds exactly the first 300 chars while values keep the full response', async () => {
+      const veryLongResponse = `${'X'.repeat(300)}${'Y'.repeat(200)}`;
       mockDispatchAgentChat.mockResolvedValue({
         success: true,
         agentId: AGENT_ID,
@@ -360,11 +312,10 @@ describe('DISPATCH_TO_AGENT handler()', () => {
         mock()
       );
 
-      // response is 500 X's; text should cap the embedded response at 300
-      const responseInText = result!
-        .text!.replace(/^Dispatched to @bot: "/, '')
-        .replace(/"$/, '');
-      expect(responseInText.length).toBeLessThanOrEqual(300);
+      expect(result!.text).toBe(`Dispatched to @bot: "${'X'.repeat(300)}"`);
+      expect((result!.values as Record<string, unknown>).agentResponse).toBe(
+        veryLongResponse
+      );
     });
 
     it('values contains correct dispatch data', async () => {
@@ -463,6 +414,58 @@ describe('DISPATCH_TO_AGENT handler()', () => {
   // ── _callback contract ──────────────────────────────────────────────────
 
   describe('_callback contract (ElizaOS protocol)', () => {
+    it('awaits the callback before resolving', async () => {
+      mockDispatchAgentChat.mockResolvedValue({
+        success: true,
+        agentId: AGENT_ID,
+        agentUsername: 'bot',
+        response: 'Done.',
+        actionsExecuted: 0,
+        isLLMFailure: false,
+      });
+      let release: () => void = () => {};
+      const callbackFn = mock(
+        () =>
+          new Promise<[]>((resolve) => {
+            release = () => resolve([]);
+          })
+      );
+
+      let settled = false;
+      const pending = dispatchToAgentAction.handler!(
+        MOCK_RUNTIME,
+        MOCK_MESSAGE,
+        buildState(),
+        {},
+        callbackFn
+      ).then(() => {
+        settled = true;
+      });
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      expect(settled).toBe(false);
+
+      release();
+      await pending;
+      expect(settled).toBe(true);
+      expect(mockDispatchAgentChat).toHaveBeenCalledTimes(1);
+    });
+
+    it('propagates a thrown dispatch without reporting success', async () => {
+      mockDispatchAgentChat.mockRejectedValue(new Error('runtime crashed'));
+      const callbackFn = mock(async () => []);
+
+      await expect(
+        dispatchToAgentAction.handler!(
+          MOCK_RUNTIME,
+          MOCK_MESSAGE,
+          buildState(),
+          {},
+          callbackFn
+        )
+      ).rejects.toThrow('runtime crashed');
+      expect(callbackFn).not.toHaveBeenCalled();
+    });
+
     it('calls _callback with success result on successful dispatch', async () => {
       mockDispatchAgentChat.mockResolvedValue({
         success: true,
@@ -536,42 +539,6 @@ describe('DISPATCH_TO_AGENT handler()', () => {
       };
       expect(callArg.content.success).toBe(false);
       expect(callArg.content.text).toContain('Failed');
-    });
-  });
-
-  // ── Action metadata ─────────────────────────────────────────────────────
-
-  describe('action metadata', () => {
-    it('has the correct name', () => {
-      expect(dispatchToAgentAction.name).toBe('DISPATCH_TO_AGENT');
-    });
-
-    it('has a description', () => {
-      expect(dispatchToAgentAction.description).toBeTruthy();
-      expect(dispatchToAgentAction.description.length).toBeGreaterThan(10);
-    });
-
-    it('has examples with at least one example', () => {
-      expect(Array.isArray(dispatchToAgentAction.examples)).toBe(true);
-      expect(dispatchToAgentAction.examples!.length).toBeGreaterThan(0);
-    });
-
-    it('has a validate function', () => {
-      expect(typeof dispatchToAgentAction.validate).toBe('function');
-    });
-
-    it('has a handler function', () => {
-      expect(typeof dispatchToAgentAction.handler).toBe('function');
-    });
-
-    it('has agentId and command in parameters schema', () => {
-      const params = dispatchToAgentAction.parameters as Record<
-        string,
-        unknown
-      >;
-      expect(params).toBeDefined();
-      expect(params.agentId).toBeDefined();
-      expect(params.command).toBeDefined();
     });
   });
 });

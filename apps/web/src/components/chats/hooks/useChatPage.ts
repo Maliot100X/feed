@@ -193,19 +193,6 @@ export function useChatPage() {
     async (chatId: string) => {
       setLoadingChat(true);
 
-      if (isDebugMode) {
-        const response = await fetch(`/api/chats/${chatId}?debug=true`);
-        const data = await response.json();
-        setChatDetails({
-          ...data,
-          chat: data.chat || null,
-          messages: data.messages || [],
-          participants: data.participants || [],
-        });
-        setLoadingChat(false);
-        return;
-      }
-
       const token = await getAccessToken();
       if (!token) {
         setLoadingChat(false);
@@ -235,7 +222,7 @@ export function useChatPage() {
       });
       setLoadingChat(false);
     },
-    [getAccessToken, isDebugMode]
+    [getAccessToken]
   );
 
   // Handle reply to message — resolves sender name from participants

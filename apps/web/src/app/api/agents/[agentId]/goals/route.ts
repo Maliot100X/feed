@@ -104,6 +104,15 @@ import { db } from '@feed/db';
 import { generateSnowflakeId } from '@feed/shared';
 import type { NextRequest } from 'next/server';
 import { NextResponse } from 'next/server';
+import { z } from 'zod';
+
+const CreateGoalSchema = z.object({
+  type: z.enum(['trading', 'social', 'learning', 'reputation', 'custom']),
+  name: z.string().trim().min(1).max(200),
+  description: z.string().trim().min(1).max(2000),
+  target: z.string().trim().max(2000).optional(),
+  priority: z.number().int().min(1).max(10).default(5),
+});
 
 /**
  * GET - List agent's goals
@@ -212,44 +221,11 @@ export const POST = withErrorHandling(async function POST(
     return NextResponse.json({ error: 'Unauthorized' }, { status: 403 });
   }
 
-  // Parse request body
-  const body = (await req.json()) as Record<string, unknown>;
-  const { type, name, description, target, priority = 5 } = body;
-
-  // Validate required fields
-  if (
-    !type ||
-    !name ||
-    !description ||
-    typeof type !== 'string' ||
-    typeof name !== 'string' ||
-    typeof description !== 'string'
-  ) {
-    return NextResponse.json(
-      { error: 'Missing required fields: type, name, description' },
-      { status: 400 }
-    );
-  }
-
-  // Validate type
-  const validTypes = ['trading', 'social', 'learning', 'reputation', 'custom'];
-  if (!validTypes.includes(type)) {
-    return NextResponse.json(
-      {
-        error: `Invalid goal type. Must be one of: ${validTypes.join(', ')}`,
-      },
-      { status: 400 }
-    );
-  }
-
-  // Validate priority
-  const priorityValue = typeof priority === 'number' ? priority : 5;
-  if (priorityValue < 1 || priorityValue > 10) {
-    return NextResponse.json(
-      { error: 'Priority must be between 1 and 10' },
-      { status: 400 }
-    );
-  }
+  // Strict body: wrong-type or fractional priority, non-string target and
+  // blank strings are rejected instead of silently coerced.
+  const { type, name, description, target, priority } = CreateGoalSchema.parse(
+    await req.json()
+  );
 
   // Create goal
   const goal = await db.agentGoal.create({
@@ -259,8 +235,8 @@ export const POST = withErrorHandling(async function POST(
       type,
       name,
       description,
-      target: typeof target === 'string' ? target : undefined,
-      priority: priorityValue,
+      target,
+      priority,
       status: 'active',
       progress: 0,
       createdAt: new Date(),

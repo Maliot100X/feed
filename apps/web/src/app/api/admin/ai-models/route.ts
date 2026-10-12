@@ -47,6 +47,7 @@ import {
   requireAdmin,
   withErrorHandling,
 } from '@feed/api';
+import { FeedLLMClient } from '@feed/engine';
 import { getSurplusConfig } from '@feed/shared';
 import type { NextRequest } from 'next/server';
 import { NextResponse } from 'next/server';
@@ -59,59 +60,44 @@ export const GET = withErrorHandling(async (req: NextRequest) => {
   const admin = await requireAdmin(req);
 
   // Audit log the view
-  logAdminView({
+  await logAdminView({
     adminId: admin.userId,
     ipAddress: getClientIp(req.headers) ?? undefined,
     resourceType: 'ai_models',
     metadata: { action: 'view_config' },
   });
 
-  // Check available providers
+  // Provider availability from configured credentials
   const surplus = getSurplusConfig();
   const providers = {
     surplus: !!surplus,
+    elizacloud: !!process.env.ELIZACLOUD_API_KEY,
     groq: !!process.env.GROQ_API_KEY,
     claude: !!process.env.ANTHROPIC_API_KEY,
     openai: !!process.env.OPENAI_API_KEY,
   };
+  const anyConfigured = Object.values(providers).some(Boolean);
 
-  // Get active provider (based on priority: Surplus > Groq > Claude > OpenAI)
-  let activeProvider: 'surplus' | 'groq' | 'claude' | 'openai' = 'openai';
-  if (providers.surplus) {
-    activeProvider = 'surplus';
-  } else if (providers.groq) {
-    activeProvider = 'groq';
-  } else if (providers.claude) {
-    activeProvider = 'claude';
-  }
+  // Active provider/model come from the same selection the game tick uses
+  // (FeedLLMClient.forGameTick), not a separately maintained priority list.
+  // With no credentials there is no active provider.
+  const active = anyConfigured ? FeedLLMClient.forGameTick().getStats() : null;
 
   return NextResponse.json({
     success: true,
     data: {
       providers,
-      activeProvider,
-      recommendedModels: surplus
+      activeProvider: active?.provider ?? null,
+      activeModel: active?.model ?? null,
+      recommendedModels: active
         ? [
             {
-              id: surplus.model,
-              name: `${surplus.model} (Surplus)`,
-              description: 'Configured inference model',
+              id: active.model,
+              name: `${active.model} (${active.provider})`,
+              description: 'Default model for the active provider',
             },
           ]
-        : [
-            {
-              id: 'openai/gpt-oss-120b',
-              name: 'GPT OSS 120B (Groq)',
-              description:
-                '⭐ Best for quality content: events, articles, posts, decisions',
-            },
-            {
-              id: 'llama-3.1-8b-instant',
-              name: 'Llama 3.1 8B Instant (Groq)',
-              description:
-                '🚀 Best for frequent operations: comments, DMs, tags, evaluations',
-            },
-          ],
+        : [],
     },
   });
 });

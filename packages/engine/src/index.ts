@@ -22,7 +22,15 @@ export {
   loadOrganizationById,
 } from './actors-loader';
 // State Store Adapters
-export { DbStateStore, InMemoryStateStore } from './adapters';
+export { InMemoryStateStore } from './adapters';
+// Game state store contract (offline simulation)
+export type {
+  ActiveMarket,
+  ActiveQuestion,
+  GameActor,
+  GameOrganization,
+  GameStateStore,
+} from './adapters/game-state-store';
 // Alpha Group Configuration
 export {
   ALPHA_GROUP_CONFIG,
@@ -111,30 +119,6 @@ export {
   OrganizationBehavior,
   type OrganizationType,
 } from './GameGenerator';
-// Game Loop (tick-based simulation orchestrator)
-export { GameLoop } from './GameLoop';
-// Game Simulator (standalone simulation engine)
-export {
-  type GameConfig,
-  type GameEvent,
-  type GameResult,
-  GameSimulator,
-  type MarketState as SimulatedMarketState,
-  type ReputationChange,
-  type SimulatedAgent,
-} from './GameSimulator';
-// Game Tick (canonical tick executor)
-export {
-  type ActiveMarket,
-  type ActiveQuestion,
-  type GameActor,
-  type GameOrganization,
-  type GameStateStore,
-  GameTick,
-  type TickConfig,
-  type TickResult,
-  type TickServices,
-} from './GameTick';
 // Game World
 export {
   type CausalEventContext,
@@ -162,7 +146,6 @@ export { cosineSimilarity, getEmbedding } from './llm/embedding-client';
 export {
   cleanMarkdownCodeBlocks,
   extractJsonFromText,
-  parseContinuationContent,
 } from './llm/json-continuation-parser';
 // LLM Exports (re-exported for convenience)
 export {
@@ -180,11 +163,6 @@ export {
 export { parseXML, type XMLParseResult } from './llm/xml-parser';
 // Market Decision Engine
 export { MarketDecisionEngine } from './MarketDecisionEngine';
-// News Article Pacing Engine
-export {
-  type ArticleStage,
-  NewsArticlePacingEngine,
-} from './NewsArticlePacingEngine';
 // NPC Investment Manager
 export {
   NPCInvestmentManager,
@@ -192,11 +170,6 @@ export {
   type PortfolioPosition,
   type RebalanceAction,
 } from './npc/npc-investment-manager';
-// NPC Portfolio Strategy
-export {
-  NPCPortfolioStrategy,
-  type StrategyConfig,
-} from './npc/npc-portfolio-strategy';
 // NPC Portfolio Metrics (shared calculation utilities)
 export {
   buildFallbackMetricsByPool,
@@ -222,19 +195,6 @@ export {
   type ParseResult,
   parsePostId,
 } from './post-id-parser';
-// Concentrated Liquidity
-export {
-  type AddPositionParams,
-  ConcentratedLiquidityPool,
-  type ConcentratedPosition,
-  type ConcentratedTradeResult,
-  calculateOptimalRange,
-  createPoolFromMarket,
-  estimateFeeAPR,
-  type PoolConfig,
-  type PoolState,
-  type RemovePositionResult,
-} from './prediction-concentrated-liquidity';
 // Prompts
 export * from './prompts';
 // Question Manager
@@ -253,27 +213,18 @@ export {
 export * from './rate-limiting';
 // Reputation Module
 export {
-  calculateAverageROI,
   calculateConfidenceScore,
-  // Trade Feedback Calculator
-  calculateEntryTimingScore,
-  calculateExitTimingScore,
   calculateGameScore,
   // Reputation Calculation Service
   calculateReputationScore,
-  calculateRiskScore,
-  calculateSharpeRatio,
-  calculateTradeMetrics,
   calculateTradeScore,
   calculateWinRate,
-  denormalizePnL,
   type GameMetrics,
   generateBatchGameFeedback,
   generateGameCompletionFeedback,
   generateTradeCompletionFeedback,
   getReputationBreakdown,
   getReputationLeaderboard,
-  getTradeFeedbackSummary,
   getTrustLevel,
   // PNL Normalization utilities
   normalizePnL,

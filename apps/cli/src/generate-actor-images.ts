@@ -20,7 +20,7 @@
  *
  * **Requirements:**
  * - `OPENAI_API_KEY` environment variable must be set
- * - Actor data files must exist in `packages/engine/src/data/actors/` and `packages/engine/src/data/organizations/` (TypeScript files)
+ * - Actor and organization data come from the default pack (`packages/pack-default/src/`)
  * - Output directories must be writable:
  *   - `public/images/actors/`
  *   - `public/images/actor-banners/`

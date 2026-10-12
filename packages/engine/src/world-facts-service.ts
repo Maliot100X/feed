@@ -8,7 +8,19 @@
  */
 
 import type { WorldFact } from '@feed/db';
-import { and, db, desc, eq, gte, isNull, lte, or, worldFacts } from '@feed/db';
+import {
+  and,
+  db,
+  desc,
+  eq,
+  gte,
+  isNull,
+  lte,
+  notInArray,
+  or,
+  sql,
+  worldFacts,
+} from '@feed/db';
 import { generateSnowflakeId, logger } from '@feed/shared';
 import {
   buildDailyTopicPromptContext,
@@ -19,6 +31,17 @@ import {
   MIN_QUALITY_SCORE,
 } from './services/parody-headline-generator';
 import { isSimulationMode } from './storage-bridge';
+
+/**
+ * worldFacts categories that hold private per-chat/per-agent state (shared
+ * chat snapshots, agent working memory). They must never be published through
+ * the global "current reality" readers.
+ */
+export const SHARED_CHAT_CONTEXT_CATEGORY = 'shared_chat_context';
+const PRIVATE_CONTEXT_CATEGORIES = [
+  SHARED_CHAT_CONTEXT_CATEGORY,
+  'agent_working_memory',
+];
 
 export interface WorldFactsContext {
   crypto: string;
@@ -93,6 +116,7 @@ export class WorldFactsService {
       .where(
         and(
           eq(worldFacts.isActive, true),
+          notInArray(worldFacts.category, PRIVATE_CONTEXT_CATEGORIES),
           // Pre-migration records (null) are presumed OK; reject only scored failures
           or(
             isNull(worldFacts.qualityScore),
@@ -133,6 +157,7 @@ export class WorldFactsService {
       .where(
         and(
           eq(worldFacts.isActive, true),
+          notInArray(worldFacts.category, PRIVATE_CONTEXT_CATEGORIES),
           or(
             isNull(worldFacts.qualityScore),
             gte(worldFacts.qualityScore, MIN_QUALITY_SCORE)
@@ -357,19 +382,14 @@ This context reflects the current state of the world. Use these facts to make yo
    * Toggle fact active status
    */
   async toggleFactActive(id: string): Promise<WorldFact> {
-    const [fact] = await db
-      .select()
-      .from(worldFacts)
-      .where(eq(worldFacts.id, id))
-      .limit(1);
-    if (!fact) throw new Error('Fact not found');
-
+    // Single atomic UPDATE so concurrent toggles cannot be lost.
     const [updated] = await db
       .update(worldFacts)
-      .set({ isActive: !fact.isActive })
+      .set({ isActive: sql`NOT ${worldFacts.isActive}`, updatedAt: new Date() })
       .where(eq(worldFacts.id, id))
       .returning();
-    return updated!;
+    if (!updated) throw new Error('Fact not found');
+    return updated;
   }
 
   /**

@@ -17,6 +17,7 @@ import {
   balanceContextSchema,
   positionsContextSchema,
   requireContextArray,
+  requireContextNumber,
 } from './context-contracts';
 
 /**
@@ -68,6 +69,7 @@ export const dashboardProvider: Provider = {
     const chatsData = chats as { chats?: Array<{ id: string; name?: string }> };
     const notificationsData = notifications as {
       notifications?: Array<{ id: string; message: string }>;
+      unreadCount?: number;
     };
 
     requireContextArray(predictionsData.predictions, 'predictions');
@@ -80,7 +82,11 @@ export const dashboardProvider: Provider = {
     const activeMarkets = predictionsData.predictions?.length || 0;
     const recentPosts = feedData.posts?.length || 0;
     const activeChats = chatsData.chats?.length || 0;
-    const unreadNotifications = notificationsData.notifications?.length || 0;
+    // Server-reported unread total (not the size of the fetched page).
+    const unreadNotifications = requireContextNumber(
+      notificationsData.unreadCount,
+      'unreadCount'
+    );
 
     const result = `📊 AGENT DASHBOARD
 
@@ -90,7 +96,7 @@ Points: ${balanceData.reputationPoints || 0} pts
 Open Positions: ${totalPositions}
 
 📈 MARKETS
-Active Markets: ${activeMarkets}
+Active Markets (fetched): ${activeMarkets}
 ${
   predictionsData.predictions && predictionsData.predictions.length > 0
     ? `Recent: ${predictionsData.predictions.map((p) => p.question).join(', ')}`
@@ -98,7 +104,7 @@ ${
 }
 
 📱 SOCIAL FEED
-Recent Posts: ${recentPosts}
+Recent Posts (shown): ${recentPosts}
 ${
   feedData.posts && feedData.posts.length > 0 && feedData.posts[0]?.content
     ? `Latest: ${feedData.posts[0].content}...`

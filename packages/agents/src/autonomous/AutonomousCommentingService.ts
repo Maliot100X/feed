@@ -14,6 +14,7 @@ import { countTokensSync } from '@feed/api';
 import {
   and,
   comments,
+  count,
   db,
   desc,
   eq,
@@ -22,6 +23,7 @@ import {
   isNull,
   lte,
   ne,
+  notExists,
   perpPositions,
   positions,
   posts,
@@ -82,18 +84,10 @@ export class AutonomousCommentingService {
     const now = new Date();
     const oneDayAgo = new Date(Date.now() - 24 * 60 * 60 * 1000);
 
-    // Get posts agent already commented on
-    const agentComments = await db
-      .select({ postId: comments.postId })
-      .from(comments)
-      .where(eq(comments.authorId, agentUserId));
-
-    const commentedPostIds = new Set(
-      agentComments.map((c) => c.postId).filter((id) => id !== null) as string[]
-    );
-
-    // Get recent posts with author info
-    const recentPostsRaw = await db
+    // Get recent posts the agent has not commented on yet. The exclusion is
+    // applied in SQL before the limit so already-commented posts cannot
+    // starve older eligible ones.
+    const uncommentedPosts = await db
       .select({
         id: posts.id,
         content: posts.content,
@@ -106,16 +100,22 @@ export class AutonomousCommentingService {
           ne(posts.authorId, agentUserId),
           isNull(posts.deletedAt),
           gte(posts.timestamp, oneDayAgo),
-          lte(posts.timestamp, now)
+          lte(posts.timestamp, now),
+          notExists(
+            db
+              .select({ id: comments.id })
+              .from(comments)
+              .where(
+                and(
+                  eq(comments.postId, posts.id),
+                  eq(comments.authorId, agentUserId)
+                )
+              )
+          )
         )
       )
       .orderBy(desc(posts.createdAt))
       .limit(15);
-
-    // Filter to posts agent hasn't commented on
-    const uncommentedPosts = recentPostsRaw.filter(
-      (p) => !commentedPostIds.has(p.id)
-    );
 
     if (uncommentedPosts.length === 0) {
       logger.info(
@@ -128,7 +128,7 @@ export class AutonomousCommentingService {
 
     // Get comments for these posts (including parentCommentId for threading)
     const postIds = uncommentedPosts.map((p) => p.id);
-    const allComments = await db
+    const postComments = await db
       .select({
         id: comments.id,
         content: comments.content,
@@ -138,29 +138,36 @@ export class AutonomousCommentingService {
         createdAt: comments.createdAt,
       })
       .from(comments)
-      .where(isNull(comments.deletedAt))
+      .where(
+        and(
+          inArray(comments.postId, postIds),
+          isNull(comments.deletedAt),
+          lte(comments.createdAt, now)
+        )
+      )
       .orderBy(desc(comments.createdAt))
-      .limit(200); // Increased to capture more thread context
+      .limit(200); // Thread context for the candidate posts only
 
-    // Filter comments to our posts
-    const postComments = allComments.filter(
-      (c) => c.postId && postIds.includes(c.postId)
-    );
-
-    // Get like counts for these comments
+    // Like counts for these comments, aggregated in SQL
     const commentIds = postComments.map((c) => c.id);
-    const likeCountsRaw = await db
-      .select({
-        commentId: reactions.commentId,
-      })
-      .from(reactions)
-      .where(and(eq(reactions.type, 'like')));
+    const likeCountsRaw =
+      commentIds.length > 0
+        ? await db
+            .select({ commentId: reactions.commentId, likes: count() })
+            .from(reactions)
+            .where(
+              and(
+                eq(reactions.type, 'like'),
+                inArray(reactions.commentId, commentIds)
+              )
+            )
+            .groupBy(reactions.commentId)
+        : [];
 
-    // Count likes per comment (filter in memory since inArray might not work)
     const likeCounts = new Map<string, number>();
     for (const r of likeCountsRaw) {
-      if (r.commentId && commentIds.includes(r.commentId)) {
-        likeCounts.set(r.commentId, (likeCounts.get(r.commentId) || 0) + 1);
+      if (r.commentId) {
+        likeCounts.set(r.commentId, r.likes);
       }
     }
 
@@ -516,11 +523,14 @@ If you want to skip (no relevant posts):
         continue;
       }
 
+      const rawPostIndex = parsed.post_index?.trim();
       decision = {
         action: parsed.action,
-        postIndex: parsed.post_index
-          ? parseInt(parsed.post_index, 10)
-          : undefined,
+        // Strict: "2abc" or "1.5" must not silently select post 2/1
+        postIndex:
+          rawPostIndex && /^\d+$/.test(rawPostIndex)
+            ? Number(rawPostIndex)
+            : undefined,
         replyToCommentId: parsed.reply_to_comment_id || undefined,
         content: parsed.content,
         reason: parsed.reason,
@@ -568,6 +578,11 @@ If you want to skip (no relevant posts):
       const cleanContent = decision.content.trim().replace(/^["']|["']$/g, '');
       if (!cleanContent || cleanContent.length < 5) {
         throw new Error('Comment content is empty or too short');
+      }
+      if (cleanContent.length > MAX_COMMENT_CHARS) {
+        throw new Error(
+          `Comment content exceeds ${MAX_COMMENT_CHARS} characters (${cleanContent.length})`
+        );
       }
 
       // Validate reply_to_comment_id if provided

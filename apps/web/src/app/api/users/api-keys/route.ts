@@ -37,14 +37,14 @@ export const GET = withErrorHandling(async (request: NextRequest) => {
     });
   });
 
-  // Mask keys - only show last 4 characters
+  // Only the SHA-256 hash is stored, so no part of the secret is recoverable.
+  // Show the fixed key prefix with a fully masked secret rather than hash
+  // characters that look like (but are not) the end of the key.
   const maskedKeys = keys.map((key) => {
-    const keyHash = key.keyHash;
-    const last4 = keyHash.slice(-4);
     return {
       id: key.id,
       name: key.name,
-      maskedKey: `bab_live_****${last4}`,
+      maskedKey: 'bab_live_••••••••',
       createdAt: toISO(key.createdAt),
       lastUsedAt: toISOOrNull(key.lastUsedAt),
       expiresAt: toISOOrNull(key.expiresAt),

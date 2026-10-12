@@ -22,6 +22,19 @@ import { logger } from '@feed/shared';
 
 type DbClient = typeof defaultDb | Transaction;
 
+/** Negative amounts would invert the operation (a negative debit mints). */
+function assertValidAmount(
+  operation: 'debit' | 'credit',
+  actorId: string,
+  amount: number
+): void {
+  if (!Number.isFinite(amount) || amount < 0) {
+    throw new Error(
+      `Invalid NPC ${operation} amount for ${actorId}: ${amount}. Amount must be a finite non-negative number.`
+    );
+  }
+}
+
 /**
  * Creates a WalletPort implementation for NPC actors.
  * Uses actorState.tradingBalance instead of user wallets.
@@ -37,6 +50,7 @@ export function createNpcWalletAdapter(
 
   return {
     async debit({ amount, reason }: { amount: number; reason: string }) {
+      assertValidAmount('debit', actorId, amount);
       // Atomic debit: check balance AND update in single statement
       // This prevents race conditions where concurrent debits could
       // both pass the balance check and cause negative balance
@@ -75,6 +89,7 @@ export function createNpcWalletAdapter(
     },
 
     async credit({ amount }: { amount: number }) {
+      assertValidAmount('credit', actorId, amount);
       // Atomic credit using SQL increment
       const result = await db
         .update(actorState)

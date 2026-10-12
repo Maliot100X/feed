@@ -121,16 +121,24 @@ export function truncateToTokenLimitSync(
 ): { text: string; tokens: number } {
   const { ellipsis = true, preserveEnd = false } = options;
 
+  if (Number.isNaN(maxTokens)) {
+    throw new Error('truncateToTokenLimitSync: maxTokens must be a number');
+  }
+
   const currentTokens = countTokensSync(text);
   if (currentTokens <= maxTokens) {
     return { text, tokens: currentTokens };
   }
+  if (maxTokens <= 0) {
+    return { text: '', tokens: 0 };
+  }
 
-  const ellipsisText = ellipsis ? '...' : '';
-  const ellipsisTokens = ellipsis ? countTokensSync(ellipsisText) : 0;
-  const targetTokens = maxTokens - ellipsisTokens;
+  const ellipsisTokens = ellipsis ? countTokensSync('...') : 0;
+  // Drop the ellipsis when it alone would consume the whole budget.
+  const ellipsisText = ellipsis && maxTokens > ellipsisTokens ? '...' : '';
+  const targetTokens = maxTokens - (ellipsisText ? ellipsisTokens : 0);
 
-  const targetChars = Math.floor(targetTokens * 4); // 4 chars per token
+  const targetChars = Math.max(0, Math.floor(targetTokens * 4)); // 4 chars per token
 
   const truncated = preserveEnd
     ? ellipsisText + text.slice(text.length - targetChars)

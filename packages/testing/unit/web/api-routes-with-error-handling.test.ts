@@ -80,6 +80,21 @@ describe('apps/web API routes', () => {
         getScriptKind(filePath)
       );
 
+      // Top-level consts initialised with withErrorHandling(...) — an export
+      // may alias one of these (e.g. `export const GET = POST`).
+      const wrappedConsts = new Set<string>();
+      for (const statement of sourceFile.statements) {
+        if (!ts.isVariableStatement(statement)) continue;
+        for (const decl of statement.declarationList.declarations) {
+          if (
+            ts.isIdentifier(decl.name) &&
+            isWithErrorHandlingCall(decl.initializer)
+          ) {
+            wrappedConsts.add(decl.name.text);
+          }
+        }
+      }
+
       for (const statement of sourceFile.statements) {
         if (
           ts.isFunctionDeclaration(statement) &&
@@ -98,7 +113,11 @@ describe('apps/web API routes', () => {
             const exportName = decl.name.text;
             if (!HTTP_METHOD_EXPORTS.has(exportName)) continue;
 
-            if (!isWithErrorHandlingCall(decl.initializer)) {
+            const aliasesWrapped =
+              decl.initializer !== undefined &&
+              ts.isIdentifier(decl.initializer) &&
+              wrappedConsts.has(decl.initializer.text);
+            if (!isWithErrorHandlingCall(decl.initializer) && !aliasesWrapped) {
               violations.push(
                 `${path.relative(process.cwd(), filePath)}: ${exportName} export is not wrapped via withErrorHandling`
               );

@@ -150,7 +150,7 @@ function resolvePerpTicker(
       leadingToken === ticker ||
       normalized.startsWith(`${ticker}:`) ||
       normalized.includes(`${ticker} @`) ||
-      normalized.includes(name)
+      normalized === name
     ) {
       return market.ticker;
     }
@@ -187,14 +187,17 @@ function normalizeTradeSide(
     }
 
     if (predictionMarketId) {
-      const heldPosition = context.agentPositions.predictions.find(
-        (position) => position.marketId === predictionMarketId
+      // A generic "sell" is only resolvable when exactly one side is held;
+      // holding both YES and NO is ambiguous and must not pick one.
+      const heldSides = new Set(
+        context.agentPositions.predictions
+          .filter((position) => position.marketId === predictionMarketId)
+          .map((position) => position.side?.trim().toUpperCase())
       );
-      const side = heldPosition?.side?.trim().toUpperCase();
-      if (side === 'YES') {
+      if (heldSides.size === 1 && heldSides.has('YES')) {
         return 'sell_yes';
       }
-      if (side === 'NO') {
+      if (heldSides.size === 1 && heldSides.has('NO')) {
         return 'sell_no';
       }
     }

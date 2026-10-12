@@ -52,12 +52,7 @@
  * @see {@link /lib/services/parody-headline-generator} Parody headline generator
  */
 
-import {
-  requireCronAuth,
-  successResponse,
-  verifyCronAuth,
-  withErrorHandling,
-} from '@feed/api';
+import { requireCronAuth, successResponse, withErrorHandling } from '@feed/api';
 import type { ParodyHeadline } from '@feed/db';
 import {
   createParodyHeadlineGenerator,
@@ -69,7 +64,6 @@ import {
 } from '@feed/engine';
 import { logger } from '@feed/shared';
 import type { NextRequest } from 'next/server';
-import { NextResponse } from 'next/server';
 
 export const POST = withErrorHandling(async (request: NextRequest) => {
   // Security: Verify cron authorization (fail-closed in production)
@@ -77,6 +71,7 @@ export const POST = withErrorHandling(async (request: NextRequest) => {
 
   const startTime = Date.now();
   logger.info('🌍 World facts update started', undefined, 'Cron');
+  const failedStages: string[] = [];
 
   // Step 1: Fetch all RSS feeds
   let feedResult = { fetched: 0, stored: 0, errors: 0 };
@@ -89,6 +84,7 @@ export const POST = withErrorHandling(async (request: NextRequest) => {
       'Cron'
     );
   } catch (error) {
+    failedStages.push('rss');
     logger.error('Error fetching RSS feeds', { error }, 'Cron');
   }
 
@@ -107,6 +103,7 @@ export const POST = withErrorHandling(async (request: NextRequest) => {
       'Cron'
     );
   } catch (error) {
+    failedStages.push('parodies');
     logger.error('Error generating parody headlines', { error }, 'Cron');
   }
 
@@ -121,6 +118,7 @@ export const POST = withErrorHandling(async (request: NextRequest) => {
       'Cron'
     );
   } catch (error) {
+    failedStages.push('cleanup');
     logger.error('Error cleaning up old headlines', { error }, 'Cron');
   }
 
@@ -128,6 +126,7 @@ export const POST = withErrorHandling(async (request: NextRequest) => {
   try {
     dailyTopic = await dailyTopicService.ensureTopicForDate(new Date());
   } catch (error) {
+    failedStages.push('dailyTopic');
     logger.error('Error selecting daily topic', { error }, 'Cron');
   }
 
@@ -151,6 +150,7 @@ export const POST = withErrorHandling(async (request: NextRequest) => {
       'Cron'
     );
   } catch (error) {
+    failedStages.push('worldFacts');
     logger.error('Error generating world facts', { error }, 'Cron');
   }
 
@@ -162,6 +162,7 @@ export const POST = withErrorHandling(async (request: NextRequest) => {
     consolidationResult = await consolidator.consolidateFacts();
     logger.info('World facts consolidated', consolidationResult, 'Cron');
   } catch (error) {
+    failedStages.push('consolidation');
     logger.error('Error consolidating world facts', { error }, 'Cron');
   }
 
@@ -183,7 +184,10 @@ export const POST = withErrorHandling(async (request: NextRequest) => {
   );
 
   return successResponse({
-    success: true,
+    // Independent stages still run after a failure, but the run is only
+    // reported successful when every stage succeeded.
+    success: failedStages.length === 0,
+    failedStages,
     duration,
     stats: {
       feedsFetched: feedResult.fetched,
@@ -199,19 +203,5 @@ export const POST = withErrorHandling(async (request: NextRequest) => {
   });
 });
 
-// GET endpoint for the Cloudflare cron Worker (dispatches GET requests)
-export const GET = withErrorHandling(async (request: NextRequest) => {
-  // Security: Verify cron authorization (CRON_SECRET bearer token)
-  if (!verifyCronAuth(request, { jobName: 'WorldFactsCron' })) {
-    logger.warn('Unauthorized GET request to cron endpoint', undefined, 'Cron');
-    return NextResponse.json(
-      { error: 'Unauthorized cron request' },
-      { status: 401 }
-    );
-  }
-
-  logger.info('GET request forwarded to POST handler', undefined, 'Cron');
-
-  // Forward to POST handler
-  return POST(request);
-});
+// Cron schedulers may use GET; it runs the same authenticated handler.
+export const GET = POST;

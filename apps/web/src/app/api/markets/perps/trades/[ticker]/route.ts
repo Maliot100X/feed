@@ -81,8 +81,8 @@ import { NextResponse } from 'next/server';
 import { z } from 'zod';
 
 const QuerySchema = z.object({
-  limit: z.coerce.number().min(1).max(100).default(50),
-  offset: z.coerce.number().min(0).default(0),
+  limit: z.coerce.number().int().min(1).max(100).default(50),
+  offset: z.coerce.number().int().min(0).max(10_000).default(0),
 });
 
 export const GET = withErrorHandling(
@@ -110,7 +110,9 @@ export const GET = withErrorHandling(
 
     // Check Redis cache first (use lowercase for consistent cache keys)
     const cacheKey = `perp-trades:${tickerParam.toLowerCase()}:${queryParams.limit}:${queryParams.offset}`;
-    const cached = await getCache<Record<string, JsonValue>>(cacheKey);
+    const cached = await getCache<Record<string, JsonValue>>(cacheKey, {
+      namespace: 'market-trades',
+    });
 
     if (cached) {
       logger.debug(
@@ -118,7 +120,9 @@ export const GET = withErrorHandling(
         { ticker: tickerParam },
         'PerpTrades'
       );
-      return successResponse(cached);
+      const cachedRes = successResponse(cached);
+      if (rateLimitInfo) addPublicReadHeaders(cachedRes, rateLimitInfo);
+      return cachedRes;
     }
 
     // Verify organization/ticker exists - search by ticker field OR id (case-insensitive)

@@ -11,6 +11,7 @@ import { BalanceTab } from '@/components/wallet/v2/balance-tab';
 import { PnLTab } from '@/components/wallet/v2/pnl-tab';
 import { PositionsTab } from '@/components/wallet/v2/positions-tab';
 import { useAuth } from '@/hooks/useAuth';
+import { useLoginModal } from '@/hooks/useLoginModal';
 import { useTeamTradingSummary } from '@/hooks/useTeamTradingSummary';
 import { useUserPositionsPolling } from '@/stores/userPositionsStore';
 import { useWalletBalancePolling } from '@/stores/walletBalanceStore';
@@ -25,7 +26,8 @@ const BuyPointsModal = nextDynamic(
 
 export default function WalletPage() {
   const router = useRouter();
-  const { ready, authenticated, getAccessToken, login, user } = useAuth();
+  const { ready, authenticated, getAccessToken, user } = useAuth();
+  const queueLoginModal = useLoginModal((state) => state.queueLoginModal);
   const [showBuyPoints, setShowBuyPoints] = useState(false);
 
   const userId = authenticated ? user?.id : undefined;
@@ -46,10 +48,9 @@ export default function WalletPage() {
   // Redirect unauthenticated users
   useEffect(() => {
     if (!ready || authenticated) return;
-    router.push('/feed');
-    const timer = setTimeout(() => login(), 500);
-    return () => clearTimeout(timer);
-  }, [ready, authenticated, router, login]);
+    queueLoginModal();
+    router.replace('/feed');
+  }, [ready, authenticated, router, queueLoginModal]);
 
   if (!ready) {
     return <WalletPageSkeleton />;
@@ -70,10 +71,10 @@ export default function WalletPage() {
 
   return (
     <PageContainer noPadding className="flex w-full flex-col pt-14 md:pt-0">
-      <div className="relative flex flex-1">
-        {/* Main wallet content — single scrollable view */}
-        <div className="flex min-w-0 flex-1 flex-col border-border lg:border-r lg:border-l">
-          <div className="space-y-6 p-4 pb-[calc(1rem+var(--bottom-nav-height))] md:space-y-8 md:p-6 md:pb-6">
+      <div className="relative flex flex-1 flex-col xl:flex-row">
+        {/* Main wallet content */}
+        <div className="flex min-w-0 flex-1 flex-col border-border lg:border-r lg:border-l xl:border-r-0">
+          <div className="space-y-6 p-4 md:space-y-8 md:p-6">
             {/* Balance section */}
             <BalanceTab
               userId={userId}
@@ -90,17 +91,15 @@ export default function WalletPage() {
           </div>
         </div>
 
-        {/* Right sidebar — Positions */}
-        <div className="hidden w-96 flex-none flex-col border-border border-l xl:flex">
-          <div className="sticky top-0 p-4">
+        {/* Positions: stacked below on small screens, right sidebar on xl */}
+        <section
+          aria-label="Positions"
+          className="flex w-full flex-col border-border border-t p-4 pb-[calc(1rem+var(--bottom-nav-height))] md:p-6 md:pb-6 lg:border-r lg:border-l xl:w-96 xl:flex-none xl:border-t-0 xl:border-r-0 xl:p-0"
+        >
+          <div className="xl:sticky xl:top-0 xl:p-4">
             <PositionsTab userId={userId} />
           </div>
-        </div>
-
-        {/* Mobile: positions below main content are handled by the scrollable layout */}
-        <div className="xl:hidden">
-          {/* On smaller screens, positions appear inline at bottom of main scroll */}
-        </div>
+        </section>
       </div>
 
       {showBuyPoints && (

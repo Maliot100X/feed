@@ -45,20 +45,15 @@ export const GET = withErrorHandling(async (req: NextRequest) => {
 // =============================================================================
 
 const createConversationSchema = z.object({
-  title: z.string().max(100).optional(),
+  title: z.string().trim().min(1).max(100).optional(),
 });
 
 export const POST = withErrorHandling(async (req: NextRequest) => {
   const user = await authenticateUser(req);
 
-  let body: unknown;
-  try {
-    body = await req.json();
-  } catch {
-    body = {};
-  }
-
-  const parseResult = createConversationSchema.safeParse(body);
+  // Malformed JSON is a 400 (via withErrorHandling), never an implicit
+  // empty request that still creates a conversation.
+  const parseResult = createConversationSchema.safeParse(await req.json());
   if (!parseResult.success) {
     return NextResponse.json(
       { success: false, error: 'Invalid request body' },

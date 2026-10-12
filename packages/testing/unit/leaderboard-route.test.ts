@@ -261,6 +261,29 @@ describe('Leaderboard route follow state enrichment', () => {
     expect(mockDbSelect).not.toHaveBeenCalled();
   });
 
+  test('returns follow state when the viewer is requested by username', async () => {
+    mockFindUserByIdentifier.mockResolvedValue({ id: 'viewer-1' });
+
+    const response = await GET(
+      makeRequest(
+        {
+          page: '1',
+          pageSize: '100',
+          type: 'wallet',
+          userId: 'viewer-username',
+        },
+        {
+          Authorization: 'Bearer test-token',
+        }
+      )
+    );
+
+    expect(response.status).toBe(200);
+    const body = await response.json();
+    expect(body.followingUserIdsResolved).toBe(true);
+    expect(body.followingUserIds).toEqual(['user-2']);
+  });
+
   test('uses the trading leaderboard service when metric=trading', async () => {
     const response = await GET(
       makeRequest({

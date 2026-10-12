@@ -253,11 +253,19 @@ export interface TrainingReadinessStats {
   dataQuality: number;
 }
 
+// Configured thresholds the readiness check evaluates against
+export interface TrainingReadinessThresholds {
+  minTrajectories: number;
+  minScenarioGroups: number;
+  minDataQuality: number;
+}
+
 // Training readiness result
 export interface TrainingReadinessResult {
   ready: boolean;
   reason: string;
   stats: TrainingReadinessStats;
+  thresholds: TrainingReadinessThresholds;
 }
 
 // Training trigger options

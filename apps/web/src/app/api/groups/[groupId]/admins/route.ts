@@ -17,8 +17,10 @@ import { logger } from '@feed/shared';
 import type { NextRequest } from 'next/server';
 import { z } from 'zod';
 
+const MemberUserIdSchema = z.string().trim().min(1).max(100);
+
 const PromoteAdminSchema = z.object({
-  userId: z.string(),
+  userId: MemberUserIdSchema,
 });
 
 /**
@@ -76,11 +78,16 @@ export const POST = withErrorHandling(
         throw new ApiError('Cannot change owner role', 400);
       }
 
-      // Promote to admin by updating role
-      await db.groupMember.update({
-        where: { id: targetMembership.id },
+      // Promote to admin only if the target is still an active plain member;
+      // a concurrent role change (e.g. ownership transfer) must not be
+      // overwritten by this stale precheck.
+      const promoted = await db.groupMember.updateMany({
+        where: { id: targetMembership.id, role: 'member', isActive: true },
         data: { role: 'admin' },
       });
+      if (promoted.count === 0) {
+        throw new ApiError('Membership changed; please retry', 409);
+      }
     });
 
     logger.info(
@@ -105,11 +112,14 @@ export const DELETE = withErrorHandling(
     const user = await authenticate(request);
     const { groupId } = await params;
     const { searchParams } = new URL(request.url);
-    const userIdToDemote = searchParams.get('userId');
+    const parsedUserId = MemberUserIdSchema.safeParse(
+      searchParams.get('userId') ?? ''
+    );
 
-    if (!userIdToDemote) {
+    if (!parsedUserId.success) {
       throw new ApiError('userId parameter is required', 400);
     }
+    const userIdToDemote = parsedUserId.data;
 
     await asUser(user, async (db) => {
       // Check if user is admin or owner
@@ -149,11 +159,15 @@ export const DELETE = withErrorHandling(
         throw new ApiError('User is not an admin', 400);
       }
 
-      // Demote to member by updating role
-      await db.groupMember.update({
-        where: { id: targetMembership.id },
+      // Demote only if the target is still an active admin; never demote a
+      // member who became owner after the precheck.
+      const demoted = await db.groupMember.updateMany({
+        where: { id: targetMembership.id, role: 'admin', isActive: true },
         data: { role: 'member' },
       });
+      if (demoted.count === 0) {
+        throw new ApiError('Membership changed; please retry', 409);
+      }
     });
 
     logger.info(

@@ -199,15 +199,19 @@ export function renderPrompt(
     ],
   } = options;
 
-  // Inject current date/time variables
+  // Inject current date/time variables. All pieces use UTC so currentDate
+  // (UTC) never disagrees with currentYear/currentDay near midnight.
   const now = new Date();
   const dateVariables: Record<string, string | number> = {
-    currentDateTime: now.toLocaleString('en-US'),
+    currentDateTime: now.toLocaleString('en-US', { timeZone: 'UTC' }),
     currentDate: toDateString(now),
-    currentTime: now.toTimeString().split(' ')[0] || '',
-    currentYear: now.getFullYear(),
-    currentMonth: now.toLocaleString('en-US', { month: 'long' }),
-    currentDay: now.getDate(),
+    currentTime: now.toISOString().slice(11, 19),
+    currentYear: now.getUTCFullYear(),
+    currentMonth: now.toLocaleString('en-US', {
+      month: 'long',
+      timeZone: 'UTC',
+    }),
+    currentDay: now.getUTCDate(),
   };
 
   const allVariables: Record<string, JsonValue> = {

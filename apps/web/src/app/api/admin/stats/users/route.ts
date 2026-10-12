@@ -60,7 +60,12 @@ export const GET = withErrorHandling(async (request: NextRequest) => {
   const includeTimeSeries = searchParams.get('includeTimeSeries') === 'true';
 
   // Validate date range to prevent heavy queries
-  const dateRangeError = validateDateRange(startDate, endDate);
+  // A lone startDate is bounded by now, so inverted (future) or over-long
+  // ranges are rejected instead of slipping past validation.
+  const dateRangeError = validateDateRange(
+    startDate,
+    endDate ?? (startDate ? new Date() : null)
+  );
   if (dateRangeError) {
     return errorResponse(dateRangeError, 'INVALID_DATE_RANGE', 400, {
       maxDays: MAX_DATE_RANGE_DAYS,

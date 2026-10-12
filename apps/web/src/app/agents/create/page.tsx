@@ -7,18 +7,19 @@ import { useEffect } from 'react';
 import { AgentCreate } from '@/components/agents/AgentCreate';
 import { PageContainer } from '@/components/shared/PageContainer';
 import { useAuth } from '@/hooks/useAuth';
+import { useLoginModal } from '@/hooks/useLoginModal';
 
 export default function CreateAgentPage() {
   const router = useRouter();
-  const { ready, authenticated, login } = useAuth();
+  const { ready, authenticated } = useAuth();
+  const queueLoginModal = useLoginModal((state) => state.queueLoginModal);
 
   // Auth required — redirect to feed and show login
   useEffect(() => {
     if (!ready || authenticated) return;
-    router.push('/feed');
-    const timer = setTimeout(() => login(), 500);
-    return () => clearTimeout(timer);
-  }, [ready, authenticated, router, login]);
+    queueLoginModal();
+    router.replace('/feed');
+  }, [ready, authenticated, router, queueLoginModal]);
 
   if (!ready || !authenticated) {
     return null;

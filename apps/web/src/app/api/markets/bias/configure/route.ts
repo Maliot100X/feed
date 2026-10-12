@@ -115,35 +115,39 @@ import type { NextRequest } from 'next/server';
 import { NextResponse } from 'next/server';
 import { z } from 'zod';
 
-const SetBiasSchema = z.object({
-  action: z.literal('set'),
-  entityId: z.string().min(1),
-  entityName: z.string().min(1),
+/** Upper bound for a temporary bias: one year. Omit for a permanent bias. */
+const MAX_BIAS_DURATION_HOURS = 24 * 365;
+
+const BiasDefinitionSchema = z.object({
+  entityId: z.string().trim().min(1).max(200),
+  entityName: z.string().trim().min(1).max(200),
   direction: z.enum(['up', 'down']),
   strength: z.number().min(0).max(1).optional(),
-  durationHours: z.number().optional(),
+  /** Omit for a permanent bias; zero/negative durations are rejected. */
+  durationHours: z.number().positive().max(MAX_BIAS_DURATION_HOURS).optional(),
   decayRate: z.number().min(0).max(1).optional(),
+});
+
+const SetBiasSchema = BiasDefinitionSchema.extend({
+  action: z.literal('set'),
 });
 
 const RemoveBiasSchema = z.object({
   action: z.literal('remove'),
-  entityId: z.string().min(1),
+  entityId: z.string().trim().min(1).max(200),
 });
 
 const BulkSetBiasSchema = z.object({
   action: z.literal('bulk-set'),
   biases: z
-    .array(
-      z.object({
-        entityId: z.string().min(1),
-        entityName: z.string().min(1),
-        direction: z.enum(['up', 'down']),
-        strength: z.number().min(0).max(1).optional(),
-        durationHours: z.number().optional(),
-        decayRate: z.number().min(0).max(1).optional(),
-      })
-    )
-    .min(1),
+    .array(BiasDefinitionSchema)
+    .min(1)
+    .max(100)
+    .refine(
+      (biases) =>
+        new Set(biases.map((bias) => bias.entityId)).size === biases.length,
+      { message: 'Duplicate entityId in biases' }
+    ),
 });
 
 const BiasConfigSchema = z.discriminatedUnion('action', [
@@ -155,10 +159,7 @@ const BiasConfigSchema = z.discriminatedUnion('action', [
 export const POST = withErrorHandling(async (request: NextRequest) => {
   await requireAdmin(request);
 
-  const json = await request.json();
-  const parsed = BiasConfigSchema.parse(json);
-
-  const body = parsed;
+  const body = BiasConfigSchema.parse(await request.json());
 
   if (body.action === 'set') {
     biasEngine.setBias(

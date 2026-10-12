@@ -89,6 +89,10 @@ describe('GET /api/agents/team-dashboard', () => {
     const body = await response.json();
 
     expect(response.status).toBe(200);
+    expect(mockGetTeamDashboardData).toHaveBeenCalledWith({
+      ownerId: 'user-1',
+      ownerName: 'You',
+    });
     expect(body).toEqual({
       success: true,
       agents: [expect.objectContaining({ id: 'agent-1', openPositions: 3 })],
@@ -97,5 +101,18 @@ describe('GET /api/agents/team-dashboard', () => {
         totals: expect.objectContaining({ currentPnL: 20 }),
       }),
     });
+  });
+
+  it('rejects unauthenticated callers without loading any dashboard', async () => {
+    mockAuthenticateUser.mockRejectedValue(
+      new Error('Authentication required')
+    );
+
+    await expect(
+      GET({
+        url: 'https://example.com/api/agents/team-dashboard',
+      } as NextRequest)
+    ).rejects.toThrow('Authentication required');
+    expect(mockGetTeamDashboardData).not.toHaveBeenCalled();
   });
 });

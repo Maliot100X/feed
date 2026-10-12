@@ -26,6 +26,7 @@ import {
   groupMembers,
   groups,
   gte,
+  sql,
 } from '@feed/db';
 import {
   ALPHA_GROUP_CONFIG,
@@ -124,15 +125,19 @@ export const GET = withErrorHandling(async (request: NextRequest) => {
         )
       )
       .then((r) => r[0]?.count ?? 0),
-    // Users with declines
+    // Users with declines (distinct users, not invite rows)
     db
-      .select({ count: count() })
+      .select({
+        count: sql<number>`count(DISTINCT ${groupInvites.invitedUserId})::int`,
+      })
       .from(groupInvites)
       .where(gte(groupInvites.declineCount, 1))
       .then((r) => r[0]?.count ?? 0),
-    // Users at max declines
+    // Users at max declines (distinct users, not invite rows)
     db
-      .select({ count: count() })
+      .select({
+        count: sql<number>`count(DISTINCT ${groupInvites.invitedUserId})::int`,
+      })
       .from(groupInvites)
       .where(
         gte(
@@ -215,38 +220,22 @@ export const GET = withErrorHandling(async (request: NextRequest) => {
   const acceptanceRate =
     totalResponded > 0 ? acceptedInvites / totalResponded : 0;
 
-  // Calculate tier capacities
+  // Calculate tier capacities. fillRate is null when a tier has no
+  // capacity (no groups) instead of dividing by a fabricated 1.
+  const tierCapacity = (tier: 1 | 2 | 3, current: number) => {
+    const max =
+      globalAnalytics.tierBreakdown.find((t) => t.tier === tier)?.capacity ?? 0;
+    return {
+      name: TIER_CONFIG[tier].name,
+      current,
+      max,
+      fillRate: max > 0 ? current / max : null,
+    };
+  };
   const tierCapacities = {
-    1: {
-      name: TIER_CONFIG[1].name,
-      current: tier1Members,
-      max:
-        globalAnalytics.tierBreakdown.find((t) => t.tier === 1)?.capacity ?? 0,
-      fillRate:
-        tier1Members /
-        (globalAnalytics.tierBreakdown.find((t) => t.tier === 1)?.capacity ||
-          1),
-    },
-    2: {
-      name: TIER_CONFIG[2].name,
-      current: tier2Members,
-      max:
-        globalAnalytics.tierBreakdown.find((t) => t.tier === 2)?.capacity ?? 0,
-      fillRate:
-        tier2Members /
-        (globalAnalytics.tierBreakdown.find((t) => t.tier === 2)?.capacity ||
-          1),
-    },
-    3: {
-      name: TIER_CONFIG[3].name,
-      current: tier3Members,
-      max:
-        globalAnalytics.tierBreakdown.find((t) => t.tier === 3)?.capacity ?? 0,
-      fillRate:
-        tier3Members /
-        (globalAnalytics.tierBreakdown.find((t) => t.tier === 3)?.capacity ||
-          1),
-    },
+    1: tierCapacity(1, tier1Members),
+    2: tierCapacity(2, tier2Members),
+    3: tierCapacity(3, tier3Members),
   };
 
   return successResponse({

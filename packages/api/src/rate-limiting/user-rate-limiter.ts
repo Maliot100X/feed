@@ -141,6 +141,11 @@ export const RATE_LIMIT_CONFIGS = {
     windowMs: 60000,
     actionType: 'generate_agent_profile',
   }, // 5 generations per minute
+  GENERATE_ONBOARDING_PROFILE: {
+    maxRequests: 5,
+    windowMs: 60000,
+    actionType: 'generate_onboarding_profile',
+  }, // 5 onboarding profile generations per minute (paid LLM call)
   GENERATE_AGENT_FIELD: {
     maxRequests: 10,
     windowMs: 60000,
@@ -208,7 +213,7 @@ export const RATE_LIMIT_CONFIGS = {
     maxRequests: 60,
     windowMs: 60000,
     actionType: 'external_agent_discover',
-  }, // 60 discovery requests per minute (default, can be overridden by agent's discoveryRateLimit)
+  }, // 60 discovery requests per minute per external agent (server policy)
   EXTERNAL_AGENT_REGISTER: {
     maxRequests: 5,
     windowMs: 3600000,

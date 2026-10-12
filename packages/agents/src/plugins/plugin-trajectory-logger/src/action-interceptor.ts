@@ -284,25 +284,38 @@ export function logLLMCallFromAction(
     return;
   }
 
+  const str = (key: string): string | undefined => {
+    const value = actionContext[key];
+    return typeof value === 'string' ? value : undefined;
+  };
+  // Nullish (not falsy) handling so explicit 0 temperature/token counts survive.
+  const num = (key: string): number | undefined => {
+    const value = actionContext[key];
+    return typeof value === 'number' && Number.isFinite(value)
+      ? value
+      : undefined;
+  };
+  const purpose = str('purpose');
   trajectoryLogger.logLLMCall(stepId, {
-    model: (actionContext.model as string) || 'unknown',
-    systemPrompt: (actionContext.systemPrompt as string) || '',
-    userPrompt: (actionContext.userPrompt as string) || '',
-    response: (actionContext.response as string) || '',
-    reasoning: (actionContext.reasoning as string) || undefined,
-    temperature: (actionContext.temperature as number) || 0.7,
-    maxTokens: (actionContext.maxTokens as number) || 8192,
+    model: str('model') ?? 'unknown',
+    systemPrompt: str('systemPrompt') ?? '',
+    userPrompt: str('userPrompt') ?? '',
+    response: str('response') ?? '',
+    reasoning: str('reasoning'),
+    temperature: num('temperature') ?? 0.7,
+    maxTokens: num('maxTokens') ?? 8192,
     purpose:
-      (actionContext.purpose as
-        | 'action'
-        | 'reasoning'
-        | 'evaluation'
-        | 'response'
-        | 'other') || 'action',
-    actionType: (actionContext.actionType as string) || undefined,
-    promptTokens: (actionContext.promptTokens as number) || undefined,
-    completionTokens: (actionContext.completionTokens as number) || undefined,
-    latencyMs: (actionContext.latencyMs as number) || undefined,
+      purpose === 'action' ||
+      purpose === 'reasoning' ||
+      purpose === 'evaluation' ||
+      purpose === 'response' ||
+      purpose === 'other'
+        ? purpose
+        : 'action',
+    actionType: str('actionType'),
+    promptTokens: num('promptTokens'),
+    completionTokens: num('completionTokens'),
+    latencyMs: num('latencyMs'),
   });
 }
 

@@ -1,30 +1,35 @@
 // POST /api/users/me/game-guide - Mark game guide as completed
 
-import { authenticate, successResponse, withErrorHandling } from '@feed/api';
-import { db, eq, users } from '@feed/db';
-import { logger, toISO } from '@feed/shared';
+import {
+  authenticateWithDbUser,
+  NotFoundError,
+  successResponse,
+  withErrorHandling,
+} from '@feed/api';
+import { db, eq, sql, users } from '@feed/db';
+import { toISO } from '@feed/shared';
 import type { NextRequest } from 'next/server';
 
 export const POST = withErrorHandling(async (request: NextRequest) => {
-  const authUser = await authenticate(request);
+  const authUser = await authenticateWithDbUser(request);
   const now = new Date();
 
-  const result = await db
+  // Preserve the first completion time on retries/replays.
+  const [updated] = await db
     .update(users)
-    .set({ gameGuideCompletedAt: now, updatedAt: now })
-    .where(eq(users.privyId, authUser.privyId!))
-    .returning({ id: users.id });
+    .set({
+      gameGuideCompletedAt: sql`coalesce(${users.gameGuideCompletedAt}, ${now})`,
+      updatedAt: now,
+    })
+    .where(eq(users.id, authUser.dbUserId))
+    .returning({ gameGuideCompletedAt: users.gameGuideCompletedAt });
 
-  if (result.length === 0) {
-    logger.warn(
-      'Game guide: no user found',
-      { privyId: authUser.privyId },
-      'game-guide'
-    );
+  if (!updated?.gameGuideCompletedAt) {
+    throw new NotFoundError('User');
   }
 
   return successResponse({
     success: true,
-    gameGuideCompletedAt: toISO(now),
+    gameGuideCompletedAt: toISO(updated.gameGuideCompletedAt),
   });
 });

@@ -21,7 +21,6 @@ import {
   ONBOARDING_STEP_ORDER,
   ONBOARDING_STEP_POINTS,
 } from '@feed/shared';
-import { formatError } from '../utils/error-utils';
 import { EarnedPointsService } from './earned-points-service';
 
 /**
@@ -79,21 +78,11 @@ function getValidatedState(
     return rawState;
   }
 
-  // Log warning for malformed state
-  logger.warn(
-    'Malformed or null onboarding state, using defaults',
-    { userId, rawState: typeof rawState },
-    'GameOnboarding'
+  // Corrupt persisted state must not be treated as a fresh welcome state:
+  // that would let already-rewarded steps be completed (and paid) again.
+  throw new Error(
+    `Malformed onboarding state for user ${userId} (got ${rawState === null ? 'null' : typeof rawState})`
   );
-
-  // Return safe default state
-  return {
-    completedSteps: [],
-    currentStep: 'welcome',
-    startedAt: null,
-    completedAt: null,
-    rewards: [],
-  };
 }
 
 /**
@@ -176,8 +165,8 @@ export async function completeOnboardingStep(
   const onboarding = await getOrCreateOnboarding(userId);
   const state = getValidatedState(onboarding.state, userId);
 
-  // Check if already completed
-  if (state.completedSteps.includes(step)) {
+  // Already completed step, or onboarding already finished/skipped (terminal).
+  if (state.completedSteps.includes(step) || onboarding.isComplete) {
     return {
       success: false,
       reputationAwarded: 0,
@@ -191,7 +180,15 @@ export async function completeOnboardingStep(
 
   // Update state
   state.completedSteps.push(step);
-  state.currentStep = getNextOnboardingStep(step);
+  // Progress only moves forward: completing an earlier step out of order
+  // must not regress currentStep.
+  const nextStep = getNextOnboardingStep(step);
+  if (
+    ONBOARDING_STEP_ORDER.indexOf(nextStep) >
+    ONBOARDING_STEP_ORDER.indexOf(state.currentStep)
+  ) {
+    state.currentStep = nextStep;
+  }
   state.rewards.push({ step, points });
 
   const isComplete = state.currentStep === 'complete';
@@ -199,24 +196,35 @@ export async function completeOnboardingStep(
     state.completedAt = new Date().toISOString();
   }
 
-  // Update database with optimistic lock check on updatedAt
-  // This prevents race conditions where concurrent requests both pass the
-  // already-completed check before either writes to the database
-  const result = await db
-    .update(gameOnboarding)
-    .set({
-      currentStep: state.currentStep,
-      state,
-      isComplete,
-      updatedAt: new Date(),
-    })
-    .where(
-      and(
-        eq(gameOnboarding.userId, userId),
-        eq(gameOnboarding.updatedAt, onboarding.updatedAt)
+  // Update state and award points in ONE transaction, guarded by an
+  // optimistic lock on updatedAt. If the points award fails the step
+  // completion rolls back too, so the reward is never permanently skipped.
+  const result = await db.transaction(async (tx) => {
+    const updated = await tx
+      .update(gameOnboarding)
+      .set({
+        currentStep: state.currentStep,
+        state,
+        isComplete,
+        updatedAt: new Date(),
+      })
+      .where(
+        and(
+          eq(gameOnboarding.userId, userId),
+          eq(gameOnboarding.updatedAt, onboarding.updatedAt)
+        )
       )
-    )
-    .returning();
+      .returning();
+    if (updated.length > 0 && points > 0) {
+      await EarnedPointsService.awardBonusPoints(
+        userId,
+        points,
+        `onboarding_${step}`,
+        tx
+      );
+    }
+    return updated;
+  });
 
   // If no rows updated, someone else modified it - retry with fresh data
   if (!result || result.length === 0) {
@@ -257,64 +265,6 @@ export async function completeOnboardingStep(
     { userId, step, points, nextStep: state.currentStep, isComplete },
     'GameOnboarding'
   );
-
-  // Award bonus points to user balance with retry on transient failures
-  if (points > 0) {
-    const maxPointsRetries = 3;
-    const baseDelayMs = 100;
-    let lastError: unknown = null;
-
-    for (let attempt = 0; attempt < maxPointsRetries; attempt++) {
-      try {
-        await EarnedPointsService.awardBonusPoints(
-          userId,
-          points,
-          `onboarding_${step}`
-        );
-        lastError = null;
-        break; // Success - exit retry loop
-      } catch (error) {
-        lastError = error;
-        const isLastAttempt = attempt >= maxPointsRetries - 1;
-        if (!isLastAttempt) {
-          // Exponential backoff with jitter
-          const delay =
-            baseDelayMs * Math.pow(2, attempt) * (0.5 + Math.random());
-          logger.debug(
-            `Retrying bonus points award after failure`,
-            {
-              userId,
-              step,
-              points,
-              attempt: attempt + 1,
-              delayMs: Math.round(delay),
-            },
-            'GameOnboarding'
-          );
-          await new Promise((resolve) => setTimeout(resolve, delay));
-        }
-      }
-    }
-
-    if (lastError) {
-      // All retries exhausted - log for manual reconciliation
-      // TODO: Consider adding a persistent retry queue (e.g., DB-backed job table)
-      // to ensure points are eventually awarded even after process restart
-      logger.warn(
-        `Failed to award bonus points for onboarding step after ${maxPointsRetries} attempts - manual reconciliation needed`,
-        {
-          userId,
-          step,
-          points,
-          reason: `onboarding_${step}`,
-          error: formatError(lastError),
-          failedAt: new Date().toISOString(),
-          retriesAttempted: maxPointsRetries,
-        },
-        'GameOnboarding'
-      );
-    }
-  }
 
   return {
     success: true,

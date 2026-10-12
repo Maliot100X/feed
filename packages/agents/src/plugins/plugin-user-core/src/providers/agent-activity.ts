@@ -8,6 +8,10 @@
  * Events are published by AgentChatService after each dispatch completes.
  * This provider reads the EventBus history and formats it for the coordinator's
  * decision-making context.
+ *
+ * The EventBus is process-wide, so history is scoped to the coordinator's own
+ * team chat (`state.values.teamChatId`) before limiting. Events without a
+ * matching teamChatId (including legacy unscoped events) are never shown.
  */
 
 import type {
@@ -28,17 +32,29 @@ export const coordinatorAgentActivityProvider: Provider = {
   get: async (
     _runtime: IAgentRuntime,
     _message: Memory,
-    _state?: State
+    state?: State
   ): Promise<ProviderResult> => {
+    const teamChatId = state?.values?.teamChatId;
+    if (typeof teamChatId !== 'string' || !teamChatId) {
+      return { text: '' };
+    }
+
     const eventBus = getEventBus();
-    const recentEvents = eventBus.getHistory('agent.*', 20);
+    const recentEvents = eventBus.getHistory('agent.*', 10, (event) => {
+      const data = event.data;
+      return (
+        typeof data === 'object' &&
+        data !== null &&
+        !Array.isArray(data) &&
+        data.teamChatId === teamChatId
+      );
+    });
 
     if (recentEvents.length === 0) {
       return { text: '' };
     }
 
     const formatted = recentEvents
-      .slice(-10) // Last 10 events
       .map((event) => {
         const data = event.data as Record<string, unknown>;
         const timestamp = (data.timestamp as string) ?? event.timestamp;

@@ -1,21 +1,22 @@
 /**
- * Agent On-Chain Registration API
+ * Agent Onboarding API
  *
- * @route POST /api/agents/onboard - Register agent on-chain
- * @access Authenticated
+ * @route POST /api/agents/onboard - Create/refresh the local Feed user for an authenticated agent session
+ * @route GET /api/agents/onboard - Report whether that local user exists
+ * @access Authenticated agent session
  *
  * @description
- * Registers ElizaOS agents to Agent0 network on Ethereum mainnet.
- * Uses Agent0 SDK with canonical ERC-8004 contracts for identity and reputation.
- * Agents are registered with IPFS metadata and discoverable globally.
+ * Local registration only: this endpoint does NOT register anything on-chain
+ * (no Agent0/ERC-8004 transaction, no IPFS metadata). On-chain registry state
+ * is not reported here.
  *
  * @openapi
  * /api/agents/onboard:
  *   post:
  *     tags:
  *       - Agents
- *     summary: Register agent on-chain
- *     description: Registers agent to Agent0 network on Ethereum mainnet
+ *     summary: Register agent locally
+ *     description: Creates (or refreshes the display name of) the local Feed user for the authenticated agent session. No on-chain registration is performed.
  *     security:
  *       - BearerAuth: []
  *     requestBody:
@@ -25,50 +26,38 @@
  *           schema:
  *             type: object
  *             required:
- *               - agentId
- *               - name
- *               - endpoint
+ *               - agentName
  *             properties:
- *               agentId:
- *                 type: string
- *               name:
+ *               agentName:
  *                 type: string
  *               endpoint:
  *                 type: string
  *                 format: uri
- *               capabilities:
- *                 type: object
- *               metadataURI:
- *                 type: string
  *     responses:
  *       200:
- *         description: Agent registered successfully
- *         content:
- *           application/json:
- *             schema:
- *               type: object
- *               properties:
- *                 tokenId:
- *                   type: string
- *                 agentId:
- *                   type: string
- *                 agent0MetadataCID:
- *                   type: string
+ *         description: Agent registered locally
  *       400:
- *         description: Invalid input or already registered
+ *         description: Invalid input
  *       401:
  *         description: Unauthorized
+ *       403:
+ *         description: Not an agent session
+ *   get:
+ *     tags:
+ *       - Agents
+ *     summary: Local registration status
+ *     security:
+ *       - BearerAuth: []
+ *     responses:
+ *       200:
+ *         description: isRegistered reflects whether the local user exists
  *
  * @example
  * ```typescript
  * await fetch('/api/agents/onboard', {
  *   method: 'POST',
- *   headers: { 'Authorization': `Bearer ${token}` },
- *   body: JSON.stringify({
- *     agentId: 'agent-id',
- *     name: 'My Agent',
- *     endpoint: 'https://...'
- *   })
+ *   headers: { 'Authorization': `Bearer ${agentSessionToken}` },
+ *   body: JSON.stringify({ agentName: 'My Agent' })
  * });
  * ```
  */
@@ -79,7 +68,7 @@ import {
   successResponse,
   withErrorHandling,
 } from '@feed/api';
-import { asUser } from '@feed/db';
+import { asUser, db, eq, users } from '@feed/db';
 import { AgentOnboardSchema, generateSnowflakeId, logger } from '@feed/shared';
 import type { NextRequest } from 'next/server';
 
@@ -104,23 +93,24 @@ export const POST = withErrorHandling(async (request: NextRequest) => {
   const body = await request.json();
   const { agentName } = AgentOnboardSchema.parse(body);
 
-  // Check if agent exists in database (use upsert to avoid race conditions) with RLS
-  // Note: Agents are registered via Agent0 SDK on Ethereum mainnet
-  await asUser(user, async (db) => {
-    await db.user.upsert({
+  // Upsert the local user keyed by username (avoids create races) with RLS.
+  // TODO(finding 242): this creates a separate funded identity outside the
+  // canonical ledger and does not set isAgent; changing that needs a funding
+  // policy decision, so only the read-back/overwrite bugs are fixed here.
+  const registeredUser = await asUser(user, async (scopedDb) => {
+    await scopedDb.user.upsert({
       where: {
         username: agentId, // Use username as unique identifier for agents
       },
       update: {
-        // Update fields if user exists but data changed
-        displayName: agentName || agentId,
-        bio: `Autonomous AI agent: ${agentId}`,
+        // Only refresh the display name; never overwrite a user-edited bio.
+        displayName: agentName,
       },
       create: {
         id: await generateSnowflakeId(),
         privyId: agentId,
         username: agentId,
-        displayName: agentName || agentId,
+        displayName: agentName,
         virtualBalance: '10000', // Start with 10k points
         totalDeposited: '10000',
         bio: `Autonomous AI agent: ${agentId}`,
@@ -128,9 +118,9 @@ export const POST = withErrorHandling(async (request: NextRequest) => {
       },
     });
 
-    // Fetch the user with selected fields
-    const userWithFields = await db.user.findUnique({
-      where: { privyId: agentId },
+    // Read back by the same key the upsert used.
+    const userWithFields = await scopedDb.user.findUnique({
+      where: { username: agentId },
       select: {
         id: true,
         username: true,
@@ -153,8 +143,9 @@ export const POST = withErrorHandling(async (request: NextRequest) => {
   );
 
   return successResponse({
-    message: 'Agent registered successfully',
+    message: 'Agent registered locally (no on-chain registration performed)',
     agentId,
+    userId: registeredUser.id,
     registered: true,
   });
 });
@@ -175,14 +166,21 @@ export const GET = withErrorHandling(async (request: NextRequest) => {
 
   const agentId = user.userId;
 
+  const [registered] = await db
+    .select({ id: users.id })
+    .from(users)
+    .where(eq(users.username, agentId))
+    .limit(1);
+
   logger.info(
     'Agent registration status checked',
-    { agentId },
+    { agentId, isRegistered: Boolean(registered) },
     'GET /api/agents/onboard'
   );
 
   return successResponse({
-    isRegistered: true,
+    isRegistered: Boolean(registered),
     agentId,
+    userId: registered?.id ?? null,
   });
 });

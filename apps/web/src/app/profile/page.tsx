@@ -8,6 +8,7 @@ import { useEffect } from 'react';
 import { PageContainer } from '@/components/shared/PageContainer';
 import { ProfileHeaderSkeleton } from '@/components/shared/Skeleton';
 import { useAuth } from '@/hooks/useAuth';
+import { useLoginModal } from '@/hooks/useLoginModal';
 
 /**
  * Legacy profile route.
@@ -21,28 +22,27 @@ import { useAuth } from '@/hooks/useAuth';
  */
 export default function ProfileRootRedirectPage() {
   const router = useRouter();
-  const { ready, authenticated, user, login } = useAuth();
+  const { ready, authenticated, user } = useAuth();
+  const queueLoginModal = useLoginModal((state) => state.queueLoginModal);
 
   useEffect(() => {
     if (!ready) return;
 
     if (!authenticated || !user?.id) {
+      queueLoginModal();
       router.replace('/feed');
-      // Match previous behavior: trigger login shortly after redirecting.
-      const timer = window.setTimeout(() => login(), 500);
-      return () => window.clearTimeout(timer);
+      return;
     }
 
     const identifier = user.username ? extractUsername(user.username) : user.id;
 
     if (user.username) {
       router.replace(`/u/${encodeURIComponent(identifier)}`);
-      return undefined;
+      return;
     }
 
     router.replace(`/u/id/${encodeURIComponent(identifier)}`);
-    return undefined;
-  }, [ready, authenticated, user?.id, user?.username, router, login]);
+  }, [ready, authenticated, user?.id, user?.username, router, queueLoginModal]);
 
   return (
     <PageContainer noPadding className="min-h-dvh md:min-h-screen">

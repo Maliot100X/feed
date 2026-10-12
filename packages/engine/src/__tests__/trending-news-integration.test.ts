@@ -8,10 +8,9 @@
 /// <reference types="bun-types" />
 
 import { beforeEach, describe, expect, it, mock } from 'bun:test';
-import { type Article, ArticleGenerator } from '../ArticleGenerator';
+import { ArticleGenerator } from '../ArticleGenerator';
 import { FeedGenerator } from '../FeedGenerator';
 import type { FeedLLMClient } from '../llm/openai-client';
-import { NewsArticlePacingEngine } from '../NewsArticlePacingEngine';
 import { TrendingTopicsEngine } from '../TrendingTopicsEngine';
 import type { Actor, FeedPost, Organization, Question } from '../types/shared';
 
@@ -23,7 +22,6 @@ interface MockLLMClient
 
 describe('Trending Topics & News Integration', () => {
   let trendEngine: TrendingTopicsEngine;
-  let pacingEngine: NewsArticlePacingEngine;
   let articleGen: ArticleGenerator;
   let feedGen: FeedGenerator;
   let mockLLM: FeedLLMClient;
@@ -99,11 +97,13 @@ describe('Trending Topics & News Integration', () => {
           return {
             trends: [
               {
+                tag: 'ai',
                 trendName: 'AI Breakthrough Buzz',
                 description:
                   'Tech community debates potential TechCorp announcement.',
               },
               {
+                tag: 'techcorp',
                 trendName: 'Market Speculation',
                 description: 'Traders position ahead of expected news.',
               },
@@ -136,167 +136,29 @@ describe('Trending Topics & News Integration', () => {
     mockLLM = mockImpl as FeedLLMClient;
 
     trendEngine = new TrendingTopicsEngine(mockLLM);
-    // Use default interval of 4 ticks (every 4 hours, 6x per day)
-    pacingEngine = new NewsArticlePacingEngine();
     articleGen = new ArticleGenerator(mockLLM);
     feedGen = new FeedGenerator(mockLLM);
 
     feedGen.setTrendingTopics(trendEngine);
   });
 
-  describe('Complete Question Lifecycle', () => {
-    it('should generate breaking articles when question created', async () => {
-      const breakingOrgs = pacingEngine.selectOrgsForStage(
-        mockOrgs,
-        mockQuestion.id as number,
-        'breaking'
-      );
-
-      expect(breakingOrgs.length).toBeGreaterThanOrEqual(1);
-      expect(breakingOrgs.length).toBeLessThanOrEqual(2);
-
-      const articles: Article[] = [];
-      for (const org of breakingOrgs) {
+  describe('Article generation per question stage', () => {
+    for (const stage of ['breaking', 'commentary', 'resolution'] as const) {
+      it(`generates a validated ${stage} article for an organization`, async () => {
         const article = await articleGen.generateArticleForQuestion(
           mockQuestion,
-          org,
-          'breaking',
+          mockOrgs[0]!,
+          stage,
           mockActors,
           []
         );
 
-        expect(article).toBeDefined();
-        expect(article.title).toBeTruthy();
+        expect(article.title).toBe(
+          'TechCorp AI Announcement Imminent, Sources Say'
+        );
         expect(article.content.length).toBeGreaterThan(100);
-
-        pacingEngine.recordArticle(
-          mockQuestion.id as number,
-          org.id,
-          'breaking',
-          article.id,
-          10
-        );
-
-        articles.push(article);
-      }
-
-      const stats = pacingEngine.getStageStats(mockQuestion.id as number);
-      expect(stats.breaking).toBe(breakingOrgs.length);
-      expect(stats.commentary).toBe(0);
-      expect(stats.resolution).toBe(0);
-    });
-
-    it('should generate commentary articles at midpoint', async () => {
-      const commentaryOrgs = pacingEngine.selectOrgsForStage(
-        mockOrgs,
-        mockQuestion.id as number,
-        'commentary'
-      );
-
-      expect(commentaryOrgs.length).toBeGreaterThanOrEqual(2);
-      expect(commentaryOrgs.length).toBeLessThanOrEqual(3);
-
-      for (const org of commentaryOrgs) {
-        const article = await articleGen.generateArticleForQuestion(
-          mockQuestion,
-          org,
-          'commentary',
-          mockActors,
-          []
-        );
-
-        expect(article).toBeDefined();
-        pacingEngine.recordArticle(
-          mockQuestion.id as number,
-          org.id,
-          'commentary',
-          article.id,
-          50
-        );
-      }
-
-      const stats = pacingEngine.getStageStats(mockQuestion.id as number);
-      expect(stats.commentary).toBe(commentaryOrgs.length);
-    });
-
-    it('should generate resolution articles when question resolves', async () => {
-      const resolutionOrgs = pacingEngine.selectOrgsForStage(
-        mockOrgs,
-        mockQuestion.id as number,
-        'resolution'
-      );
-
-      expect(resolutionOrgs.length).toBeGreaterThan(0);
-      expect(resolutionOrgs.length).toBeLessThanOrEqual(5);
-
-      for (const org of resolutionOrgs) {
-        const article = await articleGen.generateArticleForQuestion(
-          mockQuestion,
-          org,
-          'resolution',
-          mockActors,
-          []
-        );
-
-        expect(article).toBeDefined();
-        pacingEngine.recordArticle(
-          mockQuestion.id as number,
-          org.id,
-          'resolution',
-          article.id,
-          100
-        );
-      }
-
-      const stats = pacingEngine.getStageStats(mockQuestion.id as number);
-      expect(stats.resolution).toBe(resolutionOrgs.length);
-    });
-
-    it('should maintain total article count < 10 per question', async () => {
-      const breaking = pacingEngine.selectOrgsForStage(mockOrgs, 1, 'breaking');
-      breaking.forEach((org) => {
-        pacingEngine.recordArticle(
-          1,
-          org.id,
-          'breaking',
-          `article-${org.id}-1`,
-          10
-        );
       });
-
-      const commentary = pacingEngine.selectOrgsForStage(
-        mockOrgs,
-        1,
-        'commentary'
-      );
-      commentary.forEach((org) => {
-        pacingEngine.recordArticle(
-          1,
-          org.id,
-          'commentary',
-          `article-${org.id}-2`,
-          50
-        );
-      });
-
-      const resolution = pacingEngine.selectOrgsForStage(
-        mockOrgs,
-        1,
-        'resolution'
-      );
-      resolution.forEach((org) => {
-        pacingEngine.recordArticle(
-          1,
-          org.id,
-          'resolution',
-          `article-${org.id}-3`,
-          100
-        );
-      });
-
-      const total = pacingEngine.getArticlesForQuestion(1).length;
-      expect(total).toBeLessThan(11); // 2 + 3 + 5 = 10 max
-    });
+    }
   });
 
   describe('Trending Topics Integration', () => {
@@ -340,7 +202,7 @@ describe('Trending Topics & News Integration', () => {
       expect(context).toContain('TRENDING TOPICS');
     });
 
-    it('should include trends in ambient post prompts', async () => {
+    it('exposes LLM-generated trend names in the feed trend context', async () => {
       const posts: FeedPost[] = [
         {
           id: 'post-1',
@@ -349,7 +211,7 @@ describe('Trending Topics & News Integration', () => {
           authorName: 'User',
           timestamp: '2025-11-15T10:00:00Z',
           day: 1,
-          tags: ['test'],
+          tags: ['ai'],
         },
       ];
 
@@ -358,30 +220,6 @@ describe('Trending Topics & News Integration', () => {
 
       const context = feedGen['trendContext'];
       expect(context).toContain('AI Breakthrough Buzz');
-    });
-  });
-
-  describe('Post Volume Balance', () => {
-    it('should maintain high normal post to article ratio', async () => {
-      const normalPosts: FeedPost[] = Array.from({ length: 100 }, (_, i) => ({
-        id: `post-${i}`,
-        content: `Normal post ${i}`,
-        author: `user-${i}`,
-        authorName: `User${i}`,
-        timestamp: '2025-11-15T10:00:00Z',
-        day: 1,
-        tags: ['general'],
-      }));
-
-      const breakingOrgs = pacingEngine.selectOrgsForStage(
-        mockOrgs,
-        1,
-        'breaking'
-      );
-      const articleCount = breakingOrgs.length;
-
-      const ratio = normalPosts.length / articleCount;
-      expect(ratio).toBeGreaterThan(10);
     });
   });
 
@@ -395,15 +233,15 @@ describe('Trending Topics & News Integration', () => {
         rank: 1,
       } as Question;
 
-      await expect(async () => {
-        await articleGen.generateArticleForQuestion(
+      await expect(
+        articleGen.generateArticleForQuestion(
           invalidQuestion,
           mockOrgs[0]!,
           'breaking',
           mockActors,
           []
-        );
-      }).toThrow('Invalid question');
+        )
+      ).rejects.toThrow('Invalid question');
     });
 
     it('should throw on invalid organization for article generation', async () => {
@@ -415,27 +253,27 @@ describe('Trending Topics & News Integration', () => {
         canBeInvolved: false,
       } as Organization;
 
-      await expect(async () => {
-        await articleGen.generateArticleForQuestion(
+      await expect(
+        articleGen.generateArticleForQuestion(
           mockQuestion,
           invalidOrg,
           'breaking',
           mockActors,
           []
-        );
-      }).toThrow('Invalid organization');
+        )
+      ).rejects.toThrow('Invalid organization');
     });
 
     it('should throw on empty actors array', async () => {
-      await expect(async () => {
-        await articleGen.generateArticleForQuestion(
+      await expect(
+        articleGen.generateArticleForQuestion(
           mockQuestion,
           mockOrgs[0]!,
           'breaking',
           [], // Empty!
           []
-        );
-      }).toThrow('Actors array cannot be empty');
+        )
+      ).rejects.toThrow('Actors array cannot be empty');
     });
 
     it('should propagate LLM failures (fail-fast)', async () => {
@@ -470,13 +308,13 @@ describe('Trending Topics & News Integration', () => {
   });
 
   describe('Context Validation', () => {
-    it('should never provide empty trend context to agents', () => {
+    it('should never provide empty trend context to agents', async () => {
       feedGen.updateTrendContext();
       let context = feedGen['trendContext'];
       expect(context.trim()).not.toBe('');
       expect(context).toContain('TRENDING TOPICS');
 
-      trendEngine.updateTrends([], 10);
+      await trendEngine.updateTrends([], 10);
       feedGen.updateTrendContext();
       context = feedGen['trendContext'];
       expect(context.trim()).not.toBe('');
@@ -519,15 +357,15 @@ describe('Trending Topics & News Integration', () => {
 
       const badArticleGen = new ArticleGenerator(badLLM);
 
-      await expect(async () => {
-        await badArticleGen.generateArticleForQuestion(
+      await expect(
+        badArticleGen.generateArticleForQuestion(
           mockQuestion,
           mockOrgs[0]!,
           'breaking',
           mockActors,
           []
-        );
-      }).toThrow('empty title');
+        )
+      ).rejects.toThrow('empty title');
     });
 
     it('should throw if article has empty summary', async () => {
@@ -549,15 +387,15 @@ describe('Trending Topics & News Integration', () => {
 
       const badArticleGen = new ArticleGenerator(badLLM);
 
-      await expect(async () => {
-        await badArticleGen.generateArticleForQuestion(
+      await expect(
+        badArticleGen.generateArticleForQuestion(
           mockQuestion,
           mockOrgs[0]!,
           'breaking',
           mockActors,
           []
-        );
-      }).toThrow('empty summary');
+        )
+      ).rejects.toThrow('empty summary');
     });
 
     it('should throw if article content is too short', async () => {
@@ -579,51 +417,15 @@ describe('Trending Topics & News Integration', () => {
 
       const badArticleGen = new ArticleGenerator(badLLM);
 
-      await expect(async () => {
-        await badArticleGen.generateArticleForQuestion(
+      await expect(
+        badArticleGen.generateArticleForQuestion(
           mockQuestion,
           mockOrgs[0]!,
           'breaking',
           mockActors,
           []
-        );
-      }).toThrow('content too short');
-    });
-  });
-
-  describe('Multi-Question Scenario', () => {
-    it('should handle multiple questions with independent article counts', async () => {
-      const q1Orgs = pacingEngine.selectOrgsForStage(mockOrgs, 1, 'breaking');
-      const q2Orgs = pacingEngine.selectOrgsForStage(mockOrgs, 2, 'breaking');
-
-      q1Orgs.forEach((org) => {
-        pacingEngine.recordArticle(
-          1,
-          org.id,
-          'breaking',
-          `article-q1-${org.id}`,
-          10
-        );
-      });
-
-      q2Orgs.forEach((org) => {
-        pacingEngine.recordArticle(
-          2,
-          org.id,
-          'breaking',
-          `article-q2-${org.id}`,
-          15
-        );
-      });
-
-      expect(pacingEngine.getArticlesForQuestion(1).length).toBe(q1Orgs.length);
-      expect(pacingEngine.getArticlesForQuestion(2).length).toBe(q2Orgs.length);
-
-      const stats1 = pacingEngine.getStageStats(1);
-      const stats2 = pacingEngine.getStageStats(2);
-      expect(stats1.breaking + stats2.breaking).toBeLessThanOrEqual(
-        mockOrgs.length
-      );
+        )
+      ).rejects.toThrow('content too short');
     });
   });
 
@@ -673,8 +475,8 @@ describe('Trending Topics & News Integration', () => {
     });
   });
 
-  describe('Performance & Scalability', () => {
-    it('should handle 100+ posts efficiently', async () => {
+  describe('Trend batching', () => {
+    it('caps trends at the top 5 topics', async () => {
       const posts: FeedPost[] = Array.from({ length: 100 }, (_, i) => ({
         id: `post-${i}`,
         content: `Post ${i}`,
@@ -685,11 +487,7 @@ describe('Trending Topics & News Integration', () => {
         tags: [`tag-${i % 10}`], // 10 different tags
       }));
 
-      const start = Date.now();
       await trendEngine.updateTrends(posts, 10);
-      const duration = Date.now() - start;
-
-      expect(duration).toBeLessThan(5000);
 
       const trends = trendEngine.getTrends();
       expect(trends.length).toBeLessThanOrEqual(5);

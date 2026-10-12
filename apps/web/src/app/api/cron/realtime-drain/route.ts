@@ -21,7 +21,9 @@ export const GET = withErrorHandling(async (request: NextRequest) => {
   const result = await drainOutboxBatch();
   logger.info('Realtime outbox drain completed', result, 'Realtime');
   return successResponse({
-    success: true,
+    // Failed deliveries are retried by later drains, but this run did not
+    // fully succeed.
+    success: result.failed === 0,
     ...result,
     timestamp: Date.now(),
   });

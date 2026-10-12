@@ -10,6 +10,7 @@ import {
   AuthorizationError,
   authenticate,
   BadRequestError,
+  NotFoundError,
   requireUserByIdentifier,
   successResponse,
   withErrorHandling,
@@ -37,18 +38,21 @@ const UpdateNotificationEmailPreferencesSchema = z
     {
       message: 'At least one preference must be provided',
     }
+  )
+  // An explicit unsubscribe must not be undone by a subtype flag in the same
+  // payload; reject the contradiction instead of guessing which one wins.
+  .refine(
+    (data) =>
+      data.enabled !== false ||
+      (data.realtime !== true &&
+        data.dailySummary !== true &&
+        data.weeklySummary !== true &&
+        data.monthlySummary !== true),
+    {
+      message:
+        'Cannot enable an email summary while disabling email notifications',
+    }
   );
-
-// Phase 2: Privy email lookup removed. Email comes from Feed's users.email
-// column which is populated by Steward at login time.
-async function getVerifiedEmailFromDb(userId: string): Promise<string | null> {
-  const [user] = await db
-    .select({ email: users.email, emailVerified: users.emailVerified })
-    .from(users)
-    .where(eq(users.id, userId))
-    .limit(1);
-  return user?.emailVerified ? (user.email ?? null) : null;
-}
 
 export const GET = withErrorHandling(
   async (
@@ -83,17 +87,21 @@ export const GET = withErrorHandling(
       .where(eq(users.id, canonicalUserId))
       .limit(1);
 
+    if (!userRecord) {
+      throw new NotFoundError('User');
+    }
+
     return successResponse({
       success: true,
       preferences: {
-        enabled: userRecord?.enabled ?? false,
-        realtime: userRecord?.realtime ?? true,
-        dailySummary: userRecord?.dailySummary ?? true,
-        weeklySummary: userRecord?.weeklySummary ?? true,
-        monthlySummary: userRecord?.monthlySummary ?? true,
+        enabled: userRecord.enabled,
+        realtime: userRecord.realtime,
+        dailySummary: userRecord.dailySummary,
+        weeklySummary: userRecord.weeklySummary,
+        monthlySummary: userRecord.monthlySummary,
       },
-      email: userRecord?.email ?? null,
-      emailVerified: userRecord?.emailVerified ?? false,
+      email: userRecord.email,
+      emailVerified: userRecord.emailVerified,
     });
   }
 );
@@ -130,7 +138,7 @@ export const POST = withErrorHandling(
       .limit(1);
 
     if (!existingUser) {
-      throw new BadRequestError('User not found');
+      throw new NotFoundError('User');
     }
 
     const isEnablingEmailNotifications =
@@ -140,36 +148,13 @@ export const POST = withErrorHandling(
       payload.weeklySummary === true ||
       payload.monthlySummary === true;
 
-    let effectiveEmail = existingUser.email;
-    let effectiveEmailVerified = existingUser.emailVerified;
-
     if (
       isEnablingEmailNotifications &&
-      (!effectiveEmail || !effectiveEmailVerified)
+      (!existingUser.email || !existingUser.emailVerified)
     ) {
-      const verifiedEmail = await getVerifiedEmailFromDb(canonicalUserId);
-
-      if (!verifiedEmail) {
-        throw new BadRequestError(
-          'No verified email was found on your account. Please link and verify an email address first.'
-        );
-      }
-
-      const [updatedEmailUser] = await db
-        .update(users)
-        .set({
-          email: verifiedEmail,
-          emailVerified: true,
-          updatedAt: new Date(),
-        })
-        .where(eq(users.id, canonicalUserId))
-        .returning({
-          email: users.email,
-          emailVerified: users.emailVerified,
-        });
-
-      effectiveEmail = updatedEmailUser?.email ?? verifiedEmail;
-      effectiveEmailVerified = updatedEmailUser?.emailVerified ?? true;
+      throw new BadRequestError(
+        'No verified email was found on your account. Please link and verify an email address first.'
+      );
     }
 
     const updateData: Partial<typeof users.$inferInsert> = {
@@ -227,15 +212,19 @@ export const POST = withErrorHandling(
         monthlySummary: users.emailNotificationsMonthlySummary,
       });
 
+    if (!updatedUser) {
+      throw new NotFoundError('User');
+    }
+
     logger.info(
       'Updated notification email preferences',
       {
         userId: canonicalUserId,
-        enabled: updatedUser?.enabled,
-        realtime: updatedUser?.realtime,
-        dailySummary: updatedUser?.dailySummary,
-        weeklySummary: updatedUser?.weeklySummary,
-        monthlySummary: updatedUser?.monthlySummary,
+        enabled: updatedUser.enabled,
+        realtime: updatedUser.realtime,
+        dailySummary: updatedUser.dailySummary,
+        weeklySummary: updatedUser.weeklySummary,
+        monthlySummary: updatedUser.monthlySummary,
       },
       'POST /api/users/[userId]/notification-email-preferences'
     );
@@ -243,14 +232,14 @@ export const POST = withErrorHandling(
     return successResponse({
       success: true,
       preferences: {
-        enabled: updatedUser?.enabled ?? false,
-        realtime: updatedUser?.realtime ?? false,
-        dailySummary: updatedUser?.dailySummary ?? false,
-        weeklySummary: updatedUser?.weeklySummary ?? false,
-        monthlySummary: updatedUser?.monthlySummary ?? false,
+        enabled: updatedUser.enabled,
+        realtime: updatedUser.realtime,
+        dailySummary: updatedUser.dailySummary,
+        weeklySummary: updatedUser.weeklySummary,
+        monthlySummary: updatedUser.monthlySummary,
       },
-      email: updatedUser?.email ?? effectiveEmail ?? null,
-      emailVerified: updatedUser?.emailVerified ?? effectiveEmailVerified,
+      email: updatedUser.email,
+      emailVerified: updatedUser.emailVerified,
     });
   }
 );

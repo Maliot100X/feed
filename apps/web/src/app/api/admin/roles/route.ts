@@ -16,7 +16,6 @@ import {
   ADMIN_PERMISSIONS,
   ADMIN_ROLES,
   type AdminPermission,
-  type AdminRoleType,
   adminRoles,
   and,
   db,
@@ -24,7 +23,6 @@ import {
   generateSnowflakeId,
   isNull,
   ROLE_PERMISSIONS,
-  sql,
   users,
 } from '@feed/db';
 import { logger, toISO } from '@feed/shared';
@@ -56,6 +54,53 @@ class RoleOperationError extends Error {
   ) {
     super(message);
     this.name = 'RoleOperationError';
+  }
+}
+
+type RoleTransaction = Parameters<Parameters<typeof db.transaction>[0]>[0];
+
+/**
+ * Throws LAST_SUPER_ADMIN when `userId` is currently the only active
+ * SUPER_ADMIN. Locks every active SUPER_ADMIN row (FOR UPDATE cannot be
+ * combined with an aggregate in Postgres) so concurrent revocations or
+ * downgrades serialize on the same rows.
+ */
+async function assertNotLastSuperAdmin(
+  tx: RoleTransaction,
+  userId: string
+): Promise<void> {
+  const activeSuperAdmins = await tx
+    .select({ userId: adminRoles.userId })
+    .from(adminRoles)
+    .where(
+      and(eq(adminRoles.role, 'SUPER_ADMIN'), isNull(adminRoles.revokedAt))
+    )
+    .for('update');
+
+  const targetIsSuperAdmin = activeSuperAdmins.some(
+    (row) => row.userId === userId
+  );
+  if (targetIsSuperAdmin && activeSuperAdmins.length <= 1) {
+    throw new RoleOperationError(
+      'Cannot remove the last super admin',
+      'LAST_SUPER_ADMIN',
+      400
+    );
+  }
+}
+
+/** Runs a role mutation, mapping expected RoleOperationErrors to responses. */
+async function runRoleOperation(
+  operation: () => Promise<void>
+): Promise<Response | null> {
+  try {
+    await operation();
+    return null;
+  } catch (error) {
+    if (error instanceof RoleOperationError) {
+      return errorResponse(error.message, error.code, error.statusCode);
+    }
+    throw error;
   }
 }
 
@@ -104,13 +149,7 @@ export const POST = withErrorHandling(async (request: NextRequest) => {
     );
   }
 
-  // Extract validated data with proper typing
-  const { userId, action, role, permissions } = parseResult.data as {
-    userId: string;
-    action: 'grant' | 'revoke';
-    role?: AdminRoleType;
-    permissions?: AdminPermission[];
-  };
+  const { userId, action, role, permissions } = parseResult.data;
 
   const [targetUser] = await db
     .select({
@@ -155,34 +194,48 @@ export const POST = withErrorHandling(async (request: NextRequest) => {
     const finalPermissions: AdminPermission[] =
       permissions ?? roleDefaultPermissions;
     const now = new Date();
+    // generateSnowflakeId is async; resolve before building the row so the id
+    // is a real snowflake rather than the string "[object Promise]".
+    const roleId = `admin_role_${await generateSnowflakeId()}`;
 
     // Use transaction to ensure atomic role grant + isAdmin flag update
-    await db.transaction(async (tx) => {
-      // Use upsert (onConflictDoUpdate) to prevent race conditions
-      await tx
-        .insert(adminRoles)
-        .values({
-          id: `admin_role_${generateSnowflakeId()}`,
-          userId,
-          role,
-          permissions: finalPermissions,
-          grantedBy: admin.userId,
-          grantedAt: now,
-        })
-        .onConflictDoUpdate({
-          target: adminRoles.userId,
-          set: {
+    const grantError = await runRoleOperation(() =>
+      db.transaction(async (tx) => {
+        // Downgrading a SUPER_ADMIN must not remove the last one.
+        if (role !== 'SUPER_ADMIN') {
+          await assertNotLastSuperAdmin(tx, userId);
+        }
+
+        // Use upsert (onConflictDoUpdate) to prevent race conditions
+        await tx
+          .insert(adminRoles)
+          .values({
+            id: roleId,
+            userId,
             role,
             permissions: finalPermissions,
             grantedBy: admin.userId,
             grantedAt: now,
-            revokedAt: null,
-          },
-        });
+          })
+          .onConflictDoUpdate({
+            target: adminRoles.userId,
+            set: {
+              role,
+              permissions: finalPermissions,
+              grantedBy: admin.userId,
+              grantedAt: now,
+              revokedAt: null,
+            },
+          });
 
-      // Update legacy isAdmin flag for backward compatibility (atomic with role grant)
-      await tx.update(users).set({ isAdmin: true }).where(eq(users.id, userId));
-    });
+        // Update legacy isAdmin flag for backward compatibility (atomic with role grant)
+        await tx
+          .update(users)
+          .set({ isAdmin: true })
+          .where(eq(users.id, userId));
+      })
+    );
+    if (grantError) return grantError;
 
     logger.info(
       'Admin role granted/updated',
@@ -203,21 +256,6 @@ export const POST = withErrorHandling(async (request: NextRequest) => {
     });
   }
 
-  // Only check for active (non-revoked) roles
-  const [existingRole] = await db
-    .select()
-    .from(adminRoles)
-    .where(and(eq(adminRoles.userId, userId), isNull(adminRoles.revokedAt)))
-    .limit(1);
-
-  if (!existingRole) {
-    return errorResponse(
-      'User does not have an active admin role',
-      'NO_ACTIVE_ROLE',
-      400
-    );
-  }
-
   if (admin.userId === userId) {
     return errorResponse(
       'Cannot revoke your own admin role',
@@ -226,31 +264,26 @@ export const POST = withErrorHandling(async (request: NextRequest) => {
     );
   }
 
-  // Use transaction with SELECT FOR UPDATE to prevent race condition
-  // when revoking super admin - locks the rows during the check and revoke
-  try {
-    await db.transaction(async (tx) => {
-      // Check if this would remove the last super admin
-      if (existingRole.role === 'SUPER_ADMIN') {
-        // Use SELECT FOR UPDATE to acquire row locks and prevent concurrent revocations
-        const superAdminCountResult = await tx.execute(
-          sql`SELECT COUNT(*) as count FROM ${adminRoles}
-              WHERE ${adminRoles.role} = 'SUPER_ADMIN'
-              AND ${adminRoles.revokedAt} IS NULL
-              FOR UPDATE`
-        );
+  const revokeError = await runRoleOperation(() =>
+    db.transaction(async (tx) => {
+      // Read the active role inside the transaction (locked) so the
+      // last-super-admin check below sees committed state.
+      const [existingRole] = await tx
+        .select({ role: adminRoles.role })
+        .from(adminRoles)
+        .where(and(eq(adminRoles.userId, userId), isNull(adminRoles.revokedAt)))
+        .limit(1)
+        .for('update');
 
-        const superAdminCountValue = Number(
-          (superAdminCountResult[0] as { count: string })?.count ?? 0
+      if (!existingRole) {
+        throw new RoleOperationError(
+          'User does not have an active admin role',
+          'NO_ACTIVE_ROLE',
+          400
         );
-        if (superAdminCountValue <= 1) {
-          throw new RoleOperationError(
-            'Cannot revoke the last super admin',
-            'LAST_SUPER_ADMIN',
-            400
-          );
-        }
       }
+
+      await assertNotLastSuperAdmin(tx, userId);
 
       await tx
         .update(adminRoles)
@@ -261,13 +294,9 @@ export const POST = withErrorHandling(async (request: NextRequest) => {
         .update(users)
         .set({ isAdmin: false })
         .where(eq(users.id, userId));
-    });
-  } catch (error) {
-    if (error instanceof RoleOperationError) {
-      return errorResponse(error.message, error.code, error.statusCode);
-    }
-    throw error; // Re-throw unexpected errors to be handled by withErrorHandling
-  }
+    })
+  );
+  if (revokeError) return revokeError;
 
   logger.info(
     'Admin role revoked',

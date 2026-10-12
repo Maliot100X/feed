@@ -19,10 +19,10 @@ import {
 } from '@feed/core/markets/prediction';
 import { and, asUser, db, eq, positions } from '@feed/db';
 import {
+  createUserWalletAdapter,
   FEE_CONFIG,
   FeeService,
   invalidateAfterPredictionTrade,
-  WalletService,
 } from '@feed/engine';
 import { AgentPnLService } from '../../../../services/AgentPnLService';
 import { logger } from '../../../../shared/logger';
@@ -91,7 +91,7 @@ export const sellPredictionAction: Action = {
     const positionId = actionParams?.positionId;
     const sharesToSell = actionParams?.shares;
 
-    if (!positionId || !sharesToSell) {
+    if (!positionId || sharesToSell === undefined) {
       return {
         success: false,
         text: 'Missing parameters. Call CHECK_PNL first to get positionId and share count.',
@@ -99,10 +99,14 @@ export const sellPredictionAction: Action = {
       };
     }
 
-    if (sharesToSell <= 0) {
+    if (
+      typeof sharesToSell !== 'number' ||
+      !Number.isFinite(sharesToSell) ||
+      sharesToSell <= 0
+    ) {
       return {
         success: false,
-        text: 'Shares must be greater than 0.',
+        text: 'Shares must be a finite number greater than 0.',
         error: 'Invalid shares',
       };
     }
@@ -143,30 +147,8 @@ export const sellPredictionAction: Action = {
         const marketId = position.marketId;
         const service = new PredictionMarketService({
           db: new PredictionDbAdapter(txDb),
-          wallet: {
-            debit: ({ userId, amount, reason, description, relatedId }) =>
-              WalletService.debit(
-                userId,
-                amount,
-                reason,
-                description ?? '',
-                relatedId,
-                txDb
-              ),
-            credit: ({ userId, amount, reason, description, relatedId }) =>
-              WalletService.credit(
-                userId,
-                amount,
-                reason,
-                description ?? '',
-                relatedId,
-                txDb
-              ),
-            recordPnL: async ({ userId, pnl, reason, relatedId }) => {
-              await WalletService.recordPnL(userId, pnl, reason, relatedId);
-            },
-            getBalance: (uid: string) => WalletService.getBalance(uid),
-          },
+          // Every wallet mutation (incl. PnL) enlists in the asUser transaction
+          wallet: createUserWalletAdapter(txDb),
           broadcast: {
             emit: (channel, payload) =>
               broadcastToChannel(channel, payload as Record<string, JsonValue>),
@@ -213,19 +195,28 @@ export const sellPredictionAction: Action = {
       const realizedPnL = sell.result.pnl ?? 0;
       const remainingShares = sell.result.remainingShares ?? 0;
 
-      // Record trade for UI/performance tracking
-      await agentPnLService.recordTrade({
-        agentId: agentUserId,
-        userId: agentUserId,
-        marketType: 'prediction',
-        marketId: sell.marketId,
-        action: 'close',
-        side: position.side ? 'yes' : 'no',
-        amount: proceeds,
-        price: sell.result.avgPrice,
-        reasoning: (state?.data?.thought as string) || 'Chat-initiated sell',
-        pnl: realizedPnL,
-      });
+      // Record trade for UI/performance tracking. The sale is committed, so
+      // an analytics failure must not report it as failed.
+      await agentPnLService
+        .recordTrade({
+          agentId: agentUserId,
+          userId: agentUserId,
+          marketType: 'prediction',
+          marketId: sell.marketId,
+          action: 'close',
+          side: position.side ? 'yes' : 'no',
+          amount: proceeds,
+          price: sell.result.avgPrice,
+          reasoning: (state?.data?.thought as string) || 'Chat-initiated sell',
+          pnl: realizedPnL,
+        })
+        .catch((error: Error) => {
+          logger.error('[SELL_PREDICTION] Failed to record trade analytics', {
+            agentUserId,
+            positionId,
+            error: error.message,
+          });
+        });
 
       logger.info('[SELL_PREDICTION] Trade successful', {
         agentUserId,

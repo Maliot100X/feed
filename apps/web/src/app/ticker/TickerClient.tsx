@@ -7,45 +7,7 @@ import type {
   TickerPredictionItem,
   TickerResponse,
 } from '@/types/ticker';
-
-const DEFAULT_STREAMS = 'news,predictions,perps';
-const DEFAULT_THEME = 'dark';
-const DEFAULT_SPEED = 0.7;
-const DEFAULT_HEIGHT = 48;
-
-/** Speed param: 0.1 = slowest, 1 = medium, 3 = fastest. Clamped to [0.1, 3]. */
-const SPEED_MIN = 0.1;
-const SPEED_MAX = 3;
-
-function useTickerParams() {
-  if (typeof window === 'undefined') {
-    return {
-      streams: DEFAULT_STREAMS,
-      theme: DEFAULT_THEME,
-      speed: DEFAULT_SPEED,
-      height: DEFAULT_HEIGHT,
-    };
-  }
-  const params = new URLSearchParams(window.location.search);
-  const raw = parseFloat(params.get('speed') || String(DEFAULT_SPEED));
-  const speed = Math.min(
-    SPEED_MAX,
-    Math.max(SPEED_MIN, Number.isFinite(raw) ? raw : DEFAULT_SPEED)
-  );
-  return {
-    streams: params.get('streams')?.trim() || DEFAULT_STREAMS,
-    theme: (params.get('theme') || DEFAULT_THEME).toLowerCase(),
-    speed,
-    height: Math.min(
-      120,
-      Math.max(
-        32,
-        parseInt(params.get('height') || String(DEFAULT_HEIGHT), 10) ||
-          DEFAULT_HEIGHT
-      )
-    ),
-  };
-}
+import type { TickerParams } from './params';
 
 type TickerItem = {
   key: string;
@@ -74,20 +36,28 @@ function buildItems(response: TickerResponse): TickerItem[] {
       label: 'Prediction',
       text: p.question,
       type: 'prediction',
-      yesPercent: p.yesPercent,
+      yesPercent:
+        typeof p.yesPercent === 'number' && Number.isFinite(p.yesPercent)
+          ? p.yesPercent
+          : undefined,
     });
   });
   (response.perps ?? []).forEach((p: TickerPerpItem) => {
+    // Guard against malformed numerics in the API payload.
+    if (typeof p.price !== 'number' || !Number.isFinite(p.price)) return;
+    const change =
+      typeof p.changePercent24h === 'number' &&
+      Number.isFinite(p.changePercent24h)
+        ? p.changePercent24h
+        : null;
     const changeStr =
-      p.changePercent24h == null
-        ? '—'
-        : `${p.changePercent24h >= 0 ? '+' : ''}${p.changePercent24h.toFixed(2)}%`;
+      change == null ? '—' : `${change >= 0 ? '+' : ''}${change.toFixed(2)}%`;
     items.push({
       key: `perp-${p.ticker}`,
       label: 'Perp',
       text: `${p.ticker} $${p.price.toFixed(2)} (${changeStr})`,
       type: 'perp',
-      changePercent24h: p.changePercent24h,
+      changePercent24h: change,
     });
   });
   return items;
@@ -170,8 +140,7 @@ function PredictionArcMeter({
   );
 }
 
-export function TickerClient() {
-  const { streams, theme, speed, height } = useTickerParams();
+export function TickerClient({ streams, theme, speed, height }: TickerParams) {
   const [data, setData] = useState<TickerResponse | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -190,8 +159,8 @@ export function TickerClient() {
         perps: json.perps,
       });
     } catch (e) {
+      // Keep the last good snapshot on a transient refresh failure.
       setError(e instanceof Error ? e.message : 'Failed to load ticker');
-      setData(null);
     } finally {
       setLoading(false);
     }

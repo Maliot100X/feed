@@ -29,13 +29,19 @@
  *   setup ──> tension ──> escalation ──> crisis ──> revelation ──> resolution
  *   └── Full 6-phase narrative arc
  *
- * Uses secureRandom for deterministic behavior in testing.
+ * Event rolls use secureRandom (unseeded; not deterministic).
  */
 
 import {
+  and,
   asc,
   db,
   eq,
+  gt,
+  isNull,
+  lte,
+  or,
+  sql,
   type TimeframedMarket,
   timeframedMarkets,
 } from '@feed/db';
@@ -56,8 +62,8 @@ import {
 
 export interface ArcTransitionResult {
   transitioned: boolean;
-  previousState?: string;
-  newState?: string;
+  previousState?: TimeframedMarket['arcState'];
+  newState?: TimeframedMarket['arcState'];
   marketId: string;
 }
 
@@ -152,18 +158,25 @@ export class TimeframeArcProcessor {
     };
 
     try {
-      // Get active markets in batches to avoid unbounded queries
-      let offset = 0;
+      // Get active markets in batches. Keyset pagination (id > last seen id)
+      // so markets leaving/joining the active set don't shift later pages.
+      let lastId: string | null = null;
       let hasMore = true;
 
       while (hasMore) {
-        const activeMarkets = await db
+        const activeMarkets: TimeframedMarket[] = await db
           .select()
           .from(timeframedMarkets)
-          .where(eq(timeframedMarkets.isActive, true))
-          .orderBy(asc(timeframedMarkets.id)) // Stable order for pagination
-          .limit(BATCH_SIZE)
-          .offset(offset);
+          .where(
+            lastId === null
+              ? eq(timeframedMarkets.isActive, true)
+              : and(
+                  eq(timeframedMarkets.isActive, true),
+                  gt(timeframedMarkets.id, lastId)
+                )
+          )
+          .orderBy(asc(timeframedMarkets.id))
+          .limit(BATCH_SIZE);
 
         if (activeMarkets.length < BATCH_SIZE) {
           hasMore = false;
@@ -174,7 +187,7 @@ export class TimeframeArcProcessor {
         }
 
         logger.debug(
-          `Processing batch of ${activeMarkets.length} active markets (offset: ${offset})`,
+          `Processing batch of ${activeMarkets.length} active markets (after: ${lastId ?? 'start'})`,
           {},
           'TimeframeArcProcessor'
         );
@@ -200,18 +213,29 @@ export class TimeframeArcProcessor {
               result.transitionsOccurred++;
             }
 
+            // Event selection must use the post-transition state, not the
+            // stale row read at the start of the batch.
+            const currentMarket: TimeframedMarket =
+              transition.transitioned && transition.newState
+                ? {
+                    ...market,
+                    arcState: transition.newState,
+                    arcStateEnteredAt: now,
+                  }
+                : market;
+
             // Check for event generation
-            const event = await this.tryGenerateEvent(market, now);
+            const event = await this.tryGenerateEvent(currentMarket, now);
             if (event.generated) {
               result.eventsGenerated++;
 
               // Record event trigger for article generation
               if (event.eventType) {
                 result.eventTriggers.push({
-                  marketId: market.id,
+                  marketId: currentMarket.id,
                   eventType: event.eventType,
-                  timeframe: market.timeframe,
-                  arcState: market.arcState,
+                  timeframe: currentMarket.timeframe,
+                  arcState: currentMarket.arcState,
                 });
               }
             }
@@ -226,7 +250,7 @@ export class TimeframeArcProcessor {
           }
         }
 
-        offset += BATCH_SIZE;
+        lastId = activeMarkets[activeMarkets.length - 1]!.id;
       }
 
       logger.info(
@@ -279,14 +303,10 @@ export class TimeframeArcProcessor {
         'TimeframeArcProcessor'
       );
 
-      await db
-        .update(timeframedMarkets)
-        .set({
-          arcState: expectedState,
-          arcStateEnteredAt: now,
-          updatedAt: now,
-        })
-        .where(eq(timeframedMarkets.id, market.id));
+      const applied = await this.applyArcState(market, expectedState, now);
+      if (!applied) {
+        return { transitioned: false, marketId: market.id };
+      }
 
       return {
         transitioned: true,
@@ -303,12 +323,62 @@ export class TimeframeArcProcessor {
   }
 
   /**
+   * Compare-and-set the arc state: only applies when the row is still in the
+   * state we read, so a concurrent tick cannot regress or double-apply it.
+   * @returns whether this call applied the transition
+   */
+  private async applyArcState(
+    market: TimeframedMarket,
+    newState: TimeframedMarket['arcState'],
+    now: Date
+  ): Promise<boolean> {
+    const updated = await db
+      .update(timeframedMarkets)
+      .set({
+        arcState: newState,
+        arcStateEnteredAt: now,
+        updatedAt: now,
+      })
+      .where(
+        and(
+          eq(timeframedMarkets.id, market.id),
+          eq(timeframedMarkets.arcState, market.arcState)
+        )
+      )
+      .returning({ id: timeframedMarkets.id });
+    return updated.length > 0;
+  }
+
+  /**
    * Try to generate an event for a market
    */
   async tryGenerateEvent(
     market: TimeframedMarket,
     now: Date = new Date()
   ): Promise<EventGenerationResult> {
+    // Only generate events while the market window is open
+    if (now < market.startTime) {
+      return { generated: false, marketId: market.id, reason: 'not_started' };
+    }
+    if (now >= market.endTime) {
+      return { generated: false, marketId: market.id, reason: 'ended' };
+    }
+
+    const eventTypes = STATE_EVENT_TYPES[market.arcState];
+    const baseProbability = STATE_EVENT_PROBABILITIES[market.arcState];
+    if (
+      !eventTypes ||
+      eventTypes.length === 0 ||
+      baseProbability === undefined
+    ) {
+      logger.warn(
+        `No event configuration for arc state`,
+        { marketId: market.id, arcState: market.arcState },
+        'TimeframeArcProcessor'
+      );
+      return { generated: false, marketId: market.id, reason: 'unknown_state' };
+    }
+
     // Check cooldown
     const cooldownMs = getEventCooldownMs(market.timeframe);
     if (market.lastEventAt) {
@@ -321,9 +391,6 @@ export class TimeframeArcProcessor {
         };
       }
     }
-
-    // Get base probability for current state
-    const baseProbability = STATE_EVENT_PROBABILITIES[market.arcState] ?? 0.3;
 
     // Apply timeframe multiplier
     const multiplier = getEventMultiplier(market.timeframe);
@@ -338,23 +405,33 @@ export class TimeframeArcProcessor {
       };
     }
 
-    // Select event type with nullish coalescing fallback to ensure non-undefined result
-    const eventTypes = STATE_EVENT_TYPES[market.arcState] ?? ['generic_event'];
     const eventType =
-      eventTypes.length > 0
-        ? (eventTypes[Math.floor(secureRandom() * eventTypes.length)] ??
-          'generic_event')
-        : 'generic_event';
+      eventTypes[Math.floor(secureRandom() * eventTypes.length)]!;
 
-    // Update market
-    await db
+    // Atomically claim the cooldown slot and increment the counter in SQL so
+    // concurrent ticks cannot both emit an event or lose an increment.
+    const cooldownBoundary = new Date(now.getTime() - cooldownMs);
+    const claimed = await db
       .update(timeframedMarkets)
       .set({
-        eventsGenerated: (market.eventsGenerated ?? 0) + 1,
+        eventsGenerated: sql`coalesce(${timeframedMarkets.eventsGenerated}, 0) + 1`,
         lastEventAt: now,
         updatedAt: now,
       })
-      .where(eq(timeframedMarkets.id, market.id));
+      .where(
+        and(
+          eq(timeframedMarkets.id, market.id),
+          or(
+            isNull(timeframedMarkets.lastEventAt),
+            lte(timeframedMarkets.lastEventAt, cooldownBoundary)
+          )
+        )
+      )
+      .returning({ id: timeframedMarkets.id });
+
+    if (claimed.length === 0) {
+      return { generated: false, marketId: market.id, reason: 'cooldown' };
+    }
 
     logger.debug(
       `Generated event`,
@@ -398,14 +475,10 @@ export class TimeframeArcProcessor {
       };
     }
 
-    await db
-      .update(timeframedMarkets)
-      .set({
-        arcState: terminalState,
-        arcStateEnteredAt: now,
-        updatedAt: now,
-      })
-      .where(eq(timeframedMarkets.id, market.id));
+    const applied = await this.applyArcState(market, terminalState, now);
+    if (!applied) {
+      return { transitioned: false, marketId: market.id };
+    }
 
     logger.info(
       `Market reached end time and is awaiting markets-tick resolution`,
@@ -464,7 +537,9 @@ export class TimeframeArcProcessor {
   ): string {
     const ms = this.getTimeRemaining(market, now);
 
-    if (ms <= 0) return 'Resolved';
+    // Settlement is owned by markets-tick; reaching endTime only means the
+    // market is awaiting resolution.
+    if (ms <= 0) return 'Ended';
 
     const seconds = Math.floor(ms / 1000);
     const minutes = Math.floor(seconds / 60);

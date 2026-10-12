@@ -110,18 +110,12 @@ import {
 import { logger } from '@feed/shared';
 import type { NextRequest } from 'next/server';
 import { NextResponse } from 'next/server';
+import { z } from 'zod';
 
-const parseLimit = (raw: string | null) => {
-  if (!raw) return 50;
-  const parsed = Number.parseInt(raw, 10);
-  return Math.min(Number.isNaN(parsed) ? 50 : parsed, 100);
-};
-
-const parseMinValue = (raw: string | null) => {
-  if (!raw) return 0;
-  const parsed = Number.parseFloat(raw);
-  return Number.isNaN(parsed) ? 0 : parsed;
-};
+const LeaderboardQuerySchema = z.object({
+  limit: z.coerce.number().int().min(1).max(100).default(50),
+  minValue: z.coerce.number().finite().min(0).default(0),
+});
 
 export const GET = withErrorHandling(async function GET(request: NextRequest) {
   const { error, rateLimitInfo } = await publicRateLimit(request);
@@ -129,11 +123,10 @@ export const GET = withErrorHandling(async function GET(request: NextRequest) {
 
   const { searchParams } = new URL(request.url);
 
-  const limitParam = searchParams.get('limit');
-  const minValueParam = searchParams.get('minValue');
-
-  const limit = parseLimit(limitParam);
-  const minValue = parseMinValue(minValueParam);
+  const { limit, minValue } = LeaderboardQuerySchema.parse({
+    limit: searchParams.get('limit') ?? undefined,
+    minValue: searchParams.get('minValue') ?? undefined,
+  });
 
   const activePools = await db
     .select()

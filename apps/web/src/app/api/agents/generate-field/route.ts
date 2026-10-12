@@ -110,10 +110,41 @@ import { logger } from '@feed/shared';
 import { generateText } from 'ai';
 import type { NextRequest } from 'next/server';
 import { NextResponse } from 'next/server';
+import { z } from 'zod';
+
+const optionalText = z
+  .string()
+  .max(20000)
+  .nullish()
+  .transform((value) => value ?? undefined);
+
+const GenerateFieldBodySchema = z.object({
+  fieldName: z.enum([
+    'name',
+    'description',
+    'system',
+    'bio',
+    'personality',
+    'tradingStrategy',
+  ]),
+  currentValue: optionalText,
+  context: z
+    .object({
+      name: optionalText,
+      description: optionalText,
+      system: optionalText,
+      personality: optionalText,
+      tradingStrategy: optionalText,
+    })
+    .optional()
+    .transform((context) => context ?? {}),
+});
 
 const MAX_TOKENS = 500;
 const MAX_ATTEMPTS = 3;
 const MIN_CONTENT_LENGTH = 10;
+/** Names are short by design ("OracleX"); the generic minimum would reject them. */
+const MIN_NAME_LENGTH = 2;
 const RETRY_BASE_DELAY_MS = 500; // Base delay for exponential backoff
 
 /**
@@ -182,14 +213,13 @@ export const POST = withErrorHandling(async function POST(req: NextRequest) {
     return rateLimitError;
   }
 
-  const { fieldName, currentValue, context } = await req.json();
-
-  if (!fieldName) {
-    return NextResponse.json(
-      { success: false, error: 'Missing fieldName' },
-      { status: 400 }
-    );
-  }
+  // context is optional (documented fieldName-only requests); absent context
+  // used to crash on context.name.
+  const { fieldName, currentValue, context } = GenerateFieldBodySchema.parse(
+    await req.json()
+  );
+  const minContentLength =
+    fieldName === 'name' ? MIN_NAME_LENGTH : MIN_CONTENT_LENGTH;
 
   const basePrompt = buildPromptForField(fieldName, currentValue, context);
   const systemPrompt =
@@ -353,7 +383,7 @@ export const POST = withErrorHandling(async function POST(req: NextRequest) {
     // Try to extract clean content
     cleanedValue = extractContent(generatedValue);
 
-    if (cleanedValue && cleanedValue.length >= MIN_CONTENT_LENGTH) {
+    if (cleanedValue && cleanedValue.length >= minContentLength) {
       // Success! We got valid content
       break;
     }
@@ -377,7 +407,7 @@ export const POST = withErrorHandling(async function POST(req: NextRequest) {
   }
 
   // If all attempts failed, return error
-  if (!cleanedValue || cleanedValue.length < MIN_CONTENT_LENGTH) {
+  if (!cleanedValue || cleanedValue.length < minContentLength) {
     logger.error(
       `Failed to generate valid content after ${MAX_ATTEMPTS} attempts`,
       { fieldName },

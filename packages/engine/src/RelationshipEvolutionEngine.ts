@@ -48,6 +48,63 @@ export interface Interaction {
   timestamp: Date;
 }
 
+/**
+ * Canonical unordered actor pair (IDs sorted) so (a, b) and (b, a) share one key.
+ */
+export function canonicalActorPair(
+  actorAId: string,
+  actorBId: string
+): [string, string] {
+  return actorAId <= actorBId ? [actorAId, actorBId] : [actorBId, actorAId];
+}
+
+/** Matches a relationship row for the pair regardless of stored order. */
+function relationshipPairPredicate(actorAId: string, actorBId: string) {
+  return or(
+    and(
+      eq(actorRelationships.actor1Id, actorAId),
+      eq(actorRelationships.actor2Id, actorBId)
+    ),
+    and(
+      eq(actorRelationships.actor1Id, actorBId),
+      eq(actorRelationships.actor2Id, actorAId)
+    )
+  );
+}
+
+/**
+ * Group interactions by unordered actor pair using a collision-free key
+ * (actor IDs may themselves contain `_`).
+ */
+export function groupInteractionsByPair<
+  T extends { actor1Id: string; actor2Id: string },
+>(
+  interactions: T[]
+): Map<string, { actor1Id: string; actor2Id: string; interactions: T[] }> {
+  const pairs = new Map<
+    string,
+    { actor1Id: string; actor2Id: string; interactions: T[] }
+  >();
+  for (const interaction of interactions) {
+    const [actor1Id, actor2Id] = canonicalActorPair(
+      interaction.actor1Id,
+      interaction.actor2Id
+    );
+    const key = JSON.stringify([actor1Id, actor2Id]);
+    const entry = pairs.get(key) ?? { actor1Id, actor2Id, interactions: [] };
+    entry.interactions.push(interaction);
+    pairs.set(key, entry);
+  }
+  return pairs;
+}
+
+/** Clamp an LLM-provided sentiment, or return null when it is not a finite number. */
+function parseSentiment(value: unknown): number | null {
+  return typeof value === 'number' && Number.isFinite(value)
+    ? Math.max(-1, Math.min(1, value))
+    : null;
+}
+
 export class RelationshipEvolutionEngine {
   constructor(private llm?: FeedLLMClient) {}
 
@@ -107,6 +164,17 @@ export class RelationshipEvolutionEngine {
         const randomChance = Math.random() > 0.7; // 30% chance even without shared context
 
         if (hasSharedContext || randomChance) {
+          const [existingRel] = await db
+            .select({ id: actorRelationships.id })
+            .from(actorRelationships)
+            .where(relationshipPairPredicate(actor1.id, actor2.id))
+            .limit(1);
+          if (existingRel) {
+            // Already related; counts toward this actor's target but is not created
+            relationshipCount++;
+            continue;
+          }
+
           // Generate simple text description using LLM if available, otherwise use templates
           let history: string;
           let type: string;
@@ -117,31 +185,12 @@ export class RelationshipEvolutionEngine {
             const org = orgMap.get(first(sharedOrgs)!);
             const context = `both affiliated with ${org?.name || 'same organization'}`;
 
-            // Check if relationship already exists
-            const [existing] = await db
-              .select()
-              .from(actorRelationships)
-              .where(
-                or(
-                  and(
-                    eq(actorRelationships.actor1Id, actor1.id),
-                    eq(actorRelationships.actor2Id, actor2.id)
-                  ),
-                  and(
-                    eq(actorRelationships.actor1Id, actor2.id),
-                    eq(actorRelationships.actor2Id, actor1.id)
-                  )
-                )
-              )
-              .limit(1);
-
             const llmResult = await this.generateInitialRelationshipDescription(
               actor1.name,
               actor2.name,
               context,
               actor1.personality || '',
-              actor2.personality || '',
-              existing?.history || undefined
+              actor2.personality || ''
             );
 
             history = llmResult.description;
@@ -165,40 +214,23 @@ export class RelationshipEvolutionEngine {
             sentiment = 0;
           }
 
-          // Create relationship (use insert with conflict handling to avoid duplicates)
-          // Check if relationship already exists first
-          const [existingRel] = await db
-            .select({ id: actorRelationships.id })
-            .from(actorRelationships)
-            .where(
-              or(
-                and(
-                  eq(actorRelationships.actor1Id, actor1.id),
-                  eq(actorRelationships.actor2Id, actor2.id)
-                ),
-                and(
-                  eq(actorRelationships.actor1Id, actor2.id),
-                  eq(actorRelationships.actor2Id, actor1.id)
-                )
-              )
-            )
-            .limit(1);
-
-          if (!existingRel) {
-            await db.insert(actorRelationships).values({
-              id: await generateSnowflakeId(),
-              actor1Id: actor1.id,
-              actor2Id: actor2.id,
-              relationshipType: type,
-              strength: 0.3 + Math.random() * 0.5,
-              sentiment,
-              history,
-              isPublic: true,
-              updatedAt: new Date(),
-              interactionCount: 0,
-              evolutionCount: 0,
-            });
-          }
+          // Store in canonical (sorted) order to match trackInteraction pairs.
+          // TODO: no DB unique constraint on the unordered pair yet, so two
+          // concurrent initializers can still both insert.
+          const [pair1Id, pair2Id] = canonicalActorPair(actor1.id, actor2.id);
+          await db.insert(actorRelationships).values({
+            id: await generateSnowflakeId(),
+            actor1Id: pair1Id,
+            actor2Id: pair2Id,
+            relationshipType: type,
+            strength: 0.3 + Math.random() * 0.5,
+            sentiment,
+            history,
+            isPublic: true,
+            updatedAt: new Date(),
+            interactionCount: 0,
+            evolutionCount: 0,
+          });
 
           created++;
           relationshipCount++;
@@ -268,10 +300,14 @@ Return JSON: { "description": "...", "type": "...", "sentiment": 0.0 }`;
       { maxTokens: 200, temperature: 0.9 }
     );
 
+    const sentiment = parseSentiment(response.sentiment);
+    if (typeof response.description !== 'string' || sentiment === null) {
+      throw new Error('Invalid relationship description response from LLM');
+    }
     return {
       description: response.description.toLowerCase().trim(),
       type: response.type || 'acquaintances',
-      sentiment: Math.max(-1, Math.min(1, response.sentiment || 0)),
+      sentiment,
     };
   }
 
@@ -286,9 +322,10 @@ Return JSON: { "description": "...", "type": "...", "sentiment": 0.0 }`;
       return;
     }
 
-    // Sort IDs to ensure consistency
-    const sorted = [interaction.actor1Id, interaction.actor2Id].sort();
-    const [id1, id2] = sorted as [string, string];
+    const [id1, id2] = canonicalActorPair(
+      interaction.actor1Id,
+      interaction.actor2Id
+    );
 
     await db.insert(npcInteractions).values({
       id: await generateSnowflakeId(),
@@ -338,16 +375,8 @@ Return JSON: { "description": "...", "type": "...", "sentiment": 0.0 }`;
       return 0;
     }
 
-    // Group interactions by actor pair
-    const pairInteractions = new Map<string, typeof recentInteractions>();
-
-    for (const interaction of recentInteractions) {
-      const pairKey = `${interaction.actor1Id}_${interaction.actor2Id}`;
-      if (!pairInteractions.has(pairKey)) {
-        pairInteractions.set(pairKey, []);
-      }
-      pairInteractions.get(pairKey)!.push(interaction);
-    }
+    // Group interactions by unordered actor pair
+    const pairInteractions = groupInteractionsByPair(recentInteractions);
 
     logger.info(
       `Analyzing ${pairInteractions.size} actor pairs for relationship changes`,
@@ -361,24 +390,30 @@ Return JSON: { "description": "...", "type": "...", "sentiment": 0.0 }`;
     let updated = 0;
 
     // Process each pair
-    for (const [pairKey, interactions] of pairInteractions) {
-      // Need at least 2 interactions to update relationship
-      if (interactions.length < 2) continue;
+    for (const pair of pairInteractions.values()) {
+      const { actor1Id, actor2Id } = pair;
 
-      const [actor1Id, actor2Id] = pairKey.split('_');
-      if (!actor1Id || !actor2Id) continue;
-
-      // Get existing relationship
+      // Get existing relationship (either stored order)
       const [existing] = await db
         .select()
         .from(actorRelationships)
-        .where(
-          and(
-            eq(actorRelationships.actor1Id, actor1Id),
-            eq(actorRelationships.actor2Id, actor2Id)
-          )
-        )
+        .where(relationshipPairPredicate(actor1Id, actor2Id))
         .limit(1);
+
+      // lastInteraction is the cursor of the newest interaction already
+      // applied; only newer interactions may change the relationship, so
+      // repeated ticks do not replay the same window.
+      const cursor = existing?.lastInteraction ?? null;
+      const interactions = cursor
+        ? pair.interactions.filter((i) => i.timestamp > cursor)
+        : pair.interactions;
+
+      // Need at least 2 new interactions to update relationship
+      if (interactions.length < 2) continue;
+      const newestInteractionAt = interactions.reduce(
+        (latest, i) => (i.timestamp > latest ? i.timestamp : latest),
+        interactions[0]!.timestamp
+      );
 
       // Get actor names from static registry
       const actor1 = StaticDataRegistry.getActor(actor1Id);
@@ -433,7 +468,7 @@ Also determine:
 Return JSON: { "description": "...", "type": "...", "sentiment": 0.0 }`;
 
       // Retry logic: up to 3 attempts with LLM-generated relationship updates
-      let newHistory = 'professional relationship';
+      let newHistory: string | null = null;
       let newType = 'acquaintances';
       let newSentiment = avgSentiment;
       const maxRetries = 3;
@@ -458,10 +493,9 @@ Return JSON: { "description": "...", "type": "...", "sentiment": 0.0 }`;
           // Don't trim - let LLM decide length (they know the context)
           newHistory = response.description.toLowerCase().trim();
           newType = response.type || 'acquaintances';
-          newSentiment = Math.max(
-            -1,
-            Math.min(1, response.sentiment || avgSentiment)
-          );
+          newSentiment =
+            parseSentiment(response.sentiment) ??
+            Math.max(-1, Math.min(1, avgSentiment));
           break; // Success
         }
 
@@ -471,6 +505,17 @@ Return JSON: { "description": "...", "type": "...", "sentiment": 0.0 }`;
             setTimeout(resolve, 1000 * 2 ** attempt)
           );
         }
+      }
+
+      if (newHistory === null) {
+        // Do not overwrite the relationship with a generic description, and
+        // leave the cursor untouched so these interactions are retried.
+        logger.warn(
+          'Relationship evolution produced no description; skipping pair',
+          { actor1Id, actor2Id },
+          'RelationshipEvolutionEngine'
+        );
+        continue;
       }
 
       // Update or create relationship
@@ -484,12 +529,12 @@ Return JSON: { "description": "...", "type": "...", "sentiment": 0.0 }`;
             sentiment: newSentiment,
             strength: Math.min(
               1.0,
-              (existing.strength || 0.5) + interactions.length * 0.05
+              (existing.strength ?? 0.5) + interactions.length * 0.05
             ),
-            lastInteraction: new Date(),
+            lastInteraction: newestInteractionAt,
             interactionCount:
-              (existing.interactionCount || 0) + interactions.length,
-            evolutionCount: (existing.evolutionCount || 0) + 1,
+              (existing.interactionCount ?? 0) + interactions.length,
+            evolutionCount: (existing.evolutionCount ?? 0) + 1,
             updatedAt: new Date(),
           })
           .where(eq(actorRelationships.id, existing.id));
@@ -504,7 +549,7 @@ Return JSON: { "description": "...", "type": "...", "sentiment": 0.0 }`;
           sentiment: newSentiment,
           history: newHistory,
           isPublic: true,
-          lastInteraction: new Date(),
+          lastInteraction: newestInteractionAt,
           interactionCount: interactions.length,
           evolutionCount: 0,
           updatedAt: new Date(),

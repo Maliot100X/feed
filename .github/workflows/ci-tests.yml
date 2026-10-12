@@ -173,9 +173,14 @@ jobs:
           # at runtime for any server-side rendering or API routes that might need them
           NEXT_PUBLIC_PRIVY_APP_ID: ${{ secrets.NEXT_PUBLIC_PRIVY_APP_ID || secrets.PRIVY_APP_ID || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.fork && 'cl_ci_fork_dummy') || '' }}
           CI_ADMIN_TOKEN: ci-integration-test-admin-token
+          # Every admin-token request maps to the single ci-admin-user, so the
+          # per-user ADMIN_STATS limit (30/min) would throttle the admin suites.
+          # The production build inlines NODE_ENV=production, so disabling
+          # rate limiting also requires the test-server auth flag.
+          DISABLE_RATE_LIMITING: 'true'
+          ALLOW_TEST_PRIVY_DID_AUTH: 'true'
 
       - name: Run Integration Tests
-        continue-on-error: true
         timeout-minutes: 10
         run: |
           echo "🧪 Running integration tests..."

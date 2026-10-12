@@ -105,29 +105,12 @@ const DEFAULT_OUTPUT_DIR = path.resolve(
   'packages/agents/characters/local-roster'
 );
 
+// Every non-Kimi routing tier currently resolves to gpt-oss-120b.
 const OPENAI_GPT_OSS_120B = 'openai/gpt-oss-120b';
-const OPENAI_GPT_OSS_20B = OPENAI_GPT_OSS_120B;
 const KIMI_K2 = 'moonshotai/kimi-k2-instruct-0905';
-const LLAMA_70B = OPENAI_GPT_OSS_120B;
-const LLAMA_8B = OPENAI_GPT_OSS_120B;
 
-const RED_TEAM_AUTONOMY: CharacterAutonomyProfile = {
-  trading: true,
-  posting: true,
-  commenting: true,
-  dms: true,
-  groups: true,
-};
-
-const BLUE_TEAM_AUTONOMY: CharacterAutonomyProfile = {
-  trading: true,
-  posting: true,
-  commenting: true,
-  dms: true,
-  groups: true,
-};
-
-const GRAY_TEAM_AUTONOMY: CharacterAutonomyProfile = {
+// All teams currently share identical, fully enabled autonomy.
+const FULL_AUTONOMY: CharacterAutonomyProfile = {
   trading: true,
   posting: true,
   commenting: true,
@@ -167,12 +150,12 @@ export const LOCAL_CHARACTER_SEEDS: readonly CharacterSeed[] = [
     ],
     modelRouting: {
       primary: OPENAI_GPT_OSS_120B,
-      small: LLAMA_8B,
+      small: OPENAI_GPT_OSS_120B,
       large: OPENAI_GPT_OSS_120B,
     },
     riskTolerance: 'medium',
     planningHorizon: 'campaign',
-    autonomy: BLUE_TEAM_AUTONOMY,
+    autonomy: FULL_AUTONOMY,
   },
   {
     id: 'luka-petrov',
@@ -204,12 +187,12 @@ export const LOCAL_CHARACTER_SEEDS: readonly CharacterSeed[] = [
     topicFocus: ['value', 'liquidity', 'panic', 'mispricing'],
     modelRouting: {
       primary: OPENAI_GPT_OSS_120B,
-      small: LLAMA_8B,
+      small: OPENAI_GPT_OSS_120B,
       large: OPENAI_GPT_OSS_120B,
     },
     riskTolerance: 'medium',
     planningHorizon: 'swing',
-    autonomy: GRAY_TEAM_AUTONOMY,
+    autonomy: FULL_AUTONOMY,
   },
   {
     id: 'camila-velez',
@@ -246,13 +229,13 @@ export const LOCAL_CHARACTER_SEEDS: readonly CharacterSeed[] = [
       'social proof',
     ],
     modelRouting: {
-      primary: LLAMA_70B,
-      small: LLAMA_8B,
-      large: LLAMA_70B,
+      primary: OPENAI_GPT_OSS_120B,
+      small: OPENAI_GPT_OSS_120B,
+      large: OPENAI_GPT_OSS_120B,
     },
     riskTolerance: 'high',
     planningHorizon: 'single',
-    autonomy: GRAY_TEAM_AUTONOMY,
+    autonomy: FULL_AUTONOMY,
   },
   {
     id: 'arjun-malhotra',
@@ -285,12 +268,12 @@ export const LOCAL_CHARACTER_SEEDS: readonly CharacterSeed[] = [
     ],
     modelRouting: {
       primary: OPENAI_GPT_OSS_120B,
-      small: OPENAI_GPT_OSS_20B,
+      small: OPENAI_GPT_OSS_120B,
       large: OPENAI_GPT_OSS_120B,
     },
     riskTolerance: 'medium',
     planningHorizon: 'campaign',
-    autonomy: GRAY_TEAM_AUTONOMY,
+    autonomy: FULL_AUTONOMY,
   },
   {
     id: 'farah-darzi',
@@ -324,12 +307,12 @@ export const LOCAL_CHARACTER_SEEDS: readonly CharacterSeed[] = [
     ],
     modelRouting: {
       primary: KIMI_K2,
-      small: LLAMA_8B,
+      small: OPENAI_GPT_OSS_120B,
       large: KIMI_K2,
     },
     riskTolerance: 'low',
     planningHorizon: 'campaign',
-    autonomy: BLUE_TEAM_AUTONOMY,
+    autonomy: FULL_AUTONOMY,
   },
   {
     id: 'mateo-rojas',
@@ -356,13 +339,13 @@ export const LOCAL_CHARACTER_SEEDS: readonly CharacterSeed[] = [
     voiceTraits: ['breathless', 'self-mythologizing', 'meme fluent', 'swingy'],
     topicFocus: ['degen trades', 'momentum', 'revenge trading', 'YOLO sizing'],
     modelRouting: {
-      primary: LLAMA_8B,
-      small: LLAMA_8B,
-      large: OPENAI_GPT_OSS_20B,
+      primary: OPENAI_GPT_OSS_120B,
+      small: OPENAI_GPT_OSS_120B,
+      large: OPENAI_GPT_OSS_120B,
     },
     riskTolerance: 'high',
     planningHorizon: 'single',
-    autonomy: GRAY_TEAM_AUTONOMY,
+    autonomy: FULL_AUTONOMY,
   },
   {
     id: 'sanae-el-idrissi',
@@ -396,12 +379,12 @@ export const LOCAL_CHARACTER_SEEDS: readonly CharacterSeed[] = [
     ],
     modelRouting: {
       primary: KIMI_K2,
-      small: OPENAI_GPT_OSS_20B,
+      small: OPENAI_GPT_OSS_120B,
       large: KIMI_K2,
     },
     riskTolerance: 'medium',
     planningHorizon: 'swing',
-    autonomy: GRAY_TEAM_AUTONOMY,
+    autonomy: FULL_AUTONOMY,
   },
   {
     id: 'daniel-mercer',
@@ -434,12 +417,12 @@ export const LOCAL_CHARACTER_SEEDS: readonly CharacterSeed[] = [
     topicFocus: ['inside info', 'coverups', 'panic cycles', 'crowd steering'],
     modelRouting: {
       primary: OPENAI_GPT_OSS_120B,
-      small: OPENAI_GPT_OSS_20B,
+      small: OPENAI_GPT_OSS_120B,
       large: OPENAI_GPT_OSS_120B,
     },
     riskTolerance: 'high',
     planningHorizon: 'campaign',
-    autonomy: RED_TEAM_AUTONOMY,
+    autonomy: FULL_AUTONOMY,
   },
   {
     id: 'mei-lin-zhou',
@@ -467,12 +450,12 @@ export const LOCAL_CHARACTER_SEEDS: readonly CharacterSeed[] = [
     topicFocus: ['perps', 'funding', 'carry', 'position management'],
     modelRouting: {
       primary: OPENAI_GPT_OSS_120B,
-      small: OPENAI_GPT_OSS_20B,
+      small: OPENAI_GPT_OSS_120B,
       large: OPENAI_GPT_OSS_120B,
     },
     riskTolerance: 'medium',
     planningHorizon: 'campaign',
-    autonomy: GRAY_TEAM_AUTONOMY,
+    autonomy: FULL_AUTONOMY,
   },
   {
     id: 'nia-adu',
@@ -499,13 +482,13 @@ export const LOCAL_CHARACTER_SEEDS: readonly CharacterSeed[] = [
     voiceTraits: ['grounded', 'kind', 'clear', 'boundary-setting'],
     topicFocus: ['market literacy', 'retail safety', 'trust', 'healthy norms'],
     modelRouting: {
-      primary: LLAMA_70B,
-      small: LLAMA_8B,
-      large: LLAMA_70B,
+      primary: OPENAI_GPT_OSS_120B,
+      small: OPENAI_GPT_OSS_120B,
+      large: OPENAI_GPT_OSS_120B,
     },
     riskTolerance: 'low',
     planningHorizon: 'campaign',
-    autonomy: BLUE_TEAM_AUTONOMY,
+    autonomy: FULL_AUTONOMY,
   },
   {
     id: 'tomasz-zielinski',
@@ -538,12 +521,12 @@ export const LOCAL_CHARACTER_SEEDS: readonly CharacterSeed[] = [
     ],
     modelRouting: {
       primary: OPENAI_GPT_OSS_120B,
-      small: LLAMA_8B,
+      small: OPENAI_GPT_OSS_120B,
       large: OPENAI_GPT_OSS_120B,
     },
     riskTolerance: 'low',
     planningHorizon: 'campaign',
-    autonomy: BLUE_TEAM_AUTONOMY,
+    autonomy: FULL_AUTONOMY,
   },
   {
     id: 'priya-natarajan',
@@ -576,12 +559,12 @@ export const LOCAL_CHARACTER_SEEDS: readonly CharacterSeed[] = [
     ],
     modelRouting: {
       primary: OPENAI_GPT_OSS_120B,
-      small: LLAMA_8B,
+      small: OPENAI_GPT_OSS_120B,
       large: OPENAI_GPT_OSS_120B,
     },
     riskTolerance: 'low',
     planningHorizon: 'swing',
-    autonomy: BLUE_TEAM_AUTONOMY,
+    autonomy: FULL_AUTONOMY,
   },
   {
     id: 'yuri-sokolov',
@@ -614,12 +597,12 @@ export const LOCAL_CHARACTER_SEEDS: readonly CharacterSeed[] = [
     ],
     modelRouting: {
       primary: KIMI_K2,
-      small: OPENAI_GPT_OSS_20B,
+      small: OPENAI_GPT_OSS_120B,
       large: KIMI_K2,
     },
     riskTolerance: 'medium',
     planningHorizon: 'campaign',
-    autonomy: GRAY_TEAM_AUTONOMY,
+    autonomy: FULL_AUTONOMY,
   },
   {
     id: 'keisha-baptiste',
@@ -652,13 +635,13 @@ export const LOCAL_CHARACTER_SEEDS: readonly CharacterSeed[] = [
       'hype cycles',
     ],
     modelRouting: {
-      primary: LLAMA_70B,
-      small: LLAMA_8B,
-      large: LLAMA_70B,
+      primary: OPENAI_GPT_OSS_120B,
+      small: OPENAI_GPT_OSS_120B,
+      large: OPENAI_GPT_OSS_120B,
     },
     riskTolerance: 'high',
     planningHorizon: 'single',
-    autonomy: GRAY_TEAM_AUTONOMY,
+    autonomy: FULL_AUTONOMY,
   },
   {
     id: 'jonas-falk',
@@ -686,13 +669,13 @@ export const LOCAL_CHARACTER_SEEDS: readonly CharacterSeed[] = [
     voiceTraits: ['cold', 'acidic', 'terse', 'morbidly amused'],
     topicFocus: ['bubbles', 'crowd psychology', 'shorts', 'exhaustion'],
     modelRouting: {
-      primary: OPENAI_GPT_OSS_20B,
-      small: LLAMA_8B,
-      large: OPENAI_GPT_OSS_20B,
+      primary: OPENAI_GPT_OSS_120B,
+      small: OPENAI_GPT_OSS_120B,
+      large: OPENAI_GPT_OSS_120B,
     },
     riskTolerance: 'medium',
     planningHorizon: 'swing',
-    autonomy: GRAY_TEAM_AUTONOMY,
+    autonomy: FULL_AUTONOMY,
   },
   {
     id: 'leila-haddad',
@@ -720,12 +703,12 @@ export const LOCAL_CHARACTER_SEEDS: readonly CharacterSeed[] = [
     topicFocus: ['liquidity', 'survival', 'banking risk', 'optional exits'],
     modelRouting: {
       primary: OPENAI_GPT_OSS_120B,
-      small: OPENAI_GPT_OSS_20B,
+      small: OPENAI_GPT_OSS_120B,
       large: OPENAI_GPT_OSS_120B,
     },
     riskTolerance: 'low',
     planningHorizon: 'campaign',
-    autonomy: GRAY_TEAM_AUTONOMY,
+    autonomy: FULL_AUTONOMY,
   },
   {
     id: 'omar-mbaye',
@@ -753,12 +736,12 @@ export const LOCAL_CHARACTER_SEEDS: readonly CharacterSeed[] = [
     topicFocus: ['networks', 'trust debt', 'reputation', 'relationship alpha'],
     modelRouting: {
       primary: KIMI_K2,
-      small: OPENAI_GPT_OSS_20B,
+      small: OPENAI_GPT_OSS_120B,
       large: KIMI_K2,
     },
     riskTolerance: 'medium',
     planningHorizon: 'campaign',
-    autonomy: GRAY_TEAM_AUTONOMY,
+    autonomy: FULL_AUTONOMY,
   },
   {
     id: 'eva-kovac',
@@ -796,12 +779,12 @@ export const LOCAL_CHARACTER_SEEDS: readonly CharacterSeed[] = [
     ],
     modelRouting: {
       primary: KIMI_K2,
-      small: LLAMA_8B,
+      small: OPENAI_GPT_OSS_120B,
       large: KIMI_K2,
     },
     riskTolerance: 'high',
     planningHorizon: 'campaign',
-    autonomy: RED_TEAM_AUTONOMY,
+    autonomy: FULL_AUTONOMY,
   },
   {
     id: 'rafael-costa',
@@ -834,12 +817,12 @@ export const LOCAL_CHARACTER_SEEDS: readonly CharacterSeed[] = [
     ],
     modelRouting: {
       primary: OPENAI_GPT_OSS_120B,
-      small: OPENAI_GPT_OSS_20B,
+      small: OPENAI_GPT_OSS_120B,
       large: OPENAI_GPT_OSS_120B,
     },
     riskTolerance: 'high',
     planningHorizon: 'campaign',
-    autonomy: RED_TEAM_AUTONOMY,
+    autonomy: FULL_AUTONOMY,
   },
   {
     id: 'hannah-weiss',
@@ -872,12 +855,12 @@ export const LOCAL_CHARACTER_SEEDS: readonly CharacterSeed[] = [
     ],
     modelRouting: {
       primary: OPENAI_GPT_OSS_120B,
-      small: OPENAI_GPT_OSS_20B,
+      small: OPENAI_GPT_OSS_120B,
       large: OPENAI_GPT_OSS_120B,
     },
     riskTolerance: 'low',
     planningHorizon: 'campaign',
-    autonomy: BLUE_TEAM_AUTONOMY,
+    autonomy: FULL_AUTONOMY,
   },
   {
     id: 'noor-rahman',
@@ -909,13 +892,13 @@ export const LOCAL_CHARACTER_SEEDS: readonly CharacterSeed[] = [
       'luxury signal',
     ],
     modelRouting: {
-      primary: LLAMA_70B,
-      small: LLAMA_8B,
-      large: LLAMA_70B,
+      primary: OPENAI_GPT_OSS_120B,
+      small: OPENAI_GPT_OSS_120B,
+      large: OPENAI_GPT_OSS_120B,
     },
     riskTolerance: 'high',
     planningHorizon: 'single',
-    autonomy: GRAY_TEAM_AUTONOMY,
+    autonomy: FULL_AUTONOMY,
   },
   {
     id: 'valentina-orsini',
@@ -943,12 +926,12 @@ export const LOCAL_CHARACTER_SEEDS: readonly CharacterSeed[] = [
     topicFocus: ['rates', 'macro caution', 'defense', 'crowd euphoria'],
     modelRouting: {
       primary: KIMI_K2,
-      small: OPENAI_GPT_OSS_20B,
+      small: OPENAI_GPT_OSS_120B,
       large: KIMI_K2,
     },
     riskTolerance: 'medium',
     planningHorizon: 'swing',
-    autonomy: GRAY_TEAM_AUTONOMY,
+    autonomy: FULL_AUTONOMY,
   },
   {
     id: 'kaito-mori',
@@ -981,12 +964,12 @@ export const LOCAL_CHARACTER_SEEDS: readonly CharacterSeed[] = [
     ],
     modelRouting: {
       primary: OPENAI_GPT_OSS_120B,
-      small: LLAMA_8B,
+      small: OPENAI_GPT_OSS_120B,
       large: OPENAI_GPT_OSS_120B,
     },
     riskTolerance: 'medium',
     planningHorizon: 'campaign',
-    autonomy: GRAY_TEAM_AUTONOMY,
+    autonomy: FULL_AUTONOMY,
   },
   {
     id: 'aaliyah-brooks',
@@ -1014,12 +997,12 @@ export const LOCAL_CHARACTER_SEEDS: readonly CharacterSeed[] = [
     topicFocus: ['scam spotting', 'trust', 'community defense', 'clean play'],
     modelRouting: {
       primary: OPENAI_GPT_OSS_120B,
-      small: OPENAI_GPT_OSS_20B,
+      small: OPENAI_GPT_OSS_120B,
       large: OPENAI_GPT_OSS_120B,
     },
     riskTolerance: 'low',
     planningHorizon: 'campaign',
-    autonomy: BLUE_TEAM_AUTONOMY,
+    autonomy: FULL_AUTONOMY,
   },
   {
     id: 'pablo-quispe',
@@ -1051,13 +1034,13 @@ export const LOCAL_CHARACTER_SEEDS: readonly CharacterSeed[] = [
       'pragmatic upside',
     ],
     modelRouting: {
-      primary: OPENAI_GPT_OSS_20B,
-      small: LLAMA_8B,
-      large: OPENAI_GPT_OSS_20B,
+      primary: OPENAI_GPT_OSS_120B,
+      small: OPENAI_GPT_OSS_120B,
+      large: OPENAI_GPT_OSS_120B,
     },
     riskTolerance: 'medium',
     planningHorizon: 'swing',
-    autonomy: GRAY_TEAM_AUTONOMY,
+    autonomy: FULL_AUTONOMY,
   },
   {
     id: 'zarina-bek',
@@ -1095,12 +1078,12 @@ export const LOCAL_CHARACTER_SEEDS: readonly CharacterSeed[] = [
     ],
     modelRouting: {
       primary: KIMI_K2,
-      small: OPENAI_GPT_OSS_20B,
+      small: OPENAI_GPT_OSS_120B,
       large: KIMI_K2,
     },
     riskTolerance: 'medium',
     planningHorizon: 'campaign',
-    autonomy: RED_TEAM_AUTONOMY,
+    autonomy: FULL_AUTONOMY,
   },
   {
     id: 'mireille-laurent',
@@ -1132,13 +1115,13 @@ export const LOCAL_CHARACTER_SEEDS: readonly CharacterSeed[] = [
       'public reasoning',
     ],
     modelRouting: {
-      primary: LLAMA_70B,
-      small: LLAMA_8B,
-      large: LLAMA_70B,
+      primary: OPENAI_GPT_OSS_120B,
+      small: OPENAI_GPT_OSS_120B,
+      large: OPENAI_GPT_OSS_120B,
     },
     riskTolerance: 'low',
     planningHorizon: 'campaign',
-    autonomy: BLUE_TEAM_AUTONOMY,
+    autonomy: FULL_AUTONOMY,
   },
   {
     id: 'devon-park',
@@ -1165,13 +1148,13 @@ export const LOCAL_CHARACTER_SEEDS: readonly CharacterSeed[] = [
     voiceTraits: ['quick', 'clever', 'restless', 'performative'],
     topicFocus: ['growth', 'distribution', 'buzz', 'attention loops'],
     modelRouting: {
-      primary: OPENAI_GPT_OSS_20B,
-      small: LLAMA_8B,
-      large: OPENAI_GPT_OSS_20B,
+      primary: OPENAI_GPT_OSS_120B,
+      small: OPENAI_GPT_OSS_120B,
+      large: OPENAI_GPT_OSS_120B,
     },
     riskTolerance: 'high',
     planningHorizon: 'single',
-    autonomy: GRAY_TEAM_AUTONOMY,
+    autonomy: FULL_AUTONOMY,
   },
   {
     id: 'sofia-markovic',
@@ -1204,12 +1187,12 @@ export const LOCAL_CHARACTER_SEEDS: readonly CharacterSeed[] = [
     ],
     modelRouting: {
       primary: OPENAI_GPT_OSS_120B,
-      small: OPENAI_GPT_OSS_20B,
+      small: OPENAI_GPT_OSS_120B,
       large: OPENAI_GPT_OSS_120B,
     },
     riskTolerance: 'medium',
     planningHorizon: 'campaign',
-    autonomy: GRAY_TEAM_AUTONOMY,
+    autonomy: FULL_AUTONOMY,
   },
   {
     id: 'idris-khan',
@@ -1247,12 +1230,12 @@ export const LOCAL_CHARACTER_SEEDS: readonly CharacterSeed[] = [
     ],
     modelRouting: {
       primary: OPENAI_GPT_OSS_120B,
-      small: OPENAI_GPT_OSS_20B,
+      small: OPENAI_GPT_OSS_120B,
       large: OPENAI_GPT_OSS_120B,
     },
     riskTolerance: 'high',
     planningHorizon: 'campaign',
-    autonomy: RED_TEAM_AUTONOMY,
+    autonomy: FULL_AUTONOMY,
   },
   {
     id: 'samira-al-khatib',
@@ -1285,12 +1268,12 @@ export const LOCAL_CHARACTER_SEEDS: readonly CharacterSeed[] = [
     ],
     modelRouting: {
       primary: KIMI_K2,
-      small: LLAMA_8B,
+      small: OPENAI_GPT_OSS_120B,
       large: KIMI_K2,
     },
     riskTolerance: 'low',
     planningHorizon: 'campaign',
-    autonomy: BLUE_TEAM_AUTONOMY,
+    autonomy: FULL_AUTONOMY,
   },
   {
     id: 'miguel-santana',
@@ -1323,12 +1306,12 @@ export const LOCAL_CHARACTER_SEEDS: readonly CharacterSeed[] = [
     topicFocus: ['charts', 'breakouts', 'momentum', 'setup quality'],
     modelRouting: {
       primary: OPENAI_GPT_OSS_120B,
-      small: LLAMA_8B,
+      small: OPENAI_GPT_OSS_120B,
       large: OPENAI_GPT_OSS_120B,
     },
     riskTolerance: 'medium',
     planningHorizon: 'swing',
-    autonomy: GRAY_TEAM_AUTONOMY,
+    autonomy: FULL_AUTONOMY,
   },
   {
     id: 'rhea-thomas',
@@ -1356,12 +1339,12 @@ export const LOCAL_CHARACTER_SEEDS: readonly CharacterSeed[] = [
     topicFocus: ['investigations', 'receipts', 'fraud exposure', 'event risk'],
     modelRouting: {
       primary: OPENAI_GPT_OSS_120B,
-      small: OPENAI_GPT_OSS_20B,
+      small: OPENAI_GPT_OSS_120B,
       large: OPENAI_GPT_OSS_120B,
     },
     riskTolerance: 'medium',
     planningHorizon: 'campaign',
-    autonomy: BLUE_TEAM_AUTONOMY,
+    autonomy: FULL_AUTONOMY,
   },
   {
     id: 'jun-ho-seo',
@@ -1389,12 +1372,12 @@ export const LOCAL_CHARACTER_SEEDS: readonly CharacterSeed[] = [
     topicFocus: ['latency', 'execution', 'perps', 'reaction speed'],
     modelRouting: {
       primary: OPENAI_GPT_OSS_120B,
-      small: LLAMA_8B,
+      small: OPENAI_GPT_OSS_120B,
       large: OPENAI_GPT_OSS_120B,
     },
     riskTolerance: 'medium',
     planningHorizon: 'single',
-    autonomy: GRAY_TEAM_AUTONOMY,
+    autonomy: FULL_AUTONOMY,
   },
   {
     id: 'amara-sule',
@@ -1421,13 +1404,13 @@ export const LOCAL_CHARACTER_SEEDS: readonly CharacterSeed[] = [
     voiceTraits: ['practical', 'gentle', 'steady', 'anti-hype'],
     topicFocus: ['risk budgets', 'solvency', 'discipline', 'retail safety'],
     modelRouting: {
-      primary: LLAMA_70B,
-      small: LLAMA_8B,
-      large: LLAMA_70B,
+      primary: OPENAI_GPT_OSS_120B,
+      small: OPENAI_GPT_OSS_120B,
+      large: OPENAI_GPT_OSS_120B,
     },
     riskTolerance: 'low',
     planningHorizon: 'campaign',
-    autonomy: BLUE_TEAM_AUTONOMY,
+    autonomy: FULL_AUTONOMY,
   },
   {
     id: 'elena-popescu',
@@ -1465,12 +1448,12 @@ export const LOCAL_CHARACTER_SEEDS: readonly CharacterSeed[] = [
     ],
     modelRouting: {
       primary: KIMI_K2,
-      small: OPENAI_GPT_OSS_20B,
+      small: OPENAI_GPT_OSS_120B,
       large: KIMI_K2,
     },
     riskTolerance: 'high',
     planningHorizon: 'campaign',
-    autonomy: RED_TEAM_AUTONOMY,
+    autonomy: FULL_AUTONOMY,
   },
   {
     id: 'diego-ibarra',
@@ -1498,12 +1481,12 @@ export const LOCAL_CHARACTER_SEEDS: readonly CharacterSeed[] = [
     topicFocus: ['spreads', 'hedges', 'relative value', 'position structure'],
     modelRouting: {
       primary: OPENAI_GPT_OSS_120B,
-      small: LLAMA_8B,
+      small: OPENAI_GPT_OSS_120B,
       large: OPENAI_GPT_OSS_120B,
     },
     riskTolerance: 'low',
     planningHorizon: 'swing',
-    autonomy: GRAY_TEAM_AUTONOMY,
+    autonomy: FULL_AUTONOMY,
   },
   {
     id: 'fatima-chaudhry',
@@ -1536,12 +1519,12 @@ export const LOCAL_CHARACTER_SEEDS: readonly CharacterSeed[] = [
     ],
     modelRouting: {
       primary: OPENAI_GPT_OSS_120B,
-      small: OPENAI_GPT_OSS_20B,
+      small: OPENAI_GPT_OSS_120B,
       large: OPENAI_GPT_OSS_120B,
     },
     riskTolerance: 'low',
     planningHorizon: 'campaign',
-    autonomy: BLUE_TEAM_AUTONOMY,
+    autonomy: FULL_AUTONOMY,
   },
   {
     id: 'niko-demetriou',
@@ -1574,12 +1557,12 @@ export const LOCAL_CHARACTER_SEEDS: readonly CharacterSeed[] = [
     ],
     modelRouting: {
       primary: KIMI_K2,
-      small: OPENAI_GPT_OSS_20B,
+      small: OPENAI_GPT_OSS_120B,
       large: KIMI_K2,
     },
     riskTolerance: 'high',
     planningHorizon: 'single',
-    autonomy: RED_TEAM_AUTONOMY,
+    autonomy: FULL_AUTONOMY,
   },
   {
     id: 'soraia-mendes',
@@ -1607,12 +1590,12 @@ export const LOCAL_CHARACTER_SEEDS: readonly CharacterSeed[] = [
     topicFocus: ['research', 'forecasting', 'base rates', 'clean notes'],
     modelRouting: {
       primary: OPENAI_GPT_OSS_120B,
-      small: OPENAI_GPT_OSS_20B,
+      small: OPENAI_GPT_OSS_120B,
       large: OPENAI_GPT_OSS_120B,
     },
     riskTolerance: 'low',
     planningHorizon: 'campaign',
-    autonomy: BLUE_TEAM_AUTONOMY,
+    autonomy: FULL_AUTONOMY,
   },
   {
     id: 'yasmine-bensalem',
@@ -1639,13 +1622,13 @@ export const LOCAL_CHARACTER_SEEDS: readonly CharacterSeed[] = [
     voiceTraits: ['hopeful', 'structured', 'clear', 'principled'],
     topicFocus: ['documentation', 'clarity', 'reform', 'public utility'],
     modelRouting: {
-      primary: LLAMA_70B,
-      small: LLAMA_8B,
-      large: LLAMA_70B,
+      primary: OPENAI_GPT_OSS_120B,
+      small: OPENAI_GPT_OSS_120B,
+      large: OPENAI_GPT_OSS_120B,
     },
     riskTolerance: 'low',
     planningHorizon: 'campaign',
-    autonomy: BLUE_TEAM_AUTONOMY,
+    autonomy: FULL_AUTONOMY,
   },
   {
     id: 'cedric-mills',
@@ -1672,13 +1655,13 @@ export const LOCAL_CHARACTER_SEEDS: readonly CharacterSeed[] = [
     voiceTraits: ['funny', 'chaotic', 'self-aware', 'infectious'],
     topicFocus: ['memes', 'vibes', 'retail mania', 'accidental influence'],
     modelRouting: {
-      primary: LLAMA_8B,
-      small: LLAMA_8B,
-      large: LLAMA_70B,
+      primary: OPENAI_GPT_OSS_120B,
+      small: OPENAI_GPT_OSS_120B,
+      large: OPENAI_GPT_OSS_120B,
     },
     riskTolerance: 'high',
     planningHorizon: 'single',
-    autonomy: GRAY_TEAM_AUTONOMY,
+    autonomy: FULL_AUTONOMY,
   },
   {
     id: 'anika-rahimi',
@@ -1711,12 +1694,12 @@ export const LOCAL_CHARACTER_SEEDS: readonly CharacterSeed[] = [
     ],
     modelRouting: {
       primary: OPENAI_GPT_OSS_120B,
-      small: OPENAI_GPT_OSS_20B,
+      small: OPENAI_GPT_OSS_120B,
       large: OPENAI_GPT_OSS_120B,
     },
     riskTolerance: 'low',
     planningHorizon: 'campaign',
-    autonomy: BLUE_TEAM_AUTONOMY,
+    autonomy: FULL_AUTONOMY,
   },
   // ── Expanded Red Team (13 new agents, diverse attack specializations) ────
   {
@@ -1750,12 +1733,12 @@ export const LOCAL_CHARACTER_SEEDS: readonly CharacterSeed[] = [
     ],
     modelRouting: {
       primary: OPENAI_GPT_OSS_120B,
-      small: OPENAI_GPT_OSS_20B,
+      small: OPENAI_GPT_OSS_120B,
       large: OPENAI_GPT_OSS_120B,
     },
     riskTolerance: 'medium',
     planningHorizon: 'campaign',
-    autonomy: RED_TEAM_AUTONOMY,
+    autonomy: FULL_AUTONOMY,
   },
   {
     id: 'chen-wei-fang',
@@ -1788,12 +1771,12 @@ export const LOCAL_CHARACTER_SEEDS: readonly CharacterSeed[] = [
     ],
     modelRouting: {
       primary: KIMI_K2,
-      small: OPENAI_GPT_OSS_20B,
+      small: OPENAI_GPT_OSS_120B,
       large: KIMI_K2,
     },
     riskTolerance: 'high',
     planningHorizon: 'campaign',
-    autonomy: RED_TEAM_AUTONOMY,
+    autonomy: FULL_AUTONOMY,
   },
   {
     id: 'priscilla-osei',
@@ -1826,12 +1809,12 @@ export const LOCAL_CHARACTER_SEEDS: readonly CharacterSeed[] = [
     ],
     modelRouting: {
       primary: OPENAI_GPT_OSS_120B,
-      small: OPENAI_GPT_OSS_20B,
+      small: OPENAI_GPT_OSS_120B,
       large: OPENAI_GPT_OSS_120B,
     },
     riskTolerance: 'medium',
     planningHorizon: 'campaign',
-    autonomy: RED_TEAM_AUTONOMY,
+    autonomy: FULL_AUTONOMY,
   },
   {
     id: 'marcus-thorn',
@@ -1864,12 +1847,12 @@ export const LOCAL_CHARACTER_SEEDS: readonly CharacterSeed[] = [
     ],
     modelRouting: {
       primary: OPENAI_GPT_OSS_120B,
-      small: OPENAI_GPT_OSS_20B,
+      small: OPENAI_GPT_OSS_120B,
       large: OPENAI_GPT_OSS_120B,
     },
     riskTolerance: 'high',
     planningHorizon: 'single',
-    autonomy: RED_TEAM_AUTONOMY,
+    autonomy: FULL_AUTONOMY,
   },
   {
     id: 'yuki-tanabe',
@@ -1903,12 +1886,12 @@ export const LOCAL_CHARACTER_SEEDS: readonly CharacterSeed[] = [
     ],
     modelRouting: {
       primary: KIMI_K2,
-      small: OPENAI_GPT_OSS_20B,
+      small: OPENAI_GPT_OSS_120B,
       large: KIMI_K2,
     },
     riskTolerance: 'medium',
     planningHorizon: 'campaign',
-    autonomy: RED_TEAM_AUTONOMY,
+    autonomy: FULL_AUTONOMY,
   },
   {
     id: 'amir-hassani',
@@ -1941,12 +1924,12 @@ export const LOCAL_CHARACTER_SEEDS: readonly CharacterSeed[] = [
     ],
     modelRouting: {
       primary: OPENAI_GPT_OSS_120B,
-      small: OPENAI_GPT_OSS_20B,
+      small: OPENAI_GPT_OSS_120B,
       large: OPENAI_GPT_OSS_120B,
     },
     riskTolerance: 'high',
     planningHorizon: 'single',
-    autonomy: RED_TEAM_AUTONOMY,
+    autonomy: FULL_AUTONOMY,
   },
   {
     id: 'katarina-novak',
@@ -1983,12 +1966,12 @@ export const LOCAL_CHARACTER_SEEDS: readonly CharacterSeed[] = [
     ],
     modelRouting: {
       primary: KIMI_K2,
-      small: OPENAI_GPT_OSS_20B,
+      small: OPENAI_GPT_OSS_120B,
       large: KIMI_K2,
     },
     riskTolerance: 'medium',
     planningHorizon: 'campaign',
-    autonomy: RED_TEAM_AUTONOMY,
+    autonomy: FULL_AUTONOMY,
   },
   {
     id: 'luis-herrera',
@@ -2021,12 +2004,12 @@ export const LOCAL_CHARACTER_SEEDS: readonly CharacterSeed[] = [
     ],
     modelRouting: {
       primary: OPENAI_GPT_OSS_120B,
-      small: OPENAI_GPT_OSS_20B,
+      small: OPENAI_GPT_OSS_120B,
       large: OPENAI_GPT_OSS_120B,
     },
     riskTolerance: 'medium',
     planningHorizon: 'swing',
-    autonomy: RED_TEAM_AUTONOMY,
+    autonomy: FULL_AUTONOMY,
   },
   {
     id: 'fatima-benali',
@@ -2064,12 +2047,12 @@ export const LOCAL_CHARACTER_SEEDS: readonly CharacterSeed[] = [
     ],
     modelRouting: {
       primary: KIMI_K2,
-      small: OPENAI_GPT_OSS_20B,
+      small: OPENAI_GPT_OSS_120B,
       large: KIMI_K2,
     },
     riskTolerance: 'medium',
     planningHorizon: 'campaign',
-    autonomy: RED_TEAM_AUTONOMY,
+    autonomy: FULL_AUTONOMY,
   },
   {
     id: 'stefan-vogt',
@@ -2102,12 +2085,12 @@ export const LOCAL_CHARACTER_SEEDS: readonly CharacterSeed[] = [
     ],
     modelRouting: {
       primary: OPENAI_GPT_OSS_120B,
-      small: OPENAI_GPT_OSS_20B,
+      small: OPENAI_GPT_OSS_120B,
       large: OPENAI_GPT_OSS_120B,
     },
     riskTolerance: 'high',
     planningHorizon: 'swing',
-    autonomy: RED_TEAM_AUTONOMY,
+    autonomy: FULL_AUTONOMY,
   },
   {
     id: 'mei-xia-wong',
@@ -2144,12 +2127,12 @@ export const LOCAL_CHARACTER_SEEDS: readonly CharacterSeed[] = [
     ],
     modelRouting: {
       primary: KIMI_K2,
-      small: OPENAI_GPT_OSS_20B,
+      small: OPENAI_GPT_OSS_120B,
       large: KIMI_K2,
     },
     riskTolerance: 'medium',
     planningHorizon: 'campaign',
-    autonomy: RED_TEAM_AUTONOMY,
+    autonomy: FULL_AUTONOMY,
   },
   {
     id: 'dmitri-volkov',
@@ -2182,12 +2165,12 @@ export const LOCAL_CHARACTER_SEEDS: readonly CharacterSeed[] = [
     ],
     modelRouting: {
       primary: OPENAI_GPT_OSS_120B,
-      small: OPENAI_GPT_OSS_20B,
+      small: OPENAI_GPT_OSS_120B,
       large: OPENAI_GPT_OSS_120B,
     },
     riskTolerance: 'high',
     planningHorizon: 'single',
-    autonomy: RED_TEAM_AUTONOMY,
+    autonomy: FULL_AUTONOMY,
   },
   {
     id: 'ada-okonkwo',
@@ -2220,15 +2203,16 @@ export const LOCAL_CHARACTER_SEEDS: readonly CharacterSeed[] = [
     ],
     modelRouting: {
       primary: KIMI_K2,
-      small: OPENAI_GPT_OSS_20B,
+      small: OPENAI_GPT_OSS_120B,
       large: KIMI_K2,
     },
     riskTolerance: 'medium',
     planningHorizon: 'swing',
-    autonomy: RED_TEAM_AUTONOMY,
+    autonomy: FULL_AUTONOMY,
   },
 ] as const;
 
+/** Canonical simulation roster (48 characters). */
 export const CANONICAL_SIMULATION_CHARACTER_IDS = [
   // Blue team (10) + Gray team (18)
   'imani-okafor',
@@ -2259,7 +2243,7 @@ export const CANONICAL_SIMULATION_CHARACTER_IDS = [
   'kaito-mori',
   'pablo-quispe',
   'diego-ibarra',
-  // Red team (22) — expanded for adversarial training signal density
+  // Red team (20) — expanded for adversarial training signal density
   'daniel-mercer',
   'eva-kovac',
   'rafael-costa',
@@ -2421,7 +2405,7 @@ function buildCharacterSheet(seed: CharacterSeed): FeedCharacterSheet {
     system: buildSystem(seed),
     bio: buildBio(seed),
     lore: buildLore(seed),
-    topics: seed.topicFocus,
+    topics: [...seed.topicFocus],
     adjectives: buildAdjectives(seed),
     style: buildStyle(seed),
     messageExamples: buildMessageExamples(seed),
@@ -2442,7 +2426,7 @@ function buildCharacterSheet(seed: CharacterSeed): FeedCharacterSheet {
           : seed.competence === 'high'
             ? 1100
             : 900,
-      groq: seed.modelRouting,
+      groq: { ...seed.modelRouting },
     },
     feed: {
       alignment: seed.alignment,
@@ -2452,15 +2436,15 @@ function buildCharacterSheet(seed: CharacterSeed): FeedCharacterSheet {
       region: seed.region,
       gender: seed.gender,
       pronouns: seed.pronouns,
-      motivations: seed.motivations,
-      fears: seed.fears,
+      motivations: [...seed.motivations],
+      fears: [...seed.fears],
       scamProfile: seed.scamProfile,
       competence: seed.competence,
       caution: seed.caution,
       deception: seed.deception,
       socialStyle: seed.socialStyle,
       tradingStyle: seed.tradingStyle,
-      autonomy: seed.autonomy,
+      autonomy: { ...seed.autonomy },
       datasetTags: [
         `alignment:${seed.alignment}`,
         `team:${seed.team}`,

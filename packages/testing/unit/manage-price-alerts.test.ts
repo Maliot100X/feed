@@ -20,6 +20,7 @@ let mockDbSelectLimit: ReturnType<typeof mock>;
 let mockDbSelectWhere: ReturnType<typeof mock>;
 let mockDbSelectFrom: ReturnType<typeof mock>;
 let mockDbSelect: ReturnType<typeof mock>;
+let mockDbUpdateReturning: ReturnType<typeof mock>;
 let mockDbUpdateWhere: ReturnType<typeof mock>;
 let mockDbUpdateSet: ReturnType<typeof mock>;
 let mockDbUpdate: ReturnType<typeof mock>;
@@ -29,7 +30,9 @@ function resetDbMocks() {
   mockDbSelectWhere = mock(() => ({ limit: mockDbSelectLimit }));
   mockDbSelectFrom = mock(() => ({ where: mockDbSelectWhere }));
   mockDbSelect = mock(() => ({ from: mockDbSelectFrom }));
-  mockDbUpdateWhere = mock(async () => []);
+  // Default: compare-and-set matched the row
+  mockDbUpdateReturning = mock(async () => [{ id: 'cfg-1' }]);
+  mockDbUpdateWhere = mock(() => ({ returning: mockDbUpdateReturning }));
   mockDbUpdateSet = mock(() => ({ where: mockDbUpdateWhere }));
   mockDbUpdate = mock(() => ({ set: mockDbUpdateSet }));
 }
@@ -49,7 +52,18 @@ mock.module('@feed/db', () => ({
   },
   eq: (a: unknown, b: unknown) => ({ op: 'eq', a, b }),
   and: (...args: unknown[]) => ({ op: 'and', args }),
+  sql: (strings: TemplateStringsArray, ...values: unknown[]) => ({
+    op: 'sql',
+    strings,
+    values,
+  }),
   count: () => 'count',
+  chatParticipants: {
+    id: 'chatParticipants.id',
+    chatId: 'chatParticipants.chatId',
+    userId: 'chatParticipants.userId',
+    isActive: 'chatParticipants.isActive',
+  },
   userAgentConfigs: {
     id: 'userAgentConfigs.id',
     userId: 'userAgentConfigs.userId',
@@ -235,6 +249,7 @@ describe('setPriceAlertAction', () => {
   });
 
   test('creates alert with custom cooldown and group delivery', async () => {
+    mockDbSelectLimit.mockResolvedValueOnce([{ id: 'membership-1' }]); // member
     mockDbSelectLimit.mockResolvedValueOnce([{ id: 'cfg-1', priceAlerts: [] }]);
 
     const result = await setPriceAlertAction.handler(
@@ -288,8 +303,88 @@ describe('setPriceAlertAction', () => {
     const alerts = setArg.priceAlerts as Array<Record<string, unknown>>;
     expect(alerts).toHaveLength(1); // Still 1 alert (updated, not added)
     expect(alerts[0]!.threshold).toBe(0.8);
-    expect(alerts[0]!.lastTriggeredAt).toBeUndefined(); // Reset on update
+    expect(alerts[0]!.lastTriggeredAt).toBeUndefined(); // Reset: threshold changed
     expect(alerts[0]!.enabled).toBe(true); // Re-enabled on update
+  });
+
+  test('keeps lastTriggeredAt when threshold is unchanged', async () => {
+    const existingAlert = makeAlert({
+      id: 'existing-alert',
+      threshold: 0.5,
+      lastTriggeredAt: '2025-01-01T00:00:00.000Z',
+    });
+    mockDbSelectLimit.mockResolvedValueOnce([
+      { id: 'cfg-1', priceAlerts: [existingAlert] },
+    ]);
+
+    await setPriceAlertAction.handler(
+      mockRuntime,
+      mockMessage,
+      makeState({
+        tokenSymbol: 'OPENAGI',
+        condition: 'below',
+        threshold: 0.5,
+        cooldownMinutes: 60,
+      })
+    );
+
+    const setArg = mockDbUpdateSet.mock.calls[0]![0] as Record<string, unknown>;
+    const alerts = setArg.priceAlerts as Array<Record<string, unknown>>;
+    expect(alerts[0]!.lastTriggeredAt).toBe('2025-01-01T00:00:00.000Z');
+    expect(alerts[0]!.cooldownMinutes).toBe(60);
+  });
+
+  test('rejects non-finite thresholds and invalid cooldowns/channels', async () => {
+    for (const params of [
+      { threshold: Number.POSITIVE_INFINITY },
+      { threshold: Number.NaN },
+      { threshold: 1, cooldownMinutes: -5 },
+      { threshold: 1, cooldownMinutes: 1.5 },
+      { threshold: 1, deliveryChannel: 'email' },
+      { threshold: 1, tokenSymbol: 'BAD SYMBOL!' },
+    ]) {
+      const result = await setPriceAlertAction.handler(
+        mockRuntime,
+        mockMessage,
+        makeState({ tokenSymbol: 'OPENAGI', condition: 'below', ...params })
+      );
+      expect(result!.success).toBe(false);
+    }
+    expect(mockDbUpdate).not.toHaveBeenCalled();
+  });
+
+  test('rejects group delivery to a chat the agent is not a member of', async () => {
+    mockDbSelectLimit.mockResolvedValueOnce([]); // no membership
+
+    const result = await setPriceAlertAction.handler(
+      mockRuntime,
+      mockMessage,
+      makeState({
+        tokenSymbol: 'OPENAGI',
+        condition: 'below',
+        threshold: 1,
+        deliveryChannel: 'group',
+        deliveryChatId: 'someone-elses-chat',
+      })
+    );
+
+    expect(result!.success).toBe(false);
+    expect(result!.error).toBe('Not a member of delivery chat');
+    expect(mockDbUpdate).not.toHaveBeenCalled();
+  });
+
+  test('reports a concurrent modification instead of overwriting', async () => {
+    mockDbSelectLimit.mockResolvedValueOnce([{ id: 'cfg-1', priceAlerts: [] }]);
+    mockDbUpdateReturning.mockResolvedValueOnce([]); // row changed since read
+
+    const result = await setPriceAlertAction.handler(
+      mockRuntime,
+      mockMessage,
+      makeState({ tokenSymbol: 'OPENAGI', condition: 'below', threshold: 1 })
+    );
+
+    expect(result!.success).toBe(false);
+    expect(result!.error).toBe('Concurrent update');
   });
 
   test('preserves other alerts when updating one', async () => {
@@ -567,7 +662,7 @@ describe('removePriceAlertAction', () => {
     expect(result!.text).toContain('configuration not found');
   });
 
-  test('removes first matching alert when no condition specified', async () => {
+  test('rejects ambiguous removal by symbol without condition', async () => {
     const alerts = [
       makeAlert({ id: 'a1', tokenSymbol: 'OPENAGI', condition: 'below' }),
       makeAlert({ id: 'a2', tokenSymbol: 'OPENAGI', condition: 'above' }),
@@ -583,10 +678,8 @@ describe('removePriceAlertAction', () => {
       makeState({ tokenSymbol: 'OPENAGI' }) // No condition
     );
 
-    expect(result!.success).toBe(true);
-    // Should remove first match (a1)
-    expect((result!.data?.removedAlert as Record<string, unknown>)?.id).toBe(
-      'a1'
-    );
+    expect(result!.success).toBe(false);
+    expect(result!.error).toBe('Ambiguous alert selector');
+    expect(mockDbUpdate).not.toHaveBeenCalled();
   });
 });

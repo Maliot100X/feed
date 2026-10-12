@@ -3,10 +3,9 @@
  *
  * @description Dedicated admin page for viewing ALL group chats in the system.
  * Provides comprehensive debug view with participants, messages, and statistics.
- * Accessible on localhost without authentication for debugging.
  *
  * @page /admin/groups
- * @access Admin / Localhost Debug
+ * @access Admin
  */
 
 'use client';
@@ -22,9 +21,10 @@ import {
   User as UserIcon,
   Users,
 } from 'lucide-react';
-import { useCallback, useEffect, useState, useTransition } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { z } from 'zod';
 import { AdminStandalonePage } from '@/components/admin/AdminStandalonePage';
+import { apiUrl } from '@/utils/api-url';
 
 /**
  * Participant schema for validation.
@@ -80,53 +80,57 @@ export default function AdminGroupsPage() {
     'createdAt' | 'memberCount' | 'messageCount'
   >('createdAt');
   const [sortOrder, setSortOrder] = useState<'asc' | 'desc'>('desc');
-  const [isRefreshing, startRefresh] = useTransition();
+  // Only the latest request (e.g. after a sort change) may update state.
+  const latestRequest = useRef(0);
 
   const fetchGroups = useCallback(async () => {
-    startRefresh(async () => {
-      setIsLoading(true);
-      setError(null);
+    const requestId = ++latestRequest.current;
+    setIsLoading(true);
+    setError(null);
 
+    let nextError: string | null = null;
+    let nextGroups: GroupChat[] | null = null;
+    try {
       const response = await fetch(
-        `/api/admin/groups?sortBy=${sortBy}&sortOrder=${sortOrder}`
-      ).catch((err: Error) => {
-        logger.error(
-          'Failed to fetch groups',
-          err instanceof Error ? err : { error: err },
-          'AdminGroupsPage'
-        );
-        setError('Failed to fetch groups. Are you on localhost?');
-        setIsLoading(false);
-        throw err;
-      });
-
+        apiUrl(`/api/admin/groups?sortBy=${sortBy}&sortOrder=${sortOrder}`)
+      );
       if (!response.ok) {
         const errorText = await response.text();
         logger.error('API error', { errorText }, 'AdminGroupsPage');
-        setError(`API error: ${response.status} - ${errorText}`);
-        setIsLoading(false);
-        return;
+        nextError = `API error: ${response.status} - ${errorText}`;
+      } else {
+        const data = await response.json();
+        const validation = z
+          .array(GroupChatSchema)
+          .safeParse(data.data?.groups);
+        if (validation.success) {
+          nextGroups = validation.data;
+        } else {
+          logger.error(
+            'Validation error',
+            { error: validation.error },
+            'AdminGroupsPage'
+          );
+          nextError = 'Invalid group data structure from API';
+        }
       }
+    } catch (err) {
+      logger.error(
+        'Failed to fetch groups',
+        err instanceof Error ? err : { error: err },
+        'AdminGroupsPage'
+      );
+      nextError = err instanceof Error ? err.message : 'Failed to fetch groups';
+    }
 
-      const data = await response.json();
-      const validation = z.array(GroupChatSchema).safeParse(data.data?.groups);
-      if (!validation.success) {
-        logger.error(
-          'Validation error',
-          { error: validation.error },
-          'AdminGroupsPage'
-        );
-        setError('Invalid group data structure from API');
-        setIsLoading(false);
-        return;
-      }
-      setGroups(validation.data || []);
-      setIsLoading(false);
-    });
+    if (requestId !== latestRequest.current) return;
+    if (nextGroups) setGroups(nextGroups);
+    setError(nextError);
+    setIsLoading(false);
   }, [sortBy, sortOrder]);
 
   useEffect(() => {
-    fetchGroups();
+    void fetchGroups();
   }, [fetchGroups]);
 
   const toggleExpanded = (groupId: string) => {
@@ -202,8 +206,8 @@ export default function AdminGroupsPage() {
             </div>
           </div>
           <button
-            onClick={fetchGroups}
-            disabled={isLoading || isRefreshing}
+            onClick={() => void fetchGroups()}
+            disabled={isLoading}
             className={cn(
               'flex items-center gap-2 rounded-lg px-4 py-2',
               'bg-primary text-primary-foreground',
@@ -211,12 +215,7 @@ export default function AdminGroupsPage() {
               'disabled:cursor-not-allowed disabled:opacity-50'
             )}
           >
-            <RefreshCw
-              className={cn(
-                'h-4 w-4',
-                (isLoading || isRefreshing) && 'animate-spin'
-              )}
-            />
+            <RefreshCw className={cn('h-4 w-4', isLoading && 'animate-spin')} />
             Refresh
           </button>
         </div>
@@ -308,10 +307,6 @@ export default function AdminGroupsPage() {
       {error && (
         <div className="mb-4 rounded-lg border border-red-500/20 bg-red-500/10 p-4">
           <p className="text-red-600 dark:text-red-400">{error}</p>
-          <p className="mt-2 text-red-600/70 text-sm dark:text-red-400/70">
-            Make sure the backend is running and you&apos;re accessing from
-            localhost.
-          </p>
         </div>
       )}
 

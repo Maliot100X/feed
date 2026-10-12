@@ -210,13 +210,14 @@ class InMemoryNpcTradeRateLimitProvider implements NpcTradeRateLimitProvider {
   cleanupStaleEntries(): number {
     const now = Date.now();
     const staleThresholdMs = 24 * 60 * 60 * 1000; // 24 hours
-    let cleaned = 0;
+    // Count each NPC once even if it is removed from both maps
+    const cleanedNpcIds = new Set<string>();
 
     // Clean up lastTradeTime entries older than 24 hours
     for (const [npcId, timestamp] of this.lastTradeTime) {
       if (now - timestamp > staleThresholdMs) {
         this.lastTradeTime.delete(npcId);
-        cleaned++;
+        cleanedNpcIds.add(npcId);
       }
     }
 
@@ -225,12 +226,10 @@ class InMemoryNpcTradeRateLimitProvider implements NpcTradeRateLimitProvider {
     for (const [npcId, data] of this.dailyTradeCount) {
       if (data.date !== today) {
         this.dailyTradeCount.delete(npcId);
-        // Only count if not already cleaned from lastTradeTime
-        if (!this.lastTradeTime.has(npcId)) {
-          cleaned++;
-        }
+        cleanedNpcIds.add(npcId);
       }
     }
+    const cleaned = cleanedNpcIds.size;
 
     if (cleaned > 0) {
       logger.debug(

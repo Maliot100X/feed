@@ -6,6 +6,12 @@ import { memo, useMemo, useState } from 'react';
 import { Skeleton } from '@/components/shared/Skeleton';
 import type { MarketKey } from '@/stores/marketWatchlistStore';
 import type { PerpMarket, PredictionMarket } from '@/types/markets';
+import {
+  formatTimeLeft,
+  getYesProbability,
+  type PredictionSort,
+  sortPredictionMarkets,
+} from './predictionDashboard';
 
 type DashboardTab = 'perps' | 'predictions';
 type PerpSort =
@@ -15,24 +21,11 @@ type PerpSort =
   | 'volume'
   | 'openInterest'
   | 'fundingRate';
-type PredictionSort = 'question' | 'probability' | 'volume' | 'timeLeft';
 
 function formatCompact(n: number): string {
   if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`;
   if (n >= 1_000) return `${(n / 1_000).toFixed(1)}K`;
   return Math.round(n).toLocaleString();
-}
-
-function timeLeft(endDate: string | null | undefined): string {
-  if (!endDate) return '--';
-  const diff = new Date(endDate).getTime() - Date.now();
-  if (diff <= 0) return 'Ended';
-  const days = Math.floor(diff / 86_400_000);
-  if (days > 0) return `${days}d`;
-  const hours = Math.floor(diff / 3_600_000);
-  if (hours > 0) return `${hours}h`;
-  const mins = Math.floor(diff / 60_000);
-  return `${mins}m`;
 }
 
 interface MarketsDashboardProps {
@@ -117,31 +110,7 @@ export const MarketsDashboard = memo(function MarketsDashboard({
     if (q) {
       items = items.filter((m) => m.text.toLowerCase().includes(q));
     }
-    return [...items].sort((a, b) => {
-      const dir = predSortDesc ? -1 : 1;
-      switch (predSort) {
-        case 'question':
-          return dir * a.text.localeCompare(b.text);
-        case 'probability':
-          return dir * ((a.yesProbability ?? 0) - (b.yesProbability ?? 0));
-        case 'volume': {
-          const volA = Number(a.yesShares ?? 0) + Number(a.noShares ?? 0);
-          const volB = Number(b.yesShares ?? 0) + Number(b.noShares ?? 0);
-          return dir * (volA - volB);
-        }
-        case 'timeLeft': {
-          const tA = a.endDate
-            ? new Date(a.endDate).getTime()
-            : Number.MAX_SAFE_INTEGER;
-          const tB = b.endDate
-            ? new Date(b.endDate).getTime()
-            : Number.MAX_SAFE_INTEGER;
-          return dir * (tA - tB);
-        }
-        default:
-          return 0;
-      }
-    });
+    return sortPredictionMarkets(items, predSort, predSortDesc);
   }, [predictionMarkets, q, predSort, predSortDesc]);
 
   const loading = tab === 'perps' ? perpLoading : predictionLoading;
@@ -458,7 +427,7 @@ const PredictionsTable = memo(function PredictionsTable({
             align="right"
           />
           <SortHeader
-            label="Volume"
+            label="Shares"
             active={sort === 'volume'}
             desc={sortDesc}
             onClick={() => onSort('volume')}
@@ -475,7 +444,8 @@ const PredictionsTable = memo(function PredictionsTable({
       </thead>
       <tbody className="divide-y divide-border/50">
         {markets.map((m) => {
-          const yesPct = m.yesProbability != null ? m.yesProbability * 100 : 50;
+          const yesProbability = getYesProbability(m);
+          const yesPct = yesProbability === null ? null : yesProbability * 100;
           const vol = Number(m.yesShares ?? 0) + Number(m.noShares ?? 0);
           return (
             <tr
@@ -489,23 +459,32 @@ const PredictionsTable = memo(function PredictionsTable({
                 </div>
               </td>
               <td className="px-3 py-3 text-right">
-                <div className="flex items-center justify-end gap-2">
-                  <div className="h-1.5 w-16 overflow-hidden rounded-full bg-foreground/10">
-                    <div
-                      className="h-full rounded-full bg-blue-500"
-                      style={{ width: `${yesPct}%` }}
-                    />
-                  </div>
-                  <span className="font-mono font-semibold text-foreground text-xs tabular-nums">
-                    {yesPct.toFixed(0)}%
+                {yesPct === null ? (
+                  <span
+                    className="font-mono text-muted-foreground text-xs"
+                    title="Probability unavailable"
+                  >
+                    —
                   </span>
-                </div>
+                ) : (
+                  <div className="flex items-center justify-end gap-2">
+                    <div className="h-1.5 w-16 overflow-hidden rounded-full bg-foreground/10">
+                      <div
+                        className="h-full rounded-full bg-blue-500"
+                        style={{ width: `${yesPct}%` }}
+                      />
+                    </div>
+                    <span className="font-mono font-semibold text-foreground text-xs tabular-nums">
+                      {yesPct.toFixed(0)}%
+                    </span>
+                  </div>
+                )}
               </td>
               <td className="px-3 py-3 text-right font-mono text-muted-foreground text-xs tabular-nums">
                 {formatCompact(vol)}
               </td>
               <td className="px-3 py-3 text-right text-muted-foreground text-xs">
-                {timeLeft(m.endDate)}
+                {formatTimeLeft(m.endDate)}
               </td>
             </tr>
           );

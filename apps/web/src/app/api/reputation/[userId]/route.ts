@@ -52,8 +52,6 @@
  *                       type: number
  *                     winRate:
  *                       type: number
- *                 recentTrend:
- *                   type: number
  *                 trustLevel:
  *                   type: string
  *                 rank:
@@ -75,6 +73,7 @@
 
 import {
   addPublicReadHeaders,
+  NotFoundError,
   publicRateLimit,
   requireUserByIdentifier,
   withErrorHandling,
@@ -101,6 +100,7 @@ export const GET = withErrorHandling(async function GET(
 
   const user = await requireUserByIdentifier(userId);
 
+  // Ensures the metrics row exists (initializes it for new users).
   await getReputationBreakdown(user.id);
 
   const metrics = await db.agentPerformanceMetrics.findUnique({
@@ -114,39 +114,35 @@ export const GET = withErrorHandling(async function GET(
       averageFeedbackScore: true,
       reputationScore: true,
       trustLevel: true,
-      lastActivityAt: true,
     },
   });
+  if (!metrics) {
+    throw new NotFoundError('Reputation metrics');
+  }
 
   const rank = await db.agentPerformanceMetrics.count({
     where: {
       reputationScore: {
-        gt: metrics!.reputationScore,
+        gt: metrics.reputationScore,
       },
     },
   });
 
   const totalUsers = await db.agentPerformanceMetrics.count();
 
-  const sevenDaysAgo = new Date();
-  sevenDaysAgo.setDate(sevenDaysAgo.getDate() - 7);
-
-  const recentTrend = 0;
-
   const res = NextResponse.json({
     success: true,
     userId: user.id,
-    reputationPoints: Math.round(metrics!.reputationScore),
-    averageFeedbackScore: metrics!.averageFeedbackScore,
-    totalFeedbackReceived: metrics!.totalFeedbackCount,
+    reputationPoints: Math.round(metrics.reputationScore),
+    averageFeedbackScore: metrics.averageFeedbackScore,
+    totalFeedbackReceived: metrics.totalFeedbackCount,
     performance: {
-      gamesPlayed: metrics!.gamesPlayed,
-      gamesWon: metrics!.gamesWon,
-      averageGameScore: metrics!.averageGameScore,
-      winRate: metrics!.winRate,
+      gamesPlayed: metrics.gamesPlayed,
+      gamesWon: metrics.gamesWon,
+      averageGameScore: metrics.averageGameScore,
+      winRate: metrics.winRate,
     },
-    recentTrend,
-    trustLevel: metrics!.trustLevel,
+    trustLevel: metrics.trustLevel,
     rank: rank + 1,
     totalUsers,
   });

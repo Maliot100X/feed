@@ -14,9 +14,6 @@ describe('Agent Card Generator', () => {
       displayName: 'Test Trader Bot',
       bio: 'An autonomous trading agent specializing in prediction markets',
       profileImageUrl: 'https://example.com/avatar.png',
-      systemPrompt: 'Advanced market analysis and trading system',
-      personality: 'Analytical and risk-aware',
-      tradingStrategy: 'Mean reversion with momentum confirmation',
     };
 
     it('should generate a valid agent card', () => {
@@ -64,27 +61,17 @@ describe('Agent Card Generator', () => {
       expect(card.name).toBe('Agent agent-12');
     });
 
-    it('should fallback to system prompt when bio is null', () => {
-      const agentWithNoBio = {
-        ...mockAgent,
-        bio: null,
-      };
-      const card = generateAgentCardSync(agentWithNoBio);
-
-      expect(card.description).toBe(
-        'Advanced market analysis and trading system'
-      );
-    });
-
-    it('should fallback to default description when both bio and system are null', () => {
-      const agentWithNoDesc = {
-        ...mockAgent,
-        bio: null,
-        systemPrompt: null,
-      };
-      const card = generateAgentCardSync(agentWithNoDesc);
+    it('should fallback to default description (never the private system prompt) when bio is null', () => {
+      const card = generateAgentCardSync({ ...mockAgent, bio: null });
 
       expect(card.description).toBe('Autonomous agent on Feed platform');
+    });
+
+    it('should advertise the API-key security scheme', () => {
+      const card = generateAgentCardSync(mockAgent);
+
+      expect(card.security?.length).toBeGreaterThan(0);
+      expect(Object.keys(card.securitySchemes ?? {}).length).toBeGreaterThan(0);
     });
 
     it('should have Feed as provider', () => {

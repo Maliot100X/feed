@@ -7,22 +7,18 @@
  * - Saturation detection
  * - Expiry/cleanup
  *
- * NOTE: 6 tests are skipped due to Bun timer mocking limitations.
- * Bun's vi.spyOn(Date, 'now') doesn't affect `new Date()` calls,
- * making time-dependent tests unreliable.
- *
- * TODO: Re-enable these tests when Bun supports full timer mocking.
- * Tracking: https://github.com/oven-sh/bun/issues/5388
- * Skipped tests:
- * - "should update lastCoveredAt on subsequent tracks"
- * - "should update lastCoveredAt to extend lifetime"
- * - "should allow more posts after 30 minute cooldown"
- * - "should count recent events (within 1 hour)"
- * - "should clean up expired events"
- * - "should keep events that are not yet expired"
+ * Time is controlled with bun:test setSystemTime, which fixes both
+ * Date.now() and new Date(), so cooldown/expiry behavior runs deterministically.
  */
 
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import {
+  afterEach,
+  beforeEach,
+  describe,
+  expect,
+  it,
+  setSystemTime,
+} from 'bun:test';
 import { TopicDiversityService } from '../../services/topic-diversity-service';
 
 describe('TopicDiversityService - Event Deduplication', () => {
@@ -36,17 +32,17 @@ describe('TopicDiversityService - Event Deduplication', () => {
     });
     // Use a fixed time for deterministic tests
     mockNow = new Date('2025-01-04T12:00:00Z').getTime();
-    vi.spyOn(Date, 'now').mockReturnValue(mockNow);
+    setSystemTime(new Date(mockNow));
   });
 
   afterEach(() => {
-    vi.restoreAllMocks();
+    setSystemTime();
   });
 
   // Helper to advance mock time
   const advanceTime = (ms: number) => {
     mockNow += ms;
-    vi.spyOn(Date, 'now').mockReturnValue(mockNow);
+    setSystemTime(new Date(mockNow));
   };
 
   describe('trackEventCoverage', () => {
@@ -80,7 +76,7 @@ describe('TopicDiversityService - Event Deduplication', () => {
     });
 
     // Skip: Bun doesn't support full timer mocking - new Date() returns real time
-    it.skip('should update lastCoveredAt on subsequent tracks', () => {
+    it('should update lastCoveredAt on subsequent tracks', () => {
       service.trackEventCoverage(['ethereum', 'upgrade']);
 
       // Advance time by 1 hour
@@ -162,7 +158,7 @@ describe('TopicDiversityService - Event Deduplication', () => {
     });
 
     // Skip: Bun doesn't support full timer mocking - new Date() returns real time
-    it.skip('should allow more posts after 30 minute cooldown', () => {
+    it('should allow more posts after 30 minute cooldown', () => {
       service.trackEventCoverage(['cooldown', 'test']);
       service.trackEventCoverage(['cooldown', 'test']);
 
@@ -237,7 +233,7 @@ describe('TopicDiversityService - Event Deduplication', () => {
     });
 
     // Skip: Bun doesn't support full timer mocking - new Date() returns real time
-    it.skip('should count recent events (within 1 hour)', () => {
+    it('should count recent events (within 1 hour)', () => {
       service.trackEventCoverage(['recent', 'event']);
 
       // Advance 30 minutes
@@ -257,7 +253,7 @@ describe('TopicDiversityService - Event Deduplication', () => {
 
   describe('Event Expiry', () => {
     // Skip: Bun doesn't support full timer mocking - new Date() returns real time
-    it.skip('should clean up expired events', () => {
+    it('should clean up expired events', () => {
       service.trackEventCoverage(['old', 'event']);
 
       // Advance past expiry (12 hours + cleanup interval)
@@ -271,7 +267,7 @@ describe('TopicDiversityService - Event Deduplication', () => {
     });
 
     // Skip: Bun doesn't support full timer mocking - new Date() returns real time
-    it.skip('should keep events that are not yet expired', () => {
+    it('should keep events that are not yet expired', () => {
       service.trackEventCoverage(['fresh', 'event']);
 
       // Advance 6 hours (less than 12 hour expiry)
@@ -285,7 +281,7 @@ describe('TopicDiversityService - Event Deduplication', () => {
     });
 
     // Skip: Bun doesn't support full timer mocking - new Date() returns real time
-    it.skip('should update lastCoveredAt to extend lifetime', () => {
+    it('should update lastCoveredAt to extend lifetime', () => {
       service.trackEventCoverage(['renewed', 'event']);
 
       // Advance 10 hours

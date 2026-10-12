@@ -1640,9 +1640,12 @@ class FeedCRLConfig(SharedModelConfig):
 class TrajectoryFetcher:
     """Fetches pre-computed trajectories from Feed HTTP API."""
 
-    def __init__(self, feed_url: str, timeout: float = 30.0):
+    def __init__(self, feed_url: str, timeout: float = 30.0, auth_token: str | None = None):
         self.feed_url = feed_url.rstrip("/")
         self.timeout = timeout
+        # /api/crl/* requires the Feed CRON_SECRET as a bearer token.
+        token = auth_token if auth_token is not None else os.environ.get("CRON_SECRET", "")
+        self._headers: dict[str, str] = {"Authorization": f"Bearer {token}"} if token else {}
         self._last_cursor: str | None = None
         self._last_timestamp: str | None = None
 
@@ -1658,6 +1661,7 @@ class TrajectoryFetcher:
             resp = requests.get(
                 f"{self.feed_url}/api/crl/trajectories",
                 params=params,
+                headers=self._headers,
                 timeout=self.timeout,
             )
             resp.raise_for_status()
@@ -1693,6 +1697,7 @@ class TrajectoryFetcher:
             resp = requests.post(
                 f"{self.feed_url}/api/crl/trajectories/mark-trained",
                 json={"trajectoryIds": trajectory_ids, "batchId": batch_id},
+                headers=self._headers,
                 timeout=self.timeout,
             )
             resp.raise_for_status()
@@ -1706,6 +1711,7 @@ class TrajectoryFetcher:
         try:
             resp = requests.get(
                 f"{self.feed_url}/api/crl/identity-map",
+                headers=self._headers,
                 timeout=self.timeout,
             )
             resp.raise_for_status()

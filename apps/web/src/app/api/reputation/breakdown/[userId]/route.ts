@@ -79,6 +79,7 @@
 
 import {
   addPublicReadHeaders,
+  NotFoundError,
   publicRateLimit,
   requireUserByIdentifier,
   withErrorHandling,
@@ -105,15 +106,18 @@ export const GET = withErrorHandling(async function GET(
   const user = await requireUserByIdentifier(userId);
 
   const breakdown = await getReputationBreakdown(user.id);
+  if (!breakdown) {
+    throw new NotFoundError('Reputation metrics');
+  }
 
   const res = NextResponse.json({
     success: true,
     userId: user.id,
-    reputationScore: breakdown!.reputationScore,
-    trustLevel: breakdown!.trustLevel,
-    confidenceScore: breakdown!.confidenceScore,
-    breakdown: breakdown!.breakdown,
-    metrics: breakdown!.metrics,
+    reputationScore: breakdown.reputationScore,
+    trustLevel: breakdown.trustLevel,
+    confidenceScore: breakdown.confidenceScore,
+    breakdown: breakdown.breakdown,
+    metrics: breakdown.metrics,
     weights: {
       pnl: 0.4,
       feedback: 0.4,

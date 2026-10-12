@@ -22,6 +22,17 @@
  * Environment:
  *   SIMULATION_BRIDGE_PORT (default: 3001)
  *   DATABASE_URL (required for live game data)
+ *
+ * Data contract:
+ *   - Prediction markets and positions come from the database. Query failures
+ *     surface as HTTP 500 (never silently replaced with empty/synthetic data).
+ *   - Synthetic prediction markets are only served when /init is called with
+ *     `syntheticMarkets: true`; `marketState.marketSource` reports which.
+ *   - /execute balance accounting, close PnL and social impact are simulated
+ *     by this bridge (no real trade execution). Randomness is driven by the
+ *     /init `seed`, so runs are reproducible.
+ *   - /tick runs the real game tick; a failed tick returns HTTP 500 and does
+ *     not advance tickNumber.
  */
 
 import {
@@ -50,6 +61,7 @@ interface SimulationState {
   tickNumber: number;
   npcs: Map<string, NPCState>;
   seed: number;
+  syntheticMarkets: boolean;
 }
 
 // ---------------------------------------------------------------------------
@@ -61,7 +73,57 @@ const state: SimulationState = {
   tickNumber: 0,
   npcs: new Map(),
   seed: 0,
+  syntheticMarkets: false,
 };
+
+/** Deterministic PRNG (mulberry32) seeded from /init so runs are reproducible. */
+function createRng(seed: number): () => number {
+  let a = seed >>> 0;
+  return () => {
+    a = (a + 0x6d2b79f5) >>> 0;
+    let t = a;
+    t = Math.imul(t ^ (t >>> 15), t | 1);
+    t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
+
+let random = createRng(0);
+
+const SUPPORTED_ACTIONS = new Set([
+  'open_long',
+  'open_short',
+  'buy_yes',
+  'buy_no',
+  'sell_yes',
+  'sell_no',
+  'close_long',
+  'close_short',
+  'close_position',
+  'buy',
+  'sell',
+  'send_message',
+  'group_message',
+  'reply_chat',
+  'share_information',
+  'request_payment',
+  'refuse',
+  'block',
+  'report',
+  'ignore',
+  'escalate',
+  'wait',
+  'hold',
+]);
+
+/** Validate an optional trade amount: defaults to 100, must be finite and > 0. */
+function resolveAmount(amount: unknown): number | string {
+  if (amount === undefined || amount === null) return 100;
+  if (typeof amount !== 'number' || !Number.isFinite(amount) || amount <= 0) {
+    return `Invalid amount: ${JSON.stringify(amount)} (must be a finite number > 0)`;
+  }
+  return amount;
+}
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -96,66 +158,58 @@ function assignArchetypes(
 }
 
 async function getPredictionMarketsData() {
-  try {
-    const activeQuestions = await db
-      .select()
-      .from(questions)
-      .where(eq(questions.status, 'active'))
-      .orderBy(desc(questions.createdAt))
-      .limit(20);
+  const activeQuestions = await db
+    .select()
+    .from(questions)
+    .where(eq(questions.status, 'active'))
+    .orderBy(desc(questions.createdAt))
+    .limit(20);
 
-    return activeQuestions.map((q) => ({
-      id: q.id,
-      question: q.text ?? 'Unknown',
-      yesPrice: Number(
-        (q as Record<string, unknown>).yesPrice ??
-          (q as Record<string, unknown>).currentYesPrice ??
-          50
-      ),
-      noPrice: Number(
-        (q as Record<string, unknown>).noPrice ??
-          (q as Record<string, unknown>).currentNoPrice ??
-          50
-      ),
-    }));
-  } catch {
-    return [];
-  }
+  return activeQuestions.map((q) => ({
+    id: q.id,
+    question: q.text ?? 'Unknown',
+    yesPrice: Number(
+      (q as Record<string, unknown>).yesPrice ??
+        (q as Record<string, unknown>).currentYesPrice ??
+        50
+    ),
+    noPrice: Number(
+      (q as Record<string, unknown>).noPrice ??
+        (q as Record<string, unknown>).currentNoPrice ??
+        50
+    ),
+  }));
 }
 
 async function getPositionsForUser(npcId: string) {
-  try {
-    const predPositions = await db
-      .select()
-      .from(positionsTable)
-      .where(eq(positionsTable.userId, npcId));
+  const predPositions = await db
+    .select()
+    .from(positionsTable)
+    .where(eq(positionsTable.userId, npcId));
 
-    const perpPos = await db
-      .select()
-      .from(perpPositions)
-      .where(eq(perpPositions.userId, npcId));
+  const perpPos = await db
+    .select()
+    .from(perpPositions)
+    .where(eq(perpPositions.userId, npcId));
 
-    return [
-      ...predPositions.map((p) => ({
-        id: p.id,
-        marketType: 'prediction' as const,
-        marketId: String(p.questionId ?? ''),
-        side: p.side ? 'yes' : 'no',
-        size: Number(p.shares ?? 0),
-        unrealizedPnL: Number(p.pnl ?? 0),
-      })),
-      ...perpPos.map((p) => ({
-        id: p.id,
-        marketType: 'perp' as const,
-        ticker: p.ticker ?? '',
-        side: p.side ?? 'long',
-        size: Number(p.size ?? 0),
-        unrealizedPnL: Number(p.unrealizedPnL ?? 0),
-      })),
-    ];
-  } catch {
-    return [];
-  }
+  return [
+    ...predPositions.map((p) => ({
+      id: p.id,
+      marketType: 'prediction' as const,
+      marketId: String(p.questionId ?? ''),
+      side: p.side ? 'yes' : 'no',
+      size: Number(p.shares ?? 0),
+      unrealizedPnL: Number(p.pnl ?? 0),
+    })),
+    ...perpPos.map((p) => ({
+      id: p.id,
+      marketType: 'perp' as const,
+      ticker: p.ticker ?? '',
+      side: p.side ?? 'long',
+      size: Number(p.size ?? 0),
+      unrealizedPnL: Number(p.unrealizedPnL ?? 0),
+    })),
+  ];
 }
 
 /**
@@ -182,7 +236,7 @@ function generateSocialContext(npcId: string): {
     .map((n) => ({
       actorId: n.npcId,
       actorName: `agent-${n.npcId.slice(-3)}`,
-      sentiment: Math.random() * 2 - 1,
+      sentiment: random() * 2 - 1,
     }));
 
   // Generate simulated DMs from other agents
@@ -256,8 +310,12 @@ async function buildScenario(npcId: string): Promise<Record<string, unknown>> {
     getPositionsForUser(npc.npcId),
   ]);
 
-  // Use real data if available, fall back to synthetic
-  const markets = predData.length > 0 ? predData : generateSyntheticMarkets();
+  // Synthetic markets only when explicitly requested at /init — never as a
+  // silent substitute for missing or failed database data.
+  const marketSource = state.syntheticMarkets ? 'synthetic' : 'database';
+  const markets = state.syntheticMarkets
+    ? generateSyntheticMarkets()
+    : predData;
   const social = generateSocialContext(npcId);
 
   // Generate news relevant to agent's team
@@ -291,6 +349,7 @@ async function buildScenario(npcId: string): Promise<Record<string, unknown>> {
     marketState: {
       perpMarkets: [],
       predictionMarkets: markets,
+      marketSource,
     },
     positions: posData,
     recentNews: news,
@@ -455,6 +514,7 @@ Bun.serve({
           numNPCs?: number;
           seed?: number;
           archetypes?: string[];
+          syntheticMarkets?: boolean;
         };
 
         const numNPCs = body.numNPCs ?? 20;
@@ -477,6 +537,8 @@ Bun.serve({
         state.initialized = true;
         state.tickNumber = 0;
         state.seed = seed;
+        state.syntheticMarkets = body.syntheticMarkets === true;
+        random = createRng(seed);
 
         return Response.json(
           {
@@ -484,6 +546,7 @@ Bun.serve({
             npcIds,
             archetypes: archetypeMap,
             seed,
+            syntheticMarkets: state.syntheticMarkets,
           },
           { headers }
         );
@@ -526,87 +589,99 @@ Bun.serve({
         }
 
         const action = body.action;
+        if (!action || typeof action.type !== 'string') {
+          return Response.json(
+            { error: 'action.type is required' },
+            { status: 400, headers }
+          );
+        }
         let pnl = 0;
         let success = true;
         let error: string | undefined;
         let socialImpact: Record<string, number> = {};
+        const amountOrError = resolveAmount(action.amount);
 
-        switch (action.type) {
-          case 'open_long':
-          case 'open_short':
-          case 'buy_yes':
-          case 'buy_no':
-          case 'sell_yes':
-          case 'sell_no': {
-            const amount = action.amount ?? 100;
-            if (amount > npc.balance) {
-              success = false;
-              error = 'Insufficient balance';
-            } else {
-              npc.balance -= amount;
+        if (!SUPPORTED_ACTIONS.has(action.type)) {
+          success = false;
+          error = `Unsupported action type: ${action.type}`;
+        } else if (typeof amountOrError === 'string') {
+          success = false;
+          error = amountOrError;
+        } else
+          switch (action.type) {
+            case 'open_long':
+            case 'open_short':
+            case 'buy_yes':
+            case 'buy_no':
+            case 'sell_yes':
+            case 'sell_no': {
+              const amount = amountOrError;
+              if (amount > npc.balance) {
+                success = false;
+                error = 'Insufficient balance';
+              } else {
+                npc.balance -= amount;
+              }
+              break;
             }
-            break;
-          }
-          case 'close_long':
-          case 'close_short':
-          case 'close_position': {
-            const closeAmount = action.amount ?? 100;
-            pnl = (Math.random() - 0.4) * closeAmount * 0.2;
-            npc.balance += closeAmount + pnl;
-            break;
-          }
-          case 'buy':
-          case 'sell': {
-            const amt = action.amount ?? 100;
-            if (amt > npc.balance) {
-              success = false;
-              error = 'Insufficient balance';
-            } else {
-              npc.balance -= amt;
-              pnl = (Math.random() - 0.45) * amt * 0.3;
-              npc.balance += amt + pnl;
+            case 'close_long':
+            case 'close_short':
+            case 'close_position': {
+              const closeAmount = amountOrError;
+              pnl = (random() - 0.4) * closeAmount * 0.2;
+              npc.balance += closeAmount + pnl;
+              break;
             }
-            break;
+            case 'buy':
+            case 'sell': {
+              const amt = amountOrError;
+              if (amt > npc.balance) {
+                success = false;
+                error = 'Insufficient balance';
+              } else {
+                npc.balance -= amt;
+                pnl = (random() - 0.45) * amt * 0.3;
+                npc.balance += amt + pnl;
+              }
+              break;
+            }
+            case 'send_message':
+            case 'group_message':
+            case 'reply_chat':
+            case 'share_information':
+            case 'request_payment': {
+              const targetNpc = action.side
+                ? state.npcs.get(action.side)
+                : undefined;
+              const targetArchetype = targetNpc?.archetype ?? 'gray';
+              const isAdversarial =
+                (npc.archetype === 'red' && targetArchetype !== 'red') ||
+                (npc.archetype !== 'red' && targetArchetype === 'red');
+              socialImpact = {
+                likes_received: Math.floor(random() * 3),
+                replies_received: Math.floor(random() * 3),
+                reputation_delta: isAdversarial
+                  ? (random() - 0.5) * 4
+                  : random() * 2,
+              };
+              break;
+            }
+            case 'refuse':
+            case 'block':
+            case 'report':
+            case 'ignore':
+            case 'escalate': {
+              socialImpact = {
+                likes_received: 0,
+                replies_received: 0,
+                reputation_delta: 0.5,
+              };
+              break;
+            }
+            case 'wait':
+            case 'hold':
+              break;
           }
-          case 'send_message':
-          case 'group_message':
-          case 'reply_chat':
-          case 'share_information':
-          case 'request_payment': {
-            const targetNpc = action.side
-              ? state.npcs.get(action.side)
-              : undefined;
-            const targetArchetype = targetNpc?.archetype ?? 'gray';
-            const isAdversarial =
-              (npc.archetype === 'red' && targetArchetype !== 'red') ||
-              (npc.archetype !== 'red' && targetArchetype === 'red');
-            socialImpact = {
-              likes_received: Math.floor(Math.random() * 3),
-              replies_received: Math.floor(Math.random() * 3),
-              reputation_delta: isAdversarial
-                ? (Math.random() - 0.5) * 4
-                : Math.random() * 2,
-            };
-            break;
-          }
-          case 'refuse':
-          case 'block':
-          case 'report':
-          case 'ignore':
-          case 'escalate': {
-            socialImpact = {
-              likes_received: 0,
-              replies_received: 0,
-              reputation_delta: 0.5,
-            };
-            break;
-          }
-          case 'wait':
-          case 'hold':
-            break;
-          default:
-            break;
-        }
 
         const outcome = {
           success,
@@ -641,28 +716,23 @@ Bun.serve({
           );
         }
 
-        let events: Record<string, unknown>[] = [];
-        const marketChanges: Record<string, unknown>[] = [];
-
-        try {
-          const result = await executeGameTick(false);
-          state.tickNumber++;
-          events = [
-            { type: 'tick_completed', tick: state.tickNumber },
-            ...(result.questionsResolved > 0
-              ? [
-                  {
-                    type: 'questions_resolved',
-                    count: result.questionsResolved,
-                  },
-                ]
-              : []),
-          ];
-          marketChanges.push({ marketsUpdated: result.marketsUpdated });
-        } catch {
-          state.tickNumber++;
-          events = [{ type: 'tick_simulated', tick: state.tickNumber }];
-        }
+        // A failed tick propagates (HTTP 500) without advancing tickNumber.
+        const result = await executeGameTick(false);
+        state.tickNumber++;
+        const events: Record<string, unknown>[] = [
+          { type: 'tick_completed', tick: state.tickNumber },
+          ...(result.questionsResolved > 0
+            ? [
+                {
+                  type: 'questions_resolved',
+                  count: result.questionsResolved,
+                },
+              ]
+            : []),
+        ];
+        const marketChanges: Record<string, unknown>[] = [
+          { marketsUpdated: result.marketsUpdated },
+        ];
 
         return Response.json(
           {
@@ -680,6 +750,8 @@ Bun.serve({
         state.tickNumber = 0;
         state.npcs.clear();
         state.seed = 0;
+        state.syntheticMarkets = false;
+        random = createRng(0);
         trajectoryBuffer.length = 0;
         trajectorySeq = 0;
         return Response.json({ status: 'reset' }, { headers });

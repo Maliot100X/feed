@@ -79,7 +79,8 @@ export class PredictionPricing {
     side: 'yes' | 'no',
     usdAmount: number
   ): ShareCalculation {
-    if (usdAmount <= 0) throw new Error('Trade amount must be positive');
+    if (!Number.isFinite(usdAmount) || usdAmount <= 0)
+      throw new Error('Trade amount must be positive');
     const k = currentYesShares * currentNoShares;
     if (k <= 0) throw new Error('Market has insufficient liquidity');
 
@@ -130,7 +131,8 @@ export class PredictionPricing {
     side: 'yes' | 'no',
     sharesToSell: number
   ): ShareCalculation {
-    if (sharesToSell <= 0) throw new Error('Shares to sell must be positive');
+    if (!Number.isFinite(sharesToSell) || sharesToSell <= 0)
+      throw new Error('Shares to sell must be positive');
     const k = currentYesShares * currentNoShares;
     if (k <= 0) throw new Error('Market has insufficient liquidity');
 

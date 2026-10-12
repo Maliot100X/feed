@@ -121,6 +121,9 @@ export const GET = withErrorHandling(async (request: NextRequest) => {
 
   // Cap query length to prevent abuse
   const searchTerm = query.trim().toLowerCase().slice(0, MAX_QUERY_LENGTH);
+  // The db compat `contains` builds `%term%` without escaping, so escape LIKE
+  // wildcards to keep the search literal (e.g. "_" or "%" in a query).
+  const likeSafeTerm = searchTerm.replace(/[\\%_]/g, '\\$&');
 
   // Get blocked/muted users to exclude from search
   const [blockedIds, mutedIds, blockedByIds] = await Promise.all([
@@ -140,13 +143,13 @@ export const GET = withErrorHandling(async (request: NextRequest) => {
             OR: [
               {
                 username: {
-                  contains: searchTerm,
+                  contains: likeSafeTerm,
                   mode: 'insensitive',
                 },
               },
               {
                 displayName: {
-                  contains: searchTerm,
+                  contains: likeSafeTerm,
                   mode: 'insensitive',
                 },
               },
@@ -201,7 +204,12 @@ export const GET = withErrorHandling(async (request: NextRequest) => {
 
   logger.info(
     'Agent/NPC search completed',
-    { userId: user.userId, query: searchTerm, results: agents.length },
+    // Metadata only: do not log the raw user-entered query.
+    {
+      userId: user.userId,
+      queryLength: searchTerm.length,
+      results: agents.length,
+    },
     'GET /api/agents/search'
   );
 

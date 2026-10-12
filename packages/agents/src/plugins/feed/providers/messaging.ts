@@ -17,7 +17,6 @@ import type {
   ProviderResult,
   State,
 } from '@elizaos/core';
-import { logger } from '../../../shared/logger';
 import type { FeedRuntime } from '../types';
 // import type { A2AChatsResponse, A2AUnreadCountResponse, A2ANotificationsResponse } from '../../../types/a2a-responses' // Commented out - not needed
 
@@ -94,47 +93,38 @@ export const notificationsProvider: Provider = {
       );
     }
 
-    try {
-      const notificationsResult =
-        await feedRuntime.a2aClient.getNotifications(20);
-      const notifications = requireContextArray(
-        (
-          notificationsResult as {
-            notifications?: Array<{
-              id: string;
-              type: string;
-              message: string;
-              read: boolean;
-              createdAt: string | Date;
-            }>;
-          }
-        )?.notifications,
-        'notifications'
-      );
-      const unreadCount = requireContextNumber(
-        (notificationsResult as { unreadCount?: number })?.unreadCount,
-        'unreadCount'
-      );
+    const notificationsResult =
+      await feedRuntime.a2aClient.getNotifications(20);
+    const notifications = requireContextArray(
+      (
+        notificationsResult as {
+          notifications?: Array<{
+            id: string;
+            type: string;
+            message: string;
+            read: boolean;
+            createdAt: string | Date;
+          }>;
+        }
+      )?.notifications,
+      'notifications'
+    );
+    const unreadCount = requireContextNumber(
+      (notificationsResult as { unreadCount?: number })?.unreadCount,
+      'unreadCount'
+    );
 
-      if (notifications.length === 0) {
-        return { text: 'No notifications available.' };
-      }
-
-      const notificationsText = `Notifications (${unreadCount} unread):\n${notifications
-        .map(
-          (n, idx) =>
-            `${idx + 1}. [${n.read ? 'READ' : 'UNREAD'}] ${n.type}: ${n.message} (ID: ${n.id})`
-        )
-        .join('\n\n')}`;
-
-      return { text: notificationsText };
-    } catch (error) {
-      logger.error(
-        'Error fetching notifications via A2A',
-        { error, agentId: runtime.agentId },
-        'NotificationsProvider'
-      );
-      throw error;
+    if (notifications.length === 0) {
+      return { text: 'No notifications available.' };
     }
+
+    const notificationsText = `Notifications (${unreadCount} unread):\n${notifications
+      .map(
+        (n, idx) =>
+          `${idx + 1}. [${n.read ? 'READ' : 'UNREAD'}] ${n.type}: ${n.message} (ID: ${n.id})`
+      )
+      .join('\n\n')}`;
+
+    return { text: notificationsText };
   },
 };

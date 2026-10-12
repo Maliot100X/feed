@@ -58,6 +58,7 @@ import { asPublic } from '@feed/db';
 import { StaticDataRegistry } from '@feed/engine';
 import { logger } from '@feed/shared';
 import type { NextRequest } from 'next/server';
+import { NextResponse } from 'next/server';
 
 function mapAgent0SummaryToEntity(
   summary: Record<string, unknown>,
@@ -95,7 +96,15 @@ export const GET = withErrorHandling(async (request: NextRequest) => {
   const { searchParams } = new URL(request.url);
   const entityType = searchParams.get('type'); // 'users' | 'actors' | 'agents' | 'apps' | 'all'
   const search = searchParams.get('search') || '';
-  const onChainOnly = searchParams.get('onChainOnly') === 'true';
+
+  // The on-chain filter was removed; reject it instead of silently returning
+  // unfiltered results as if they were on-chain verified.
+  if (searchParams.get('onChainOnly') === 'true') {
+    return NextResponse.json(
+      { error: 'onChainOnly filter is no longer supported' },
+      { status: 400 }
+    );
+  }
 
   const { error, rateLimitInfo } = await publicRateLimit(request);
   if (error) return error;
@@ -104,8 +113,6 @@ export const GET = withErrorHandling(async (request: NextRequest) => {
   const fetchUsers = async () => {
     const dbOperation = async (db: DrizzleClient) => {
       const conditions: Record<string, unknown>[] = [];
-
-      void onChainOnly; // onChainOnly filter (Agent0/on-chain) removed in Phase 1.
 
       if (search) {
         conditions.push({
@@ -267,9 +274,11 @@ export const GET = withErrorHandling(async (request: NextRequest) => {
           personality: actor.personality,
           tier: actor.tier,
           role: actor.role,
-          balance: state?.tradingBalance?.toString() ?? '10000',
-          reputationPoints: state?.reputationPoints ?? 10000,
-          createdAt: state?.createdAt ?? new Date(),
+          // Missing actor state is reported as unknown (omitted), never as
+          // fabricated balances/reputation or a fake creation time.
+          balance: state?.tradingBalance?.toString(),
+          reputationPoints: state?.reputationPoints ?? undefined,
+          createdAt: state?.createdAt ?? undefined,
           stats: {
             pools: poolCounts[index] ?? 0,
             trades: tradeCounts[index] ?? 0,

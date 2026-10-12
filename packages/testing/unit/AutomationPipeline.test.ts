@@ -304,6 +304,12 @@ describeTests('AutomationPipeline - Unit Tests', () => {
       expect(result.ready).toBe(false);
       expect(result.reason).toContain('more trajectories');
       expect(result.stats.totalTrajectories).toBe(30);
+      // Thresholds are reported so the admin UI never hardcodes them
+      expect(result.thresholds).toEqual({
+        minTrajectories: 50,
+        minScenarioGroups: 10,
+        minDataQuality: 0.9,
+      });
     });
 
     test('should be not ready when insufficient scenario groups', async () => {

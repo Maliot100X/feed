@@ -39,8 +39,10 @@ export const CacheMonitoringQuerySchema = z.object({
  * Notifications query schema
  */
 export const NotificationsQuerySchema = PaginationSchema.extend({
+  page: z.coerce.number().int().positive().default(1),
+  limit: z.coerce.number().int().positive().max(100).default(20),
   unreadOnly: createQueryBooleanSchema(false),
-  type: z.string().optional(),
+  type: z.string().max(64).optional(),
 });
 
 /**
@@ -48,7 +50,7 @@ export const NotificationsQuerySchema = PaginationSchema.extend({
  */
 export const MarkNotificationsReadSchema = z
   .object({
-    notificationIds: z.array(SnowflakeIdSchema).optional(),
+    notificationIds: z.array(SnowflakeIdSchema).max(500).optional(),
     markAllAsRead: z.boolean().optional(),
   })
   .refine(

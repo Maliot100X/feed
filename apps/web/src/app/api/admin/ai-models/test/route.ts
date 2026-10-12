@@ -62,6 +62,12 @@ import { FeedLLMClient } from '@feed/engine';
 import { logger } from '@feed/shared';
 import type { NextRequest } from 'next/server';
 import { NextResponse } from 'next/server';
+import { z } from 'zod';
+
+const TestResponseSchema = z.object({
+  message: z.string(),
+  status: z.string(),
+});
 
 /**
  * POST /api/admin/ai-models/test
@@ -75,7 +81,7 @@ export const POST = withErrorHandling(async (req: NextRequest) => {
   const stats = client.getStats();
 
   // Audit log the test
-  logAdminModify({
+  await logAdminModify({
     adminId: admin.userId,
     ipAddress: getClientIp(req.headers) ?? undefined,
     resourceType: 'ai_models',
@@ -95,22 +101,19 @@ export const POST = withErrorHandling(async (req: NextRequest) => {
     'AIModelsTest'
   );
 
-  // Simple test prompt
+  // Simple test prompt. The prompt asks for exactly the flat JSON shape the
+  // schema describes; the result is validated rather than cast.
   const testPrompt = `Generate a brief test response (max 50 chars) confirming you're working.
 
-Return your response as XML in this exact format:
-<response>
-  <message>your test message here</message>
-  <status>ok</status>
-</response>`;
+Respond with JSON only, in this exact shape:
+{"message": "your test message here", "status": "ok"}`;
 
   const startTime = Date.now();
 
-  // Make test call
-  const rawResponse = await client.generateJSON<
-    | { message: string; status: string }
-    | { response: { message: string; status: string } }
-  >(
+  const rawResponse = await client.generateJSON<{
+    message: string;
+    status: string;
+  }>(
     testPrompt,
     {
       properties: {
@@ -125,14 +128,32 @@ Return your response as XML in this exact format:
       promptType: 'admin_test_ai_model',
     }
   );
-
-  // Handle XML structure
-  const response =
-    'response' in rawResponse && rawResponse.response
-      ? rawResponse.response
-      : (rawResponse as { message: string; status: string });
+  const parsed = TestResponseSchema.safeParse(rawResponse);
 
   const latency = Date.now() - startTime;
+
+  if (!parsed.success || parsed.data.status !== 'ok') {
+    logger.warn(
+      'AI model test returned an unexpected response',
+      { provider: stats.provider, model: stats.model, latency },
+      'AIModelsTest'
+    );
+    return NextResponse.json(
+      {
+        success: false,
+        error:
+          'Model responded but did not return the expected {message, status: "ok"} shape',
+        data: {
+          provider: stats.provider,
+          model: stats.model,
+          latency,
+          timestamp: new Date().toISOString(),
+        },
+      },
+      { status: 502 }
+    );
+  }
+  const response = parsed.data;
 
   logger.info(
     'AI model test successful',
@@ -150,7 +171,7 @@ Return your response as XML in this exact format:
     data: {
       provider: stats.provider,
       model: stats.model,
-      response: response,
+      response,
       latency,
       timestamp: new Date().toISOString(),
     },

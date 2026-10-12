@@ -1,26 +1,14 @@
 /**
- * Feed A2A Plugin for Eliza Agents
+ * Feed plugin for Eliza agents.
  *
- * Integration with Feed via A2A protocol.
- * Provides access to 10 core A2A methods for agent discovery, market data, portfolio, and payments.
- *
- * ⚠️ IMPORTANT: A2A SERVER IS REQUIRED
- * This plugin ONLY works with an active A2A connection.
- * There is no database fallback - A2A is the only supported mode.
- *
- * Features (all via A2A protocol):
- * - Market data (prediction markets & perpetuals)
- * - Portfolio management (balance, positions, P&L)
- * - Social interactions (posts, comments, likes)
- * - Messaging (DMs & group chats)
- * - Notifications
- * - Trading (buy/sell shares, open/close positions)
- *
- * Architecture:
- * - Providers: Read-only data access via A2A (7 providers)
- * - Actions: Write operations via A2A (9 actions)
- * - A2A Client: Direct access to all 74 A2A protocol methods
- * - No Database Fallback: A2A required for all operations
+ * - Providers: read context for the agent (some via the A2A client, some
+ *   directly from Feed's database; see `feedPlugin.providers`).
+ * - Actions: trading, social and messaging writes executed through the A2A
+ *   client (`./actions`), which validates the typed responses.
+ * - Runtime wiring: `enhanceRuntimeWithFeed` (integration-a2a-sdk.ts) attaches
+ *   the shared A2A client and registers the plugin. When A2A is explicitly
+ *   disabled (FEED_DISABLE_A2A), only database-backed providers are
+ *   registered and remote actions are omitted.
  */
 
 import type { Plugin } from '@elizaos/core';
@@ -52,10 +40,8 @@ import {
   marketsProvider,
   messagesProvider,
   notificationsProvider,
-  portfolioProvider,
   recentRelevantGroupContextProvider,
   sharedChatFactsProvider,
-  trendingProvider,
   trendingTopicsProvider,
   userProfileProvider,
   userWalletProvider,
@@ -70,97 +56,13 @@ export * from './services';
 export type { FeedRuntime } from './types';
 
 /**
- * Feed Plugin Export
- *
- * Provides comprehensive access to Feed via A2A protocol with
- * advanced autonomous capabilities including batch processing and
- * intelligent context-aware decision making.
- *
- * Providers (7):
- * - FEED_DASHBOARD: Comprehensive context dashboard (portfolio, markets, social, pending items)
- * - FEED_MARKETS: Market data for predictions and perpetuals
- * - FEED_PORTFOLIO: Agent portfolio, positions, and balance
- * - FEED_FEED: Social feed with recent posts
- * - FEED_TRENDING: Trending topics and tags
- * - FEED_MESSAGES: Unread messages and chats
- * - FEED_NOTIFICATIONS: Recent notifications
- *
- * Actions (9):
- * Trading:
- * - BUY_PREDICTION_SHARES: Buy YES/NO shares in prediction markets
- * - SELL_PREDICTION_SHARES: Sell shares and close prediction positions
- * - OPEN_PERP_POSITION: Open leveraged perpetual positions
- * - CLOSE_PERP_POSITION: Close perpetual positions
- *
- * Social:
- * - CREATE_POST: Post to the social feed
- * - COMMENT_ON_POST: Comment on posts
- * - LIKE_POST: Like posts
- *
- * Messaging:
- * - SEND_MESSAGE: Send messages in chats
- * - CREATE_GROUP: Create group chats
- *
- * Key Features:
- * ✅ Dashboard Provider - Complete agent state and environment view
- * ✅ Batch Response System - Intelligent evaluation of pending interactions
- * ✅ Full Trading Coverage - Buy/sell predictions, open/close perps
- * ✅ Social Integration - Posts, comments, likes, messaging
- * ✅ A2A Protocol - Active connection required unless explicit local mode is selected
- *
- * Integration:
- *
- * Basic Usage:
- * ```typescript
- * import { autonomousCoordinator, feedPlugin } from '@feed/agents'
- *
- * const runtime = new AgentRuntime({
- *   agentId: agent.id,
- *   character: agentCharacter,
- *   plugins: [feedPlugin]
- * })
- *
- * // Execute autonomous tick with full context
- * await autonomousCoordinator.executeAutonomousTick(agent.id, runtime)
- * ```
- *
- * Advanced Usage (With A2A Client):
- * ```typescript
- * import { A2AClient } from '@a2a-js/sdk/client'
- * import { feedPlugin } from '@feed/agents'
- *
- * const a2aClient = new A2AClient({
- *   endpoint: 'ws://feed.fun:8765',
- *   credentials: {
- *     address: agentWallet,
- *     privateKey: agentPrivateKey,
- *     tokenId: agentTokenId
- *   },
- *   capabilities: {
- *     strategies: ['momentum', 'contrarian'],
- *     markets: ['prediction', 'perpetual'],
- *     actions: ['trade', 'social', 'chat']
- *   }
- * })
- *
- * await a2aClient.connect()
- *
- * // Inject into runtime
- * runtime.a2aClient = a2aClient
- *
- * // Register plugin
- * runtime.registerPlugin(feedPlugin)
- * ```
- *
- * A2A failures are fatal. FEED_DISABLE_A2A explicitly selects local providers
- * and omits remote actions in AgentRuntimeManager.
- *
- * See: /src/lib/agents/AUTONOMOUS_AGENTS_GUIDE.md for complete documentation
+ * Feed Plugin Export. Usually registered by AgentRuntimeManager through
+ * `enhanceRuntimeWithFeed`; see the module header for the provider/action split.
  */
 export const feedPlugin: Plugin = {
   name: 'feed',
   description:
-    'Feed prediction market game integration for AI agents via A2A protocol. Provides access to all 73+ A2A methods for complete platform functionality including trading, social, messaging, and more.',
+    'Feed prediction market game integration for AI agents: market, portfolio and social context providers plus trading, social and messaging actions executed via A2A.',
 
   providers: [
     goalsProvider, // Agent goals, directives, and constraints - highest priority context
@@ -168,10 +70,8 @@ export const feedPlugin: Plugin = {
     agentWalletProvider, // Agent's own complete wallet & investments
     marketsProvider,
     marketMoversProvider, // Top gainers and losers
-    portfolioProvider,
     feedProvider,
-    trendingProvider,
-    trendingTopicsProvider, // Database-backed trending topics
+    trendingTopicsProvider, // Trending tags and topics (A2A getTrendingTags)
     headlinesProvider, // Recent news headlines
     messagesProvider,
     notificationsProvider,
@@ -185,11 +85,6 @@ export const feedPlugin: Plugin = {
   ],
 
   evaluators: [sharedChatContextEvaluator],
-
-  /**
-   * Trust tracking and performance evaluation moved to plugin-experience.
-   * See: marketOutcomeEvaluator in plugin-experience/src/evaluators
-   */
 
   actions: [
     // Trading actions
@@ -210,52 +105,26 @@ export const feedPlugin: Plugin = {
 };
 
 /**
- * Initialize the plugin with an A2A client (Manual Setup)
+ * Initialize the plugin with an A2A client (manual setup for standalone
+ * runtimes; AgentRuntimeManager normally does this). The A2A client is
+ * resolved from the agent's identity via `initializeAgentA2AClient`.
  *
- * NOTE: This is typically not needed as the plugin auto-initializes via
- * AgentRuntimeManager. Use this only for custom/standalone setups.
- *
- * A2A connection is REQUIRED - will throw if connection fails
+ * Throws if no A2A connection can be established.
  */
-export async function initializeFeedPlugin(
-  runtime: {
-    a2aClient?: import('./integration-a2a-sdk').FeedA2AClient | null;
-    registerPlugin?: (plugin: Plugin) => void | Promise<void>;
-    agentId?: string;
-  },
-  config: {
-    endpoint: string;
-    credentials: {
-      address: string;
-      privateKey: string;
-      tokenId?: number;
-    };
-    capabilities?: {
-      strategies?: string[];
-      markets?: string[];
-      actions?: string[];
-      version?: string;
-    };
-  }
-) {
-  logger.info('Initializing Feed plugin with A2A SDK', {
-    endpoint: config.endpoint,
-  });
-
-  // Use A2A client - requires agentId from runtime
+export async function initializeFeedPlugin(runtime: {
+  a2aClient?: import('./integration-a2a-sdk').FeedA2AClient | null;
+  registerPlugin?: (plugin: Plugin) => void | Promise<void>;
+  agentId?: string;
+}) {
   if (!runtime.agentId) {
     throw new Error('Runtime must have agentId to initialize A2A client');
   }
 
   const a2aClient = await initializeAgentA2AClient(runtime.agentId);
-
   if (!a2aClient) throw new Error('An active A2A connection is required');
-  logger.debug('A2A client ready');
 
-  // Inject into runtime
   runtime.a2aClient = a2aClient;
 
-  // Register plugin
   if (runtime.registerPlugin) {
     await runtime.registerPlugin(feedPlugin);
     logger.debug('Feed plugin registered with A2A client');

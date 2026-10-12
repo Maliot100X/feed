@@ -1,4 +1,10 @@
-import { authenticate, successResponse, withErrorHandling } from '@feed/api';
+import {
+  authenticate,
+  InternalServerError,
+  NotFoundError,
+  successResponse,
+  withErrorHandling,
+} from '@feed/api';
 import { db, eq, users } from '@feed/db';
 import {
   DEFAULT_NOTIFICATION_DIGEST_SETTINGS,
@@ -15,18 +21,27 @@ const DigestSettingsSchema = z.object({
   deliveryChannel: z.enum(['in-app', 'email', 'both']),
 });
 
+const digestColumns = {
+  notificationDigestEnabled: users.notificationDigestEnabled,
+  notificationDigestFrequency: users.notificationDigestFrequency,
+  notificationDigestDeliveryChannel: users.notificationDigestDeliveryChannel,
+};
+
+/** Validates stored enum strings instead of casting them. */
 function toSettings(row: {
   notificationDigestEnabled: boolean;
   notificationDigestFrequency: string;
   notificationDigestDeliveryChannel: string;
 }): NotificationDigestSettings {
-  return {
+  const parsed = DigestSettingsSchema.safeParse({
     digestEnabled: row.notificationDigestEnabled,
-    frequency:
-      row.notificationDigestFrequency as NotificationDigestSettings['frequency'],
-    deliveryChannel:
-      row.notificationDigestDeliveryChannel as NotificationDigestSettings['deliveryChannel'],
-  };
+    frequency: row.notificationDigestFrequency,
+    deliveryChannel: row.notificationDigestDeliveryChannel,
+  });
+  if (!parsed.success) {
+    throw new InternalServerError('Stored digest settings are invalid');
+  }
+  return parsed.data;
 }
 
 export const GET = withErrorHandling(async (request: NextRequest) => {
@@ -34,19 +49,18 @@ export const GET = withErrorHandling(async (request: NextRequest) => {
 
   try {
     const [user] = await db
-      .select({
-        notificationDigestEnabled: users.notificationDigestEnabled,
-        notificationDigestFrequency: users.notificationDigestFrequency,
-        notificationDigestDeliveryChannel:
-          users.notificationDigestDeliveryChannel,
-      })
+      .select(digestColumns)
       .from(users)
       .where(eq(users.id, authUser.userId))
       .limit(1);
 
+    if (!user) {
+      throw new NotFoundError('User');
+    }
+
     return successResponse({
       success: true,
-      settings: user ? toSettings(user) : DEFAULT_NOTIFICATION_DIGEST_SETTINGS,
+      settings: toSettings(user),
     });
   } catch (error) {
     const missingSchemaCode = getMissingNotificationSchemaErrorCode(error);
@@ -72,25 +86,39 @@ export const PUT = withErrorHandling(async (request: NextRequest) => {
   const authUser = await authenticate(request);
   const payload = DigestSettingsSchema.parse(await request.json());
 
+  const [current] = await db
+    .select(digestColumns)
+    .from(users)
+    .where(eq(users.id, authUser.userId))
+    .limit(1);
+  if (!current) {
+    throw new NotFoundError('User');
+  }
+
+  // Only reset the delivery checkpoint when the schedule actually changes, so
+  // repeated idempotent PUTs cannot force extra digests.
+  const scheduleChanged =
+    current.notificationDigestEnabled !== payload.digestEnabled ||
+    current.notificationDigestFrequency !== payload.frequency;
+
   const [updated] = await db
     .update(users)
     .set({
       notificationDigestEnabled: payload.digestEnabled,
       notificationDigestFrequency: payload.frequency,
       notificationDigestDeliveryChannel: payload.deliveryChannel,
-      notificationDigestLastSentAt: null,
+      ...(scheduleChanged ? { notificationDigestLastSentAt: null } : {}),
       updatedAt: new Date(),
     })
     .where(eq(users.id, authUser.userId))
-    .returning({
-      notificationDigestEnabled: users.notificationDigestEnabled,
-      notificationDigestFrequency: users.notificationDigestFrequency,
-      notificationDigestDeliveryChannel:
-        users.notificationDigestDeliveryChannel,
-    });
+    .returning(digestColumns);
+
+  if (!updated) {
+    throw new NotFoundError('User');
+  }
 
   return successResponse({
     success: true,
-    settings: updated ? toSettings(updated) : payload,
+    settings: toSettings(updated),
   });
 });

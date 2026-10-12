@@ -32,8 +32,8 @@ export interface PromptDefinition {
 /**
  * Helper to define a prompt with full type safety.
  *
- * Validates the prompt definition structure and returns it unchanged.
- * Used by all prompt files to ensure type safety.
+ * Identity helper: the structure is checked by TypeScript at compile time
+ * only; no runtime validation is performed.
  *
  * @param prompt - The prompt definition object
  * @returns The same prompt definition (for type inference)
@@ -58,8 +58,10 @@ export function definePrompt(prompt: PromptDefinition): PromptDefinition {
 /**
  * Helper to render a prompt template with variable substitution.
  *
- * Replaces {{variable}} placeholders in the template with actual values.
- * Variables can be strings, numbers, booleans, null, or undefined.
+ * Replaces {{variable}} placeholders in the template with actual values in a
+ * single pass. Inserted values are literal: `$` sequences and `{{...}}` text
+ * inside a value are never reinterpreted. Placeholders with no matching
+ * variable are left unchanged. null/undefined render as an empty string.
  *
  * @param template - The template string with {{variable}} placeholders
  * @param variables - Object mapping variable names to their values
@@ -78,10 +80,7 @@ export function renderTemplate(
   template: string,
   variables: Record<string, string | number | boolean | null | undefined>
 ): string {
-  let rendered = template;
-  for (const [key, value] of Object.entries(variables)) {
-    const pattern = new RegExp(`\\{\\{${key}\\}\\}`, 'g');
-    rendered = rendered.replace(pattern, String(value ?? ''));
-  }
-  return rendered;
+  return template.replace(/\{\{([^{}]+)\}\}/g, (match, key: string) =>
+    Object.hasOwn(variables, key) ? String(variables[key] ?? '') : match
+  );
 }

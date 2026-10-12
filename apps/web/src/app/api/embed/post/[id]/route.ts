@@ -78,7 +78,7 @@
 import { withErrorHandling } from '@feed/api';
 import { db } from '@feed/db';
 import { StaticDataRegistry } from '@feed/engine';
-import { PostIdParamSchema, toISO } from '@feed/shared';
+import { getBaseUrl, PostIdParamSchema, toISO } from '@feed/shared';
 import { type NextRequest, NextResponse } from 'next/server';
 
 export const GET = withErrorHandling(async function GET(
@@ -101,14 +101,15 @@ export const GET = withErrorHandling(async function GET(
     },
   });
 
-  if (!post || post.deletedAt) {
+  // Deleted and not-yet-published (scheduled) posts are not embeddable.
+  if (!post || post.deletedAt || post.timestamp > new Date()) {
     return NextResponse.json({ error: 'Post not found' }, { status: 404 });
   }
 
   // Get interaction counts
   const [likeCount, commentCount, shareCount] = await Promise.all([
     db.reaction.count({ where: { postId, type: 'like' } }),
-    db.comment.count({ where: { postId } }),
+    db.comment.count({ where: { postId, deletedAt: null } }),
     db.share.count({ where: { postId } }),
   ]);
 
@@ -123,7 +124,7 @@ export const GET = withErrorHandling(async function GET(
   });
 
   if (userAuthor) {
-    authorName = userAuthor.displayName || 'Unknown';
+    authorName = userAuthor.displayName || userAuthor.username || 'Unknown';
     authorUsername = userAuthor.username || null;
   } else {
     // Check for actor in static registry
@@ -141,13 +142,15 @@ export const GET = withErrorHandling(async function GET(
     }
   }
 
-  const baseUrl = process.env.NEXT_PUBLIC_BASE_URL || 'https://feed.fun';
+  const baseUrl = getBaseUrl();
   const postUrl = `${baseUrl}/post/${postId}`;
 
   // Truncate content for preview
+  // Truncate by code points so surrogate pairs (emoji) are not split
+  const codePoints = Array.from(post.content);
   const previewText =
-    post.content.length > 200
-      ? post.content.substring(0, 200) + '...'
+    codePoints.length > 200
+      ? `${codePoints.slice(0, 200).join('')}...`
       : post.content;
 
   const title =

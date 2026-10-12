@@ -5,4 +5,3 @@
  */
 
 export * from './json';
-export * from './postgres';

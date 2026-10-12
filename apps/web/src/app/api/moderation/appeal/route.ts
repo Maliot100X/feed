@@ -34,7 +34,7 @@
  *                 description: Appeal reasoning
  *               stakeTxHash:
  *                 type: string
- *                 description: Optional transaction hash for staked appeal ($10)
+ *                 description: Optional payment tx hash of an admin-verified moderation escrow payment (staked appeal)
  *     responses:
  *       200:
  *         description: Appeal submitted successfully
@@ -82,14 +82,43 @@ import { db } from '@feed/db';
 import { WalletService } from '@feed/engine';
 import { logger } from '@feed/shared';
 import type { NextRequest } from 'next/server';
-import { type Address, createPublicClient, http } from 'viem';
-import { baseSepolia } from 'viem/chains';
 import { z } from 'zod';
 
 const AppealSchema = z.object({
   reason: z.string().min(10).max(2000),
-  stakeTxHash: z.string().optional(), // For staked appeals ($10)
+  /**
+   * Payment tx hash of a moderation escrow payment that an admin has verified
+   * (status `paid`). Raw on-chain transactions are not accepted as stakes:
+   * there is no configured stake contract to verify them against.
+   */
+  stakeTxHash: z
+    .string()
+    .regex(/^0x[0-9a-fA-F]{64}$/, 'Invalid transaction hash')
+    .optional(),
 });
+
+/** Evaluator output must be well-formed; anything else fails closed. */
+const StrictAppealEvaluationSchema = z.object({
+  isFalsePositive: z.boolean(),
+  reasoning: z.string().min(1),
+});
+
+const LenientAppealEvaluationSchema = z.object({
+  shouldDeny: z.boolean(),
+  reasoning: z.string().min(1),
+});
+
+function parseEvaluation<T>(response: string, schema: z.ZodType<T>): T {
+  const jsonMatch = response.match(/\{[\s\S]*\}/);
+  if (!jsonMatch) {
+    throw new Error('Appeal evaluation returned no JSON');
+  }
+  const parsed = schema.safeParse(JSON.parse(jsonMatch[0]));
+  if (!parsed.success) {
+    throw new Error('Appeal evaluation returned an invalid result');
+  }
+  return parsed.data;
+}
 
 export const POST = withErrorHandling(async (request: NextRequest) => {
   const authUser = await authenticate(request);
@@ -124,8 +153,8 @@ export const POST = withErrorHandling(async (request: NextRequest) => {
     );
   }
 
-  // Check if already appealed
-  if (user.appealCount >= 1 && !user.appealStaked) {
+  // A second appeal requires a stake (either already recorded or submitted now)
+  if (user.appealCount >= 1 && !user.appealStaked && !stakeTxHash) {
     return successResponse(
       {
         success: false,
@@ -233,31 +262,14 @@ export const POST = withErrorHandling(async (request: NextRequest) => {
         },
       });
     } else {
-      // Verify regular stake transaction
-      const verificationResult = await verifyStakeTransaction(
-        stakeTxHash,
-        userId
-      );
-      if (!verificationResult.verified) {
-        return successResponse(
-          {
-            success: false,
-            error:
-              verificationResult.error ||
-              'Failed to verify stake transaction. If using escrow payment, ensure it is paid and belongs to you.',
-          },
-          400
-        );
-      }
-
-      await db.user.update({
-        where: { id: userId },
-        data: {
-          appealStaked: true,
-          appealStakeAmount: String(verificationResult.amount || 10),
-          appealStakeTxHash: stakeTxHash,
+      return successResponse(
+        {
+          success: false,
+          error:
+            'Stake must be a verified moderation escrow payment that belongs to you.',
         },
-      });
+        400
+      );
     }
   }
 
@@ -396,16 +408,7 @@ Respond with JSON:
     maxTokens: 2048,
   });
 
-  const jsonMatch = response.match(/\{[\s\S]*\}/);
-  if (!jsonMatch) {
-    throw new Error('No JSON found in response');
-  }
-
-  const result = JSON.parse(jsonMatch[0]) as {
-    isFalsePositive: boolean;
-    reasoning: string;
-  };
-  return result;
+  return parseEvaluation(response, StrictAppealEvaluationSchema);
 }
 
 /**
@@ -460,16 +463,7 @@ Respond with JSON:
     maxTokens: 2048,
   });
 
-  const jsonMatch = response.match(/\{[\s\S]*\}/);
-  if (!jsonMatch) {
-    throw new Error('No JSON found in response');
-  }
-
-  const result = JSON.parse(jsonMatch[0]) as {
-    shouldDeny: boolean;
-    reasoning: string;
-  };
-  return result;
+  return parseEvaluation(response, LenientAppealEvaluationSchema);
 }
 
 /**
@@ -564,11 +558,23 @@ async function restoreAccount(userId: string, reasoning: string) {
   // Refund stake if staked
   const updatedUser = await db.user.findUnique({
     where: { id: userId },
-    select: { appealStaked: true, appealStakeAmount: true },
+    select: {
+      appealStaked: true,
+      appealStakeAmount: true,
+      appealStakeTxHash: true,
+    },
   });
 
-  if (updatedUser?.appealStaked && updatedUser.appealStakeAmount) {
-    await refundAppealStake(userId, Number(updatedUser.appealStakeAmount));
+  if (
+    updatedUser?.appealStaked &&
+    updatedUser.appealStakeAmount &&
+    updatedUser.appealStakeTxHash
+  ) {
+    await refundAppealStake(
+      userId,
+      Number(updatedUser.appealStakeAmount),
+      updatedUser.appealStakeTxHash
+    );
   }
 
   await createNotification({
@@ -582,120 +588,28 @@ async function restoreAccount(userId: string, reasoning: string) {
 }
 
 /**
- * Verify stake transaction on-chain
- */
-async function verifyStakeTransaction(
-  txHash: string,
-  userId: string
-): Promise<{ verified: boolean; amount?: number; error?: string }> {
-  const publicClient = createPublicClient({
-    chain: baseSepolia,
-    transport: http(
-      process.env.NEXT_PUBLIC_RPC_URL ||
-        process.env.BASE_SEPOLIA_RPC_URL ||
-        'https://sepolia.base.org'
-    ),
-  });
-
-  const tx = await publicClient.getTransaction({ hash: txHash as Address });
-  if (!tx) {
-    return { verified: false, error: 'Transaction not found on blockchain' };
-  }
-
-  const receipt = await publicClient.getTransactionReceipt({
-    hash: txHash as Address,
-  });
-  if (!receipt) {
-    return { verified: false, error: 'Transaction not yet confirmed' };
-  }
-
-  if (receipt.status !== 'success') {
-    return { verified: false, error: 'Transaction failed on blockchain' };
-  }
-
-  // Get user's wallet address
-  const user = await db.user.findUnique({
-    where: { id: userId },
-    select: { walletAddress: true },
-  });
-
-  if (!user?.walletAddress) {
-    return { verified: false, error: 'User has no wallet address' };
-  }
-
-  // Verify sender matches user's wallet (with case-insensitive comparison)
-  const senderMatch =
-    tx.from.toLowerCase() === user.walletAddress.toLowerCase();
-  if (!senderMatch) {
-    return {
-      verified: false,
-      error: 'Transaction sender does not match user wallet',
-    };
-  }
-
-  // Verify amount is at least $10 USD equivalent
-  // For ETH/USDC, we need to check the value or token transfer
-  // Since we're dealing with USD, we'll check if value is reasonable (at least 0.01 ETH or equivalent)
-  // In production, you'd want to check against a specific token contract
-  const minStakeWei = BigInt('10000000000000000'); // 0.01 ETH minimum
-  const txValue = tx.value || BigInt(0);
-
-  // If it's a token transfer, we'd need to decode the transaction data
-  // For now, we'll accept ETH transfers of at least 0.01 ETH
-  // In production, you'd want to verify against USDC or a specific stake contract
-  if (txValue < minStakeWei && tx.to) {
-    // Check if it's a token transfer by examining logs
-    const hasTokenTransfer = receipt.logs.length > 0;
-    if (!hasTokenTransfer) {
-      return {
-        verified: false,
-        error: 'Transaction value too low or not a valid stake',
-      };
-    }
-  }
-
-  // Calculate USD amount (simplified - in production use oracle for accurate conversion)
-  // Assuming 1 ETH = $3000, 0.01 ETH = $30, so we need at least 0.0033 ETH for $10
-  const minStakeFor10USD = BigInt('3300000000000000'); // ~0.0033 ETH
-  const amountUSD =
-    txValue >= minStakeFor10USD ? 10 : (Number(txValue) * 3000) / 1e18;
-
-  logger.info(
-    'Stake transaction verified',
-    {
-      txHash,
-      userId,
-      amountUSD,
-      txValue: txValue.toString(),
-    },
-    'Appeal'
-  );
-
-  return { verified: true, amount: amountUSD };
-}
-
-/**
  * Refund appeal stake to user's virtual balance
  */
 async function refundAppealStake(
   userId: string,
-  stakeAmount: number
+  stakeAmount: number,
+  stakeTxHash: string
 ): Promise<void> {
   await WalletService.credit(
     userId,
     stakeAmount,
     'appeal_stake_refund',
     'Appeal stake refund - account restored',
-    undefined
+    stakeTxHash
   );
 
-  // Clear stake flags
+  // Clear stake flags. appealStakeTxHash is intentionally kept so the same
+  // escrow payment cannot be reused (and refunded again) for a later appeal.
   await db.user.update({
     where: { id: userId },
     data: {
       appealStaked: false,
       appealStakeAmount: null,
-      appealStakeTxHash: null,
     },
   });
 

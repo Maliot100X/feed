@@ -30,11 +30,9 @@ function applyAdminAuth(
   if (!token) {
     return;
   }
-  if (token.startsWith('dev_admin_')) {
-    headers['x-dev-admin-token'] = token;
-    return;
-  }
-  headers['Authorization'] = `Bearer ${token}`;
+  // getAdminToken() returns a dev or CI admin token; both are only accepted
+  // via the x-dev-admin-token header (never as a Bearer token).
+  headers['x-dev-admin-token'] = token;
 }
 
 describe('Admin Agents Reputation Integration', () => {

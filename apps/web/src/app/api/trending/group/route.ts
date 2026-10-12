@@ -89,6 +89,10 @@ import { StaticDataRegistry } from '@feed/engine';
 import { logger, toISO } from '@feed/shared';
 import type { NextRequest } from 'next/server';
 import { NextResponse } from 'next/server';
+import { z } from 'zod';
+
+const MAX_GROUP_TAGS = 20;
+const GroupLimitSchema = z.coerce.number().int().min(1).max(100).default(50);
 
 export const GET = withErrorHandling(async (request: NextRequest) => {
   const {
@@ -109,19 +113,30 @@ export const GET = withErrorHandling(async (request: NextRequest) => {
     );
   }
 
-  const tagSlugs = tagsParam
-    .split(',')
-    .map((slug) => slug.trim().toLowerCase())
-    .filter((slug) => slug.length > 0);
+  const tagSlugs = [
+    ...new Set(
+      tagsParam
+        .split(',')
+        .map((slug) => slug.trim().toLowerCase())
+        .filter((slug) => slug.length > 0)
+    ),
+  ];
 
-  if (tagSlugs.length === 0) {
+  if (tagSlugs.length === 0 || tagSlugs.length > MAX_GROUP_TAGS) {
     return NextResponse.json(
       { success: false, error: 'Invalid tags parameter' },
       { status: 400 }
     );
   }
 
-  const limit = limitParam ? Number.parseInt(limitParam, 10) : 50;
+  const parsedLimit = GroupLimitSchema.safeParse(limitParam ?? undefined);
+  if (!parsedLimit.success) {
+    return NextResponse.json(
+      { success: false, error: 'limit must be an integer 1-100' },
+      { status: 400 }
+    );
+  }
+  const limit = parsedLimit.data;
 
   logger.info(
     'Fetching grouped trending posts',

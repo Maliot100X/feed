@@ -47,9 +47,13 @@
  *                 default: false
  *               batchSize:
  *                 type: integer
+ *                 minimum: 1
+ *                 maximum: 100000
  *     responses:
  *       200:
  *         description: Training job triggered successfully
+ *       400:
+ *         description: Invalid body (force must be boolean, batchSize a bounded integer)
  *       401:
  *         description: Unauthorized
  *       403:
@@ -75,18 +79,35 @@ import {
 import { automationPipeline } from '@feed/training';
 import type { NextRequest } from 'next/server';
 import { NextResponse } from 'next/server';
+import { z } from 'zod';
+
+const TriggerSchema = z.object({
+  force: z.boolean().default(false),
+  // Maximum number of trajectories to train on
+  batchSize: z.number().int().min(1).max(100_000).optional(),
+});
 
 export const POST = withErrorHandling(async (request: NextRequest) => {
   const admin = await requireAdmin(request);
-  const body = await request.json();
-  const { force = false, batchSize } = body;
+  const parsed = TriggerSchema.safeParse(await request.json());
+  if (!parsed.success) {
+    return NextResponse.json(
+      { error: parsed.error.issues[0]?.message ?? 'Invalid request body' },
+      { status: 400 }
+    );
+  }
+  const { force, batchSize } = parsed.data;
 
   // Audit log the training trigger
-  logAdminModify({
+  await logAdminModify({
     adminId: admin.userId,
     ipAddress: getClientIp(request.headers) ?? undefined,
     resourceType: 'training',
-    metadata: { action: 'trigger_training', force, batchSize },
+    metadata: {
+      action: 'trigger_training',
+      force,
+      batchSize: batchSize ?? null,
+    },
   });
 
   const result = await automationPipeline.triggerTraining({
@@ -101,7 +122,7 @@ export const GET = withErrorHandling(async (request: NextRequest) => {
   const admin = await requireAdmin(request);
 
   // Audit log the readiness check
-  logAdminView({
+  await logAdminView({
     adminId: admin.userId,
     ipAddress: getClientIp(request.headers) ?? undefined,
     resourceType: 'training',

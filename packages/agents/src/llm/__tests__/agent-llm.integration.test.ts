@@ -26,6 +26,8 @@ describe('Agent LLM Provider', () => {
     delete process.env.PHALA_ENDPOINT;
     delete process.env.OLLAMA_BASE_URL;
     delete process.env.OLLAMA_MODEL;
+    delete process.env.HUGGINGFACE_API_FORMAT;
+    delete process.env.HUGGINGFACE_MODEL_NAME;
   });
 
   afterEach(() => {
@@ -74,6 +76,24 @@ describe('Agent LLM Provider', () => {
       const status = await getAgentLLMStatus();
 
       expect(status.provider).toBe('ollama');
+    });
+
+    it('trims and lowercases the configured provider', async () => {
+      process.env.AGENT_LLM_PROVIDER = '  Ollama ';
+
+      const { getAgentLLMStatus } = await import('../agent-llm');
+      const status = await getAgentLLMStatus();
+
+      expect(status.provider).toBe('ollama');
+    });
+
+    it('rejects unknown providers instead of falling back', async () => {
+      process.env.AGENT_LLM_PROVIDER = 'not-a-provider';
+
+      const { getAgentLLMStatus } = await import('../agent-llm');
+      await expect(getAgentLLMStatus()).rejects.toThrow(
+        'Unsupported AGENT_LLM_PROVIDER'
+      );
     });
 
     it('accepts "hf" as alias for huggingface', async () => {
@@ -257,7 +277,10 @@ describe('Agent LLM Provider', () => {
         });
 
         const body = JSON.parse(options.body as string);
-        expect(body.inputs).toHaveLength(2);
+        // Inference API takes a single prompt string
+        expect(body.inputs).toBe(
+          'system: Test system\n\nuser: Test prompt\n\nassistant:'
+        );
         expect(body.parameters.temperature).toBe(0.7);
         expect(body.parameters.max_new_tokens).toBe(1000);
 
@@ -370,8 +393,46 @@ describe('Agent LLM Provider', () => {
 
       const { callAgentLLM } = await import('../agent-llm');
 
-      await expect(callAgentLLM({ prompt: 'Test' })).rejects.toThrow(
-        'HuggingFace API error: 429'
+      const error = await callAgentLLM({ prompt: 'Test' }).catch(
+        (e: Error) => e
+      );
+      expect(error).toBeInstanceOf(Error);
+      expect((error as Error).message).toBe('HuggingFace API error: 429');
+      // Raw provider body is not embedded in the thrown error
+      expect((error as Error).message).not.toContain('Rate limit exceeded');
+    });
+
+    it('preserves provider-reported usage in trajectory logs', async () => {
+      process.env.AGENT_LLM_PROVIDER = 'huggingface';
+      process.env.HUGGINGFACE_API_KEY = 'test-key';
+      process.env.HUGGINGFACE_MODEL_ENDPOINT = 'https://my-model.hf.space/v1';
+      process.env.HUGGINGFACE_API_FORMAT = ' OpenAI ';
+
+      const mockLogger = {
+        getCurrentStepId: mock(() => 'step-1'),
+        logLLMCall: mock(() => {}),
+      };
+
+      globalThis.fetch = mock(async () => {
+        return new Response(
+          JSON.stringify({
+            choices: [{ message: { content: 'ok' } }],
+            usage: { prompt_tokens: 12, completion_tokens: 7 },
+          }),
+          { status: 200 }
+        );
+      });
+
+      const { callAgentLLM } = await import('../agent-llm');
+      await callAgentLLM({
+        prompt: 'Test',
+        trajectoryLogger: mockLogger as unknown as TrajectoryLoggerService,
+        trajectoryId: 'traj-1',
+      });
+
+      expect(mockLogger.logLLMCall).toHaveBeenCalledWith(
+        'step-1',
+        expect.objectContaining({ promptTokens: 12, completionTokens: 7 })
       );
     });
   });

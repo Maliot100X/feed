@@ -9,7 +9,18 @@
  * @module engine/services/fee-redistribution-service
  */
 
-import { actorState, Decimal, db, eq, gameConfigs } from '@feed/db';
+import {
+  actorState,
+  asc,
+  type DrizzleClient,
+  db,
+  eq,
+  gameConfigs,
+  inArray,
+  sql,
+  type Transaction,
+  withTransaction,
+} from '@feed/db';
 import { logger } from '@feed/shared';
 import { StaticDataRegistry } from './static-data-registry';
 
@@ -115,33 +126,43 @@ export class FeeRedistributionService {
   /**
    * Add funds to the stability fund (called when fees are collected)
    *
+   * Uses a single atomic upsert so concurrent fee collections never lose
+   * increments. Pass the active transaction so the credit commits or rolls
+   * back together with the fee that funded it.
+   *
    * @param amount - Amount to add to the fund
+   * @param tx - Transaction (or client) to run in; defaults to the shared db
    */
-  static async addToFund(amount: number): Promise<void> {
+  static async addToFund(
+    amount: number,
+    tx: Transaction | DrizzleClient = db
+  ): Promise<void> {
+    if (!Number.isFinite(amount)) {
+      throw new Error(`Stability fund amount must be finite, got ${amount}`);
+    }
     if (amount <= 0) return;
 
-    const currentBalance = await FeeRedistributionService.getFundBalance();
-    const newBalance = currentBalance + amount;
-
-    await db
+    const now = new Date();
+    const [updated] = await tx
       .insert(gameConfigs)
       .values({
         id: STABILITY_FUND_CONFIG.FUND_BALANCE_KEY,
         key: STABILITY_FUND_CONFIG.FUND_BALANCE_KEY,
-        value: newBalance,
-        updatedAt: new Date(),
+        value: amount,
+        updatedAt: now,
       })
       .onConflictDoUpdate({
         target: gameConfigs.key,
         set: {
-          value: newBalance,
-          updatedAt: new Date(),
+          value: sql`to_json(COALESCE((${gameConfigs.value} #>> '{}')::numeric, 0) + ${amount})`,
+          updatedAt: now,
         },
-      });
+      })
+      .returning({ value: gameConfigs.value });
 
     logger.debug(
       'Added to stability fund',
-      { amount, newBalance },
+      { amount, newBalance: updated?.value },
       'FeeRedistributionService'
     );
   }
@@ -280,72 +301,112 @@ export class FeeRedistributionService {
       };
     }
 
-    // Calculate how much we can distribute
-    const maxToDistribute = Math.min(
-      availableForDistribution,
-      STABILITY_FUND_CONFIG.MAX_REDISTRIBUTION_PER_TICK
-    );
+    const candidateIds = eligibleNPCs
+      .slice(0, STABILITY_FUND_CONFIG.MAX_NPCS_PER_TICK)
+      .map((npc) => npc.id);
+    const candidatesById = new Map(eligibleNPCs.map((npc) => [npc.id, npc]));
 
-    // Top up NPCs (limited by MAX_NPCS_PER_TICK)
-    const npcsToProcess = eligibleNPCs.slice(
-      0,
-      STABILITY_FUND_CONFIG.MAX_NPCS_PER_TICK
-    );
-    let totalDistributed = 0;
-    const details: RedistributionResult['details'] = [];
+    // Debit the fund and credit NPCs atomically. Lock order is actor rows
+    // (by id) then the fund row — the same order trade paths use (actor
+    // balance first, fee/fund last) — so this cannot deadlock with trading.
+    const { totalDistributed, details, fundBalanceAfter } =
+      await withTransaction(async (tx) => {
+        const lockedActors = await tx
+          .select({
+            id: actorState.id,
+            tradingBalance: actorState.tradingBalance,
+          })
+          .from(actorState)
+          .where(inArray(actorState.id, candidateIds))
+          .orderBy(asc(actorState.id))
+          .for('update');
 
-    for (const npc of npcsToProcess) {
-      // Check if we've hit our distribution limit
-      if (totalDistributed >= maxToDistribute) break;
+        const [fundRow] = await tx
+          .select({ value: gameConfigs.value })
+          .from(gameConfigs)
+          .where(eq(gameConfigs.key, STABILITY_FUND_CONFIG.FUND_BALANCE_KEY))
+          .for('update');
+        const lockedFundBalance = fundRow ? Number(fundRow.value) : 0;
+        if (!Number.isFinite(lockedFundBalance)) {
+          throw new Error(
+            `Stability fund balance is not numeric: ${String(fundRow?.value)}`
+          );
+        }
 
-      // Calculate how much to give this NPC (capped by remaining budget)
-      const amountToGive = Math.min(
-        npc.amountNeeded,
-        maxToDistribute - totalDistributed
-      );
+        // Recompute the budget from the locked fund balance.
+        const maxToDistribute = Math.min(
+          lockedFundBalance - STABILITY_FUND_CONFIG.MIN_FUND_RESERVE,
+          STABILITY_FUND_CONFIG.MAX_REDISTRIBUTION_PER_TICK
+        );
 
-      if (amountToGive <= 0) continue;
+        // Preserve neediest-first priority using the locked balances.
+        const lockedById = new Map(
+          lockedActors.map((row) => [row.id, Number(row.tradingBalance)])
+        );
+        let distributed = 0;
+        const topUps: RedistributionResult['details'] = [];
 
-      // Update NPC balance
-      const newBalance = npc.currentBalance + amountToGive;
-      await db
-        .update(actorState)
-        .set({
-          tradingBalance: new Decimal(newBalance).toString(),
-          updatedAt: new Date(),
-        })
-        .where(eq(actorState.id, npc.id));
+        for (const npcId of candidateIds) {
+          if (distributed >= maxToDistribute) break;
+          const npc = candidatesById.get(npcId);
+          const currentBalance = lockedById.get(npcId);
+          if (!npc || currentBalance === undefined) continue;
+          // Balance may have recovered since the unlocked scan.
+          if (currentBalance >= npc.threshold) continue;
 
-      totalDistributed += amountToGive;
-      details.push({
-        npcId: npc.id,
-        npcName: npc.name,
-        balanceBefore: npc.currentBalance,
-        balanceAfter: newBalance,
-        amountReceived: amountToGive,
+          const amountToGive = Math.min(
+            Math.max(0, npc.target - currentBalance),
+            maxToDistribute - distributed
+          );
+          if (amountToGive <= 0) continue;
+
+          const [credited] = await tx
+            .update(actorState)
+            .set({
+              tradingBalance: sql`${actorState.tradingBalance} + ${amountToGive}`,
+              updatedAt: new Date(),
+            })
+            .where(eq(actorState.id, npcId))
+            .returning({ tradingBalance: actorState.tradingBalance });
+
+          const balanceAfter = Number(credited?.tradingBalance);
+          distributed += amountToGive;
+          topUps.push({
+            npcId,
+            npcName: npc.name,
+            balanceBefore: currentBalance,
+            balanceAfter,
+            amountReceived: amountToGive,
+          });
+
+          logger.info(
+            `Topped up NPC ${npc.name}`,
+            {
+              npcId,
+              balanceBefore: currentBalance,
+              balanceAfter,
+              amount: amountToGive,
+            },
+            'FeeRedistributionService'
+          );
+        }
+
+        if (distributed > 0) {
+          await tx
+            .update(gameConfigs)
+            .set({
+              value: sql`to_json((${gameConfigs.value} #>> '{}')::numeric - ${distributed})`,
+              updatedAt: new Date(),
+            })
+            .where(eq(gameConfigs.key, STABILITY_FUND_CONFIG.FUND_BALANCE_KEY));
+        }
+
+        return {
+          totalDistributed: distributed,
+          details: topUps,
+          fundBalanceAfter: lockedFundBalance - distributed,
+        };
       });
-
-      logger.info(
-        `Topped up NPC ${npc.name}`,
-        {
-          npcId: npc.id,
-          balanceBefore: npc.currentBalance,
-          balanceAfter: newBalance,
-          amount: amountToGive,
-        },
-        'FeeRedistributionService'
-      );
-    }
-
-    // Update fund balance
-    const fundBalanceAfter = fundBalanceBefore - totalDistributed;
-    await db
-      .update(gameConfigs)
-      .set({
-        value: fundBalanceAfter,
-        updatedAt: new Date(),
-      })
-      .where(eq(gameConfigs.key, STABILITY_FUND_CONFIG.FUND_BALANCE_KEY));
 
     logger.info(
       'Redistribution completed',

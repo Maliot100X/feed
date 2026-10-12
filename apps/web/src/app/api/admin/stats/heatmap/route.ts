@@ -68,14 +68,6 @@ export const GET = withErrorHandling(async (request: NextRequest) => {
   const startDate = parseDateParam(searchParams.get('startDate'));
   const endDate = parseDateParam(searchParams.get('endDate'));
 
-  const dateRangeError = validateDateRange(startDate, endDate);
-  if (dateRangeError) {
-    return successResponse(
-      { error: dateRangeError, maxDays: MAX_DATE_RANGE_DAYS },
-      400
-    );
-  }
-
   logger.info(
     'Heatmap data requested',
     { type, activityType, startDate, endDate },
@@ -87,6 +79,18 @@ export const GET = withErrorHandling(async (request: NextRequest) => {
   // Convert to ISO strings for $queryRaw - postgres driver requires string parameters
   const queryStart = (startDate ?? defaultStart).toISOString();
   const queryEnd = (endDate ?? now).toISOString();
+
+  // Validate the effective window (after defaults), not just the raw params
+  const dateRangeError = validateDateRange(
+    startDate ?? defaultStart,
+    endDate ?? now
+  );
+  if (dateRangeError) {
+    return successResponse(
+      { error: dateRangeError, maxDays: MAX_DATE_RANGE_DAYS },
+      400
+    );
+  }
 
   if (type === 'hourly') {
     // Hourly heatmap: aggregate by day of week (0-6) and hour (0-23)

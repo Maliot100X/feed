@@ -11,7 +11,6 @@ export {
 export {
   cleanMarkdownCodeBlocks,
   extractJsonFromText,
-  parseContinuationContent,
 } from './json-continuation-parser';
 export { FeedLLMClient } from './openai-client';
 export { parseXML, stripThinkingBlocks } from './xml-parser';

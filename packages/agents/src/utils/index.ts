@@ -5,5 +5,4 @@
  */
 
 export * from './createTestAgent';
-export * from './prompt-builder';
 export * from './prompt-logger';

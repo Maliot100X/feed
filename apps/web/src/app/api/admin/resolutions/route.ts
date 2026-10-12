@@ -41,7 +41,7 @@ export const GET = withErrorHandling(async (request: NextRequest) => {
         )
       )
     )
-    .orderBy(asc(questions.resolutionDate))
+    .orderBy(asc(questions.resolutionDate), asc(questions.id))
     .limit(200);
 
   return successResponse({

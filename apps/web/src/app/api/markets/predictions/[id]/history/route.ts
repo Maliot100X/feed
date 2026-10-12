@@ -13,13 +13,7 @@ import { chooseBucketMs } from '@/lib/api/chart-utils';
 type TimeRange = '1H' | '4H' | '1D' | '1W' | 'ALL';
 
 const QuerySchema = z.object({
-  limit: z
-    .preprocess(
-      (value) => (value === null ? undefined : value),
-      z.coerce.number().min(1).max(2000)
-    )
-    .optional()
-    .default(200),
+  limit: z.coerce.number().int().min(1).max(2000).default(200),
   range: z.enum(['1H', '4H', '1D', '1W', 'ALL']).optional(),
 });
 
@@ -92,8 +86,8 @@ export const GET = withErrorHandling(
     );
     const { searchParams } = new URL(request.url);
     const { limit, range } = QuerySchema.parse({
-      limit: searchParams.get('limit'),
-      range: searchParams.get('range'),
+      limit: searchParams.get('limit') ?? undefined,
+      range: searchParams.get('range') ?? undefined,
     });
 
     const now = new Date();

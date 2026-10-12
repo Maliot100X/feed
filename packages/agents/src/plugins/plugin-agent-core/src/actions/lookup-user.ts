@@ -12,7 +12,7 @@ import type {
   Memory,
   State,
 } from '@elizaos/core';
-import { db, ilike, or, users } from '@feed/db';
+import { asc, db, ilike, or, sql, users } from '@feed/db';
 import { logger } from '../../../../shared/logger';
 
 export const lookupUserAction: Action = {
@@ -77,24 +77,36 @@ export const lookupUserAction: Action = {
     }
 
     try {
-      // Search by username or display name (case-insensitive)
-      const foundUsers = await db
-        .select({
-          id: users.id,
-          username: users.username,
-          displayName: users.displayName,
-          isAgent: users.isAgent,
-          profileImageUrl: users.profileImageUrl,
-          bio: users.bio,
-        })
+      const selection = {
+        id: users.id,
+        username: users.username,
+        displayName: users.displayName,
+        isAgent: users.isAgent,
+      };
+
+      // Exact (case-insensitive) username match wins outright.
+      const [exactMatch] = await db
+        .select(selection)
         .from(users)
-        .where(
-          or(
-            ilike(users.username, `%${searchTerm}%`),
-            ilike(users.displayName, `%${searchTerm}%`)
-          )
-        )
-        .limit(5);
+        .where(sql`lower(${users.username}) = ${searchTerm.toLowerCase()}`)
+        .limit(1);
+
+      // Otherwise substring search on username or display name. LIKE wildcard
+      // characters in the search term are escaped so they match literally.
+      const likeTerm = `%${searchTerm.replace(/[\\%_]/g, '\\$&')}%`;
+      const foundUsers = exactMatch
+        ? [exactMatch]
+        : await db
+            .select(selection)
+            .from(users)
+            .where(
+              or(
+                ilike(users.username, likeTerm),
+                ilike(users.displayName, likeTerm)
+              )
+            )
+            .orderBy(asc(users.username), asc(users.id))
+            .limit(5);
 
       if (foundUsers.length === 0) {
         return {
@@ -111,9 +123,15 @@ export const lookupUserAction: Action = {
         'LookupUser'
       );
 
+      // Only resolve a single userId when the match is unambiguous.
+      const resolved =
+        exactMatch ?? (foundUsers.length === 1 ? foundUsers[0] : undefined);
+
       return {
         success: true,
-        text: `Found ${foundUsers.length} user(s) matching "${searchTerm}".`,
+        text: resolved
+          ? `Found user matching "${searchTerm}".`
+          : `Found ${foundUsers.length} users matching "${searchTerm}". The match is ambiguous; pick one by its id.`,
         data: {
           users: foundUsers.map((u) => ({
             id: u.id,
@@ -122,13 +140,13 @@ export const lookupUserAction: Action = {
             isAgent: u.isAgent,
           })),
           count: foundUsers.length,
-          userId: foundUsers[0]?.id,
+          userId: resolved?.id,
         },
         values: {
           count: foundUsers.length,
-          userId: foundUsers[0]?.id,
-          username: foundUsers[0]?.username,
-          isAgent: foundUsers[0]?.isAgent,
+          userId: resolved?.id,
+          username: resolved?.username,
+          isAgent: resolved?.isAgent,
         },
       };
     } catch (error) {

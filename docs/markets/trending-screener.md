@@ -1,5 +1,7 @@
 # Markets trending screener (`/markets`)
 
+> **Historical:** `/markets` now renders the canonical `MarketsTradingTerminal` (`apps/web/src/app/markets/_components/terminal/`). The standalone screener hook `useMarketsPageData` and the legacy perps terminal were removed; several files listed below no longer exist.
+
 Browse-first markets surface: perpetuals and predictions in a table layout, with a path into the full trading terminal. Shell navigation label **Terminal** routes here instead of opening the split-panel terminal immediately.
 
 The page title is **Terminal** so it matches the nav item users tap to arrive here (shared vocabulary between chrome and page).
@@ -64,7 +66,6 @@ Must stay aligned with `parseSelected()` in `MarketsTradingTerminal`:
 | `apps/web/src/app/markets/_components/PredictionsScreenerTable.tsx` | Prediction table: client-side column sort, empty/loading states, **Predict** CTA. |
 | `apps/web/src/app/markets/_components/PerpSparklineCell.tsx` | Lazy sparkline from `usePerpHistory`. |
 | `apps/web/src/app/markets/_lib/sortPerpsForScreener.ts` | Pure perp sort + cap; trending weights mirror dashboard logic. |
-| `apps/web/src/app/markets/_hooks/useMarketsPageData.ts` | Perp store, debounced filter, **one** predictions fetch, 429 retry, Strict Mode–safe mount effect. |
 | `packages/testing/unit/markets/sort-perps-screener.test.ts` | Unit tests for perp sort. |
 
 ---

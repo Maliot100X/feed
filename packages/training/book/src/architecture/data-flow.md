@@ -42,21 +42,8 @@ flowchart TB
 
 ### Simulation Engine
 
-The TypeScript simulation (`packages/engine/`) runs the game world:
-
-```typescript
-// packages/engine/examples/generate-training-data.ts
-const loop = new GameLoop(world, feed, trajectoryEngine, relationships);
-
-for (let day = 1; day <= config.simulationDays; day++) {
-  for (let hour = 0; hour < config.hoursPerDay; hour++) {
-    await loop.tick(gameId, day, hour, false, {
-      priceOverrides: currentPrices,
-      causalContext,
-    });
-  }
-}
-```
+The TypeScript simulation (`packages/engine/`) runs the game world through the
+canonical tick executor in `packages/engine/src/game-tick.ts`.
 
 ### Trajectory Recording
 

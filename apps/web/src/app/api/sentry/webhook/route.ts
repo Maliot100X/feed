@@ -14,15 +14,19 @@ function parseMaxTimestampSkewSeconds(): number {
     return DEFAULT_MAX_TIMESTAMP_SKEW_SECONDS;
   }
 
-  const parsed = Number.parseInt(rawValue, 10);
-  if (!Number.isInteger(parsed)) {
-    return DEFAULT_MAX_TIMESTAMP_SKEW_SECONDS;
+  // Strict: reject suffixes/fractions and out-of-range values instead of
+  // silently truncating or clamping a misconfiguration.
+  const parsed = /^\d+$/.test(rawValue.trim()) ? Number(rawValue.trim()) : NaN;
+  if (
+    !Number.isSafeInteger(parsed) ||
+    parsed < MIN_TIMESTAMP_SKEW_SECONDS ||
+    parsed > MAX_TIMESTAMP_SKEW_SECONDS
+  ) {
+    throw new Error(
+      `SENTRY_WEBHOOK_MAX_TIMESTAMP_SKEW_SECONDS must be an integer between ${MIN_TIMESTAMP_SKEW_SECONDS} and ${MAX_TIMESTAMP_SKEW_SECONDS}`
+    );
   }
-
-  return Math.max(
-    MIN_TIMESTAMP_SKEW_SECONDS,
-    Math.min(MAX_TIMESTAMP_SKEW_SECONDS, parsed)
-  );
+  return parsed;
 }
 
 export const POST = withErrorHandling(async function POST(request: Request) {

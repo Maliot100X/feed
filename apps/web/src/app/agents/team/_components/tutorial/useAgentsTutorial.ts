@@ -1,9 +1,10 @@
 'use client';
 
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import type { TutorialState } from '@/components/tutorial/SpotlightTutorial';
-import { DESKTOP_STEPS, MOBILE_STEPS } from './steps';
+import { AGENTS_TUTORIAL_STEPS } from './steps';
 
+const LAST_STEP = AGENTS_TUTORIAL_STEPS.length - 1;
 const STORAGE_KEY = 'feed-agents-tutorial-completed';
 const AUTO_START_DELAY = 500;
 
@@ -21,13 +22,7 @@ export function useAgentsTutorial(
   const [hasCompleted, setHasCompleted] = useState(true);
   const onBeforeStartRef = useRef(options?.onBeforeStart);
   onBeforeStartRef.current = options?.onBeforeStart;
-
-  const steps = useMemo(() => {
-    if (typeof window === 'undefined') return DESKTOP_STEPS;
-    return window.matchMedia('(min-width: 1024px)').matches
-      ? DESKTOP_STEPS
-      : MOBILE_STEPS;
-  }, []);
+  const steps = AGENTS_TUTORIAL_STEPS;
 
   // Check localStorage on mount
   useEffect(() => {
@@ -45,35 +40,23 @@ export function useAgentsTutorial(
     return undefined;
   }, []);
 
-  const markCompleted = useCallback(() => {
+  const finish = useCallback(() => {
+    setIsActive(false);
     localStorage.setItem(STORAGE_KEY, 'true');
     setHasCompleted(true);
   }, []);
 
   const next = useCallback(() => {
-    setCurrentStep((prev) => {
-      if (prev >= steps.length - 1) {
-        setIsActive(false);
-        markCompleted();
-        return prev;
-      }
-      return prev + 1;
-    });
-  }, [steps.length, markCompleted]);
+    if (currentStep >= LAST_STEP) {
+      finish();
+      return;
+    }
+    setCurrentStep(currentStep + 1);
+  }, [currentStep, finish]);
 
   const prev = useCallback(() => {
     setCurrentStep((p) => Math.max(0, p - 1));
   }, []);
-
-  const dismiss = useCallback(() => {
-    setIsActive(false);
-    markCompleted();
-  }, [markCompleted]);
-
-  const complete = useCallback(() => {
-    setIsActive(false);
-    markCompleted();
-  }, [markCompleted]);
 
   const restart = useCallback(() => {
     onBeforeStartRef.current?.();
@@ -88,8 +71,8 @@ export function useAgentsTutorial(
     hasCompleted,
     next,
     prev,
-    dismiss,
-    complete,
+    dismiss: finish,
+    complete: finish,
     restart,
   };
 }

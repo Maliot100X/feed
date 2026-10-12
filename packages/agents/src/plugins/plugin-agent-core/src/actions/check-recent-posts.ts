@@ -12,7 +12,7 @@ import type {
   Memory,
   State,
 } from '@elizaos/core';
-import { db, desc, eq, posts, users } from '@feed/db';
+import { and, db, desc, eq, isNull, lte, posts, users } from '@feed/db';
 import { getTimeAgo } from '@feed/shared';
 import { logger } from '../../../../shared/logger';
 
@@ -72,13 +72,22 @@ export const checkRecentPostsAction: Action = {
     _callback?: HandlerCallback
   ): Promise<ActionResult> => {
     const actionParams = state?.data?.actionParams as
-      | { userId?: string; limit?: number }
+      | { userId?: unknown; limit?: unknown }
       | undefined;
 
     // Use provided userId or default to agent's own ID
-    const targetUserId = actionParams?.userId || runtime.agentId;
+    const requestedUserId = actionParams?.userId;
+    const targetUserId =
+      typeof requestedUserId === 'string' && requestedUserId
+        ? requestedUserId
+        : runtime.agentId;
     const isSelf = targetUserId === runtime.agentId;
-    const limit = Math.min(Math.max(actionParams?.limit ?? 5, 1), 20);
+    // Only finite integers are honoured; anything else falls back to the default.
+    const requestedLimit = actionParams?.limit;
+    const limit =
+      typeof requestedLimit === 'number' && Number.isInteger(requestedLimit)
+        ? Math.min(Math.max(requestedLimit, 1), 20)
+        : 5;
 
     try {
       // Get user info if checking someone else
@@ -110,7 +119,13 @@ export const checkRecentPostsAction: Action = {
           createdAt: posts.createdAt,
         })
         .from(posts)
-        .where(eq(posts.authorId, targetUserId))
+        .where(
+          and(
+            eq(posts.authorId, targetUserId),
+            isNull(posts.deletedAt),
+            lte(posts.timestamp, new Date())
+          )
+        )
         .orderBy(desc(posts.createdAt))
         .limit(limit);
 

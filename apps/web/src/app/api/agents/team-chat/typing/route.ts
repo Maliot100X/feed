@@ -25,6 +25,9 @@ import { z } from 'zod';
 /** Request body schema for typing indicator */
 const typingSchema = z.object({
   isTyping: z.boolean(),
+  // Explicit conversation target; falls back to the active conversation for
+  // older clients. Must belong to the caller's team chat.
+  chatId: z.string().trim().min(1).max(100).optional(),
 });
 
 export const POST = withErrorHandling(async function POST(req: NextRequest) {
@@ -68,7 +71,7 @@ export const POST = withErrorHandling(async function POST(req: NextRequest) {
     );
   }
 
-  const { isTyping } = parseResult.data;
+  const { isTyping, chatId: requestedChatId } = parseResult.data;
 
   // Get user's team chat
   const teamChat = await teamChatService.getTeamChat(user.id);
@@ -80,6 +83,17 @@ export const POST = withErrorHandling(async function POST(req: NextRequest) {
     );
   }
 
+  if (
+    requestedChatId &&
+    !(await teamChatService.validateTeamChatOwnership(user.id, requestedChatId))
+  ) {
+    return NextResponse.json(
+      { success: false, error: 'Conversation not found' },
+      { status: 404 }
+    );
+  }
+  const chatId = requestedChatId ?? teamChat.chatId;
+
   // Get user display name
   const [userInfo] = await db
     .select({ displayName: users.displayName, username: users.username })
@@ -90,12 +104,7 @@ export const POST = withErrorHandling(async function POST(req: NextRequest) {
   const displayName = userInfo?.displayName || userInfo?.username || 'User';
 
   // Broadcast typing indicator
-  await broadcastTypingIndicator(
-    teamChat.chatId,
-    user.id,
-    displayName,
-    isTyping
-  );
+  await broadcastTypingIndicator(chatId, user.id, displayName, isTyping);
 
   return NextResponse.json({ success: true });
 });

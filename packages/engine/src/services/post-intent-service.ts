@@ -142,7 +142,7 @@ export function selectPostIntent(
         return { type: 'topical', topic: trendingTopic };
       }
     }
-    // 20% social
+    // 25% social
     if (Math.random() < 0.25) {
       const socialTarget = pickSocialTarget(actor, relationships, allActors);
       if (socialTarget) {
@@ -164,12 +164,12 @@ export function selectPostIntent(
 
   const roll = Math.random();
 
-  // 0–0.25: topical
-  if (roll < 0.25 && trendingTopic) {
-    if (shouldPostAboutTopic(actor.id, trendingTopic)) {
+  // 0–0.25: topical. Without a (matching) trending topic this bucket is
+  // organic per the documented split — it must not leak into social.
+  if (roll < 0.25) {
+    if (trendingTopic && shouldPostAboutTopic(actor.id, trendingTopic)) {
       return { type: 'topical', topic: trendingTopic };
     }
-    // Topic doesn't match domain — fall through to organic
     return { type: 'organic' };
   }
 

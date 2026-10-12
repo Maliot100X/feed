@@ -1,5 +1,20 @@
 import { describe, expect, test } from 'bun:test';
-import { resolvePerpTicker } from '../utils/resolvePerpTicker';
+import {
+  resolvePerpTicker,
+  resolvePerpTickerFrom,
+} from '../utils/resolvePerpTicker';
+
+type Org = Parameters<typeof resolvePerpTickerFrom>[1][number];
+
+const org = (id: string, name: string, ticker: string): Org => ({
+  id,
+  name,
+  ticker,
+  description: '',
+  type: 'company',
+  canBeInvolved: true,
+  initialPrice: 100,
+});
 
 describe('resolvePerpTicker', () => {
   test('matches canonical ticker regardless of casing', () => {
@@ -43,5 +58,26 @@ describe('resolvePerpTicker', () => {
 
   test('returns null for unknown identifiers', () => {
     expect(resolvePerpTicker('not-real')).toBeNull();
+  });
+
+  test('punctuation-only identifiers never match a market', () => {
+    const orgs = [org('alpha', 'Alpha', 'ALP')];
+    expect(resolvePerpTickerFrom('$$$', orgs)).toBeNull();
+    expect(resolvePerpTickerFrom('!!', orgs)).toBeNull();
+    expect(resolvePerpTicker('---')).toBeNull();
+  });
+
+  test('ambiguous prefix returns null instead of the first market', () => {
+    const orgs = [
+      org('metaverse', 'Metaverse', 'MVRS'),
+      org('metallica', 'Metallica', 'MTLC'),
+    ];
+    expect(resolvePerpTickerFrom('meta', orgs)).toBeNull();
+    expect(resolvePerpTickerFrom('metaverse stock', orgs)?.ticker).toBe('MVRS');
+  });
+
+  test('unknown name is not resolved', () => {
+    const orgs = [org('alpha', 'Alpha', 'ALP')];
+    expect(resolvePerpTickerFrom('zzzz', orgs)).toBeNull();
   });
 });

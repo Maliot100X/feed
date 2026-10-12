@@ -62,6 +62,18 @@ export class BiasEngine {
       decayRate?: number; // 0-1, default 0.1
     }
   ): void {
+    assertFiniteNumber('strength', strength);
+    const decayRate = options?.decayRate ?? 0.1;
+    assertDecayRate(decayRate);
+    if (
+      options?.durationHours !== undefined &&
+      (!Number.isFinite(options.durationHours) || options.durationHours <= 0)
+    ) {
+      throw new RangeError(
+        `durationHours must be a positive finite number, got ${options.durationHours}`
+      );
+    }
+
     // Normalize strength to 0-1
     const normalizedStrength = clamp01(strength);
 
@@ -77,7 +89,7 @@ export class BiasEngine {
       strength: normalizedStrength,
       createdAt: new Date(),
       expiresAt,
-      decayRate: options?.decayRate ?? 0.1,
+      decayRate,
     };
 
     this.biases.set(entityId, bias);
@@ -117,6 +129,8 @@ export class BiasEngine {
     strength: number,
     decayRate?: number
   ): boolean {
+    assertFiniteNumber('strength', strength);
+    if (decayRate !== undefined) assertDecayRate(decayRate);
     const bias = this.biases.get(entityId);
 
     if (!bias) {
@@ -148,7 +162,10 @@ export class BiasEngine {
    * Get all active biases
    */
   getActiveBiases(): BiasConfig[] {
-    return Array.from(this.biases.values());
+    // Lazy expiry: never report an expired bias as active, even between
+    // periodic cleanups. Returned objects are copies.
+    this.cleanupExpiredBiases();
+    return Array.from(this.biases.values(), copyBias);
   }
 
   /**
@@ -172,7 +189,7 @@ export class BiasEngine {
     }
 
     // Check if bias has expired
-    if (bias.expiresAt && new Date() > bias.expiresAt) {
+    if (bias.expiresAt && new Date() >= bias.expiresAt) {
       this.biases.delete(entityId);
       logger.debug(
         `Bias expired for ${bias.entityName}`,
@@ -326,6 +343,8 @@ export class BiasEngine {
       },
       10 * 60 * 1000
     );
+    // Never keep a process alive just for this housekeeping timer.
+    this.cleanupInterval.unref?.();
   }
 
   /**
@@ -336,7 +355,7 @@ export class BiasEngine {
     let removedCount = 0;
 
     for (const [entityId, bias] of this.biases) {
-      if (bias.expiresAt && now > bias.expiresAt) {
+      if (bias.expiresAt && now >= bias.expiresAt) {
         this.biases.delete(entityId);
         removedCount++;
       }
@@ -366,15 +385,15 @@ export class BiasEngine {
    * Export current biases for persistence
    */
   exportBiases(): BiasConfig[] {
-    return Array.from(this.biases.values());
+    return Array.from(this.biases.values(), copyBias);
   }
 
   /**
    * Import biases from persistence
    */
   importBiases(biases: BiasConfig[]): void {
-    this.biases.clear();
-
+    // Validate everything first so a bad entry cannot leave a half-replaced map.
+    const next = new Map<string, BiasConfig>();
     for (const bias of biases) {
       // Reconstruct dates
       const config: BiasConfig = {
@@ -382,11 +401,48 @@ export class BiasEngine {
         createdAt: new Date(bias.createdAt),
         expiresAt: bias.expiresAt ? new Date(bias.expiresAt) : null,
       };
-
-      this.biases.set(config.entityId, config);
+      if (!config.entityId)
+        throw new Error('Imported bias is missing entityId');
+      if (config.direction !== 'up' && config.direction !== 'down') {
+        throw new Error(`Invalid bias direction: ${String(config.direction)}`);
+      }
+      assertFiniteNumber('strength', config.strength);
+      assertDecayRate(config.decayRate);
+      if (
+        Number.isNaN(config.createdAt.getTime()) ||
+        (config.expiresAt && Number.isNaN(config.expiresAt.getTime()))
+      ) {
+        throw new Error(`Invalid bias dates for ${config.entityId}`);
+      }
+      next.set(config.entityId, {
+        ...config,
+        strength: clamp01(config.strength),
+      });
     }
+    this.biases = next;
 
     logger.info(`Imported ${biases.length} biases`, undefined, 'BiasEngine');
+  }
+}
+
+function copyBias(bias: BiasConfig): BiasConfig {
+  return {
+    ...bias,
+    createdAt: new Date(bias.createdAt),
+    expiresAt: bias.expiresAt ? new Date(bias.expiresAt) : null,
+  };
+}
+
+function assertFiniteNumber(name: string, value: number): void {
+  if (!Number.isFinite(value)) {
+    throw new RangeError(`${name} must be a finite number, got ${value}`);
+  }
+}
+
+/** decayRate is documented as 0-1; negative values would amplify the bias. */
+function assertDecayRate(decayRate: number): void {
+  if (!Number.isFinite(decayRate) || decayRate < 0 || decayRate > 1) {
+    throw new RangeError(`decayRate must be within [0, 1], got ${decayRate}`);
   }
 }
 

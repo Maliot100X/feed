@@ -15,7 +15,8 @@
  *
  * @example
  * ```typescript
- * if (!await acquireAgentLock(agentId)) {
+ * const processId = createAgentLockOwner();
+ * if (!await acquireAgentLock(agentId, processId)) {
  *   return; // Skip this agent, still running from previous tick
  * }
  *
@@ -58,26 +59,36 @@ function getAgentLockId(agentId: string): string {
   return `agent-tick-${agentId}`;
 }
 
+/** Create a unique, serverless-safe lock owner token. */
+export function createAgentLockOwner(): string {
+  return `serverless-${Date.now()}-${randomBytes(8).toString('hex')}`;
+}
+
+/**
+ * Acquire the per-agent tick lease for `processId`.
+ * The caller must keep `processId` to release the lease later; an owner token
+ * is required so a lease can never be acquired without a way to release it.
+ */
 export async function acquireAgentLock(
   agentId: string,
-  processId?: string
+  processId: string
 ): Promise<boolean> {
-  const lockHolder =
-    processId || `serverless-${Date.now()}-${randomBytes(8).toString('hex')}`;
+  if (!processId) throw new Error('acquireAgentLock requires a processId');
   const lockId = getAgentLockId(agentId);
 
   return DistributedLockService.acquireLock({
     lockId,
     durationMs: AGENT_LOCK_DURATION_MS,
     operation: 'agent-tick',
-    processId: lockHolder,
+    processId,
   });
 }
 
 export async function releaseAgentLock(
   agentId: string,
-  processId?: string
+  processId: string
 ): Promise<void> {
+  if (!processId) throw new Error('releaseAgentLock requires a processId');
   const lockId = getAgentLockId(agentId);
   return DistributedLockService.releaseLock(lockId, processId);
 }

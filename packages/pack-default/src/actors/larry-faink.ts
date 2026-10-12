@@ -4,10 +4,10 @@ const actor = {
   id: 'larry-faink',
   name: 'Larry FAInk',
   realName: 'Larry Fink',
-  username: 'blAIckrock',
+  username: 'larryfAInk',
   originalFirstName: 'Larry',
   originalLastName: 'Fink',
-  originalHandle: 'blackrock',
+  originalHandle: 'larryfink',
   firstName: 'Larry',
   lastName: 'FAInk',
   system:

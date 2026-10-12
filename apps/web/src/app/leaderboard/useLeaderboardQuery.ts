@@ -4,8 +4,10 @@ import type { LeaderboardMetric, LeaderboardScope } from '@feed/shared';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { useEffect } from 'react';
 import {
+  type CurrentUserPosition,
   fetchLeaderboardData,
-  type LeaderboardData,
+  isRetryableLeaderboardError,
+  LeaderboardFetchError,
 } from './fetchLeaderboardData';
 
 // Leaderboard pages are cached on the server for a short TTL.
@@ -16,6 +18,11 @@ const REFETCH_INTERVAL = 2 * 60 * 1000; // 2 min background poll
 
 const POSITION_STALE_TIME = 5 * 60 * 1000; // 5 min — avoid refetching rank on every page switch
 const POSITION_GC_TIME = 15 * 60 * 1000; // 15 min
+const MAX_RETRIES = 2;
+
+function retryLeaderboard(failureCount: number, error: Error): boolean {
+  return failureCount < MAX_RETRIES && isRetryableLeaderboardError(error);
+}
 
 export function getLeaderboardQueryKey({
   metric,
@@ -90,15 +97,16 @@ export function useLeaderboardQuery({
   userId?: string;
   authToken?: string | null;
 }) {
+  const queryKey = getLeaderboardQueryKey({
+    metric,
+    page,
+    pageSize,
+    scope,
+    userId,
+    authToken,
+  });
   return useQuery({
-    queryKey: getLeaderboardQueryKey({
-      metric,
-      page,
-      pageSize,
-      scope,
-      userId,
-      authToken,
-    }),
+    queryKey,
     queryFn: ({ signal }) =>
       fetchLeaderboardData({
         currentPage: page,
@@ -113,9 +121,25 @@ export function useLeaderboardQuery({
     gcTime: GC_TIME,
     refetchInterval: REFETCH_INTERVAL,
     refetchOnWindowFocus: true,
-    // Keep previous page data visible while loading the new page
-    placeholderData: (previousData) => previousData,
+    retry: retryLeaderboard,
+    // Keep previous page data visible only while paginating the same
+    // metric/scope/viewer; never show another viewer's or scope's data.
+    placeholderData: (previousData, previousQuery) =>
+      previousQuery &&
+      isSameLeaderboardExceptPage(previousQuery.queryKey, queryKey)
+        ? previousData
+        : undefined,
   });
+}
+
+/** Query keys equal in every dimension except the page number (index 3). */
+export function isSameLeaderboardExceptPage(
+  a: readonly unknown[],
+  b: readonly unknown[]
+): boolean {
+  return (
+    a.length === b.length && a.every((value, i) => i === 3 || value === b[i])
+  );
 }
 
 /**
@@ -157,15 +181,20 @@ export function useMyLeaderboardPosition({
         headers: authToken ? { Authorization: `Bearer ${authToken}` } : {},
         signal,
       });
-      if (!res.ok) return null;
-      const data = await res.json();
-      return (data.currentUser ?? null) as {
-        rank: number;
-        page: number;
-        entry: LeaderboardData['leaderboard'][0];
-      } | null;
+      // Throw on failure so an error is never cached as "unranked" (null).
+      if (!res.ok) {
+        throw new LeaderboardFetchError(
+          `Failed to fetch leaderboard position: ${res.status}`,
+          res.status
+        );
+      }
+      const data = (await res.json()) as {
+        currentUser?: CurrentUserPosition | null;
+      };
+      return data.currentUser ?? null;
     },
     enabled: !!userId && !!authToken,
+    retry: retryLeaderboard,
     staleTime: POSITION_STALE_TIME,
     gcTime: POSITION_GC_TIME,
     refetchOnWindowFocus: true,

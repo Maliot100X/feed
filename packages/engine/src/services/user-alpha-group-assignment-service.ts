@@ -26,6 +26,7 @@ import {
   groupMembers,
   groups,
   isNotNull,
+  sql,
   users,
 } from '@feed/db';
 import {
@@ -187,10 +188,11 @@ export class UserAlphaGroupAssignmentService {
 
     const excludeNpcIds = new Set(existingNpcMemberships.map((e) => e.ownerId));
 
-    // 5. Find available Tier 3 groups with capacity
+    // 5. Find available Tier 3 groups with capacity, ranked with followed
+    // NPCs first across ALL candidates (not an arbitrary prefix)
     const availableGroups = await this.findAvailableTier3Groups(
       excludeNpcIds,
-      groupsNeeded * 3 // Get extra for fallback
+      followedNpcIds
     );
 
     if (availableGroups.length === 0) {
@@ -203,22 +205,16 @@ export class UserAlphaGroupAssignmentService {
       return result;
     }
 
-    // 6. Prioritize: followed NPCs first, then by available capacity
-    const sortedGroups = availableGroups.sort((a, b) => {
-      const aFollowed = followedNpcIds.has(a.npcId) ? 1 : 0;
-      const bFollowed = followedNpcIds.has(b.npcId) ? 1 : 0;
-      if (aFollowed !== bFollowed) {
-        return bFollowed - aFollowed; // Followed NPCs first
-      }
-      // Then by available slots (more slots = less likely to be full soon)
-      return b.availableSlots - a.availableSlots;
-    });
-
-    // 7. Assign to groups (up to groupsNeeded)
-    for (const group of sortedGroups.slice(0, groupsNeeded)) {
+    // 6. Assign in ranked order, moving on to the next candidate when one
+    // fails (e.g. filled concurrently) until the target is met
+    const assignedNpcIds = new Set<string>();
+    for (const group of availableGroups) {
+      if (result.groupsAssigned >= groupsNeeded) break;
+      if (assignedNpcIds.has(group.npcId)) continue;
       const addResult = await this.addUserToGroup(userId, group);
 
       if (addResult.success) {
+        assignedNpcIds.add(group.npcId);
         result.assignments.push({
           npcId: group.npcId,
           npcName: group.npcName,
@@ -263,11 +259,12 @@ export class UserAlphaGroupAssignmentService {
    * Queries all Tier 3 NPC groups and filters to those with room for new members.
    *
    * @param excludeNpcIds - NPCs to exclude (user already in their groups)
-   * @param limit - Maximum groups to return
+   * @param followedNpcIds - NPCs the user follows (ranked first)
+   * @returns all eligible groups: followed NPCs first, then most free slots
    */
   private static async findAvailableTier3Groups(
     excludeNpcIds: Set<string>,
-    limit: number
+    followedNpcIds: Set<string>
   ): Promise<AvailableGroup[]> {
     // Ensure all NPCs have their tier groups created (one-time per process)
     // This is idempotent but expensive, so we only run it once.
@@ -356,7 +353,15 @@ export class UserAlphaGroupAssignmentService {
       });
     }
 
-    return availableGroups.slice(0, limit);
+    return availableGroups.sort((a, b) => {
+      const aFollowed = followedNpcIds.has(a.npcId) ? 1 : 0;
+      const bFollowed = followedNpcIds.has(b.npcId) ? 1 : 0;
+      if (aFollowed !== bFollowed) return bFollowed - aFollowed;
+      if (a.availableSlots !== b.availableSlots) {
+        return b.availableSlots - a.availableSlots;
+      }
+      return a.groupId.localeCompare(b.groupId); // deterministic ties
+    });
   }
 
   /**
@@ -378,7 +383,11 @@ export class UserAlphaGroupAssignmentService {
 
     // Check if user is already a member (could be inactive from previous membership)
     const [existingMember] = await db
-      .select({ id: groupMembers.id, isActive: groupMembers.isActive })
+      .select({
+        id: groupMembers.id,
+        isActive: groupMembers.isActive,
+        kickedAt: groupMembers.kickedAt,
+      })
       .from(groupMembers)
       .where(
         and(
@@ -394,38 +403,49 @@ export class UserAlphaGroupAssignmentService {
         return { success: false, error: 'Already a member' };
       }
 
-      // Reactivate existing membership in a transaction for atomicity
-      await db.$transaction(async (tx) => {
-        await tx
-          .update(groupMembers)
-          .set({
-            isActive: true,
-            joinedAt: new Date(),
-            kickedAt: null,
-            kickReason: null,
-            tier: 3,
-          })
-          .where(eq(groupMembers.id, existingMember.id));
+      // Default assignment must not reverse a kick/removal
+      if (existingMember.kickedAt) {
+        return { success: false, error: 'Previously removed from group' };
+      }
 
-        // Upsert chat participant - insert if missing, update if exists
-        await tx
-          .insert(chatParticipants)
-          .values({
-            id: participantId,
-            chatId: group.chatId,
-            userId,
-            invitedBy: group.npcId,
-            isActive: true,
-            joinedAt: new Date(),
-          })
-          .onConflictDoUpdate({
-            target: [chatParticipants.chatId, chatParticipants.userId],
-            set: {
+      // Reactivate existing membership in a transaction for atomicity
+      try {
+        await db.$transaction(async (tx) => {
+          await this.lockGroupAndCheckCapacity(tx, group);
+          await tx
+            .update(groupMembers)
+            .set({
               isActive: true,
               joinedAt: new Date(),
-            },
-          });
-      });
+              tier: 3,
+            })
+            .where(eq(groupMembers.id, existingMember.id));
+
+          // Upsert chat participant - insert if missing, update if exists
+          await tx
+            .insert(chatParticipants)
+            .values({
+              id: participantId,
+              chatId: group.chatId,
+              userId,
+              invitedBy: group.npcId,
+              isActive: true,
+              joinedAt: new Date(),
+            })
+            .onConflictDoUpdate({
+              target: [chatParticipants.chatId, chatParticipants.userId],
+              set: {
+                isActive: true,
+                joinedAt: new Date(),
+              },
+            });
+        });
+      } catch (error) {
+        if (error instanceof Error && error.message === 'GROUP_FULL') {
+          return { success: false, error: 'Group is at capacity' };
+        }
+        throw error;
+      }
 
       return { success: true };
     }
@@ -433,21 +453,7 @@ export class UserAlphaGroupAssignmentService {
     // Create new membership using transaction for atomicity
     try {
       await db.$transaction(async (tx) => {
-        // Re-check capacity inside transaction to prevent race conditions
-        const [currentCount] = await tx
-          .select({ count: count() })
-          .from(groupMembers)
-          .where(
-            and(
-              eq(groupMembers.groupId, group.groupId),
-              eq(groupMembers.isActive, true)
-            )
-          );
-
-        const memberCount = currentCount?.count ?? 0;
-        if (memberCount >= group.maxMembers) {
-          throw new Error('GROUP_FULL');
-        }
+        await this.lockGroupAndCheckCapacity(tx, group);
 
         // Add to group members
         await tx.insert(groupMembers).values({
@@ -480,6 +486,33 @@ export class UserAlphaGroupAssignmentService {
         return { success: false, error: 'Group is at capacity' };
       }
       throw error;
+    }
+  }
+
+  /**
+   * Lock the group row (serializing concurrent joins of the same group) and
+   * verify capacity under that lock. Throws GROUP_FULL when full.
+   */
+  private static async lockGroupAndCheckCapacity(
+    tx: Parameters<Parameters<typeof db.$transaction>[0]>[0],
+    group: AvailableGroup
+  ): Promise<void> {
+    await tx.execute(
+      sql`SELECT ${groups.id} FROM ${groups} WHERE ${groups.id} = ${group.groupId} FOR UPDATE`
+    );
+
+    const [currentCount] = await tx
+      .select({ count: count() })
+      .from(groupMembers)
+      .where(
+        and(
+          eq(groupMembers.groupId, group.groupId),
+          eq(groupMembers.isActive, true)
+        )
+      );
+
+    if ((currentCount?.count ?? 0) >= group.maxMembers) {
+      throw new Error('GROUP_FULL');
     }
   }
 

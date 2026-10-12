@@ -70,7 +70,7 @@ import { z } from 'zod';
 
 const AllocationRequestSchema = z.object({
   npcUserId: z.string().min(1),
-  baseAmount: z.number().positive(),
+  baseAmount: z.number().finite().positive(),
 });
 
 export const POST = withErrorHandling(async (request: NextRequest) => {
@@ -85,7 +85,8 @@ export const POST = withErrorHandling(async (request: NextRequest) => {
     );
 
   const reputation = await getReputationBreakdown(body.npcUserId);
-  const reputationScore = reputation?.reputationScore ?? 50;
+  // Report unknown reputation as null rather than an invented score.
+  const reputationScore = reputation?.reputationScore ?? null;
   const multiplier = adjustedAmount / body.baseAmount;
   const usedFallback = reputation == null;
 

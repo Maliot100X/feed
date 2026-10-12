@@ -266,3 +266,17 @@ it('records failed text and object requests in the active training step', async 
     clearTrajectoryContext(runtime);
   }
 });
+
+it('tokenizes for non-tiktoken provider models instead of throwing', async () => {
+  const encode = groqPlugin.models?.[ModelType.TEXT_TOKENIZER_ENCODE];
+  const decode = groqPlugin.models?.[ModelType.TEXT_TOKENIZER_DECODE];
+  if (!encode || !decode) throw new Error('tokenizer handlers missing');
+  const tokens = (await encode(runtime, {
+    prompt: 'hello world',
+    modelType: ModelType.TEXT_LARGE,
+  } as never)) as number[];
+  expect(tokens.length).toBeGreaterThan(0);
+  expect(
+    await decode(runtime, { tokens, modelType: ModelType.TEXT_LARGE } as never)
+  ).toBe('hello world');
+});

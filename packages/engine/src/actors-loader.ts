@@ -7,7 +7,7 @@
  * **Architecture:**
  * - Default actor roster is sourced from the active pack
  * - Compatibility mappers expose pack actors as `ActorData`
- * - Organizations still use the existing compatibility source files
+ * - Organizations are re-exported from the default pack (@feed/pack-default)
  * - In-memory caching avoids repeated cloning work
  *
  * **Performance:**

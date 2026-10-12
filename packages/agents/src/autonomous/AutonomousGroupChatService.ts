@@ -16,14 +16,37 @@ import {
   gte,
   inArray,
   messages,
+  sql,
   users,
 } from '@feed/db';
-import { StaticDataRegistry, shuffleArray } from '@feed/engine';
+import { StaticDataRegistry } from '@feed/engine';
 import { callGroqDirect } from '../llm/direct-groq';
 import { getAgentConfig } from '../shared/agent-config';
 import { logger } from '../shared/logger';
 import { getAgentContext } from './agent-context';
 import { executeDirectMessage } from './DirectExecutors';
+
+/** Maximum length of an autonomous group chat message. */
+export const MAX_GROUP_CHAT_MESSAGE_LENGTH = 200;
+
+/**
+ * Whether someone mentioned the agent *after* the agent's own latest message.
+ * `recentMessagesDesc` must be ordered newest-first. Mentions the agent has
+ * already replied to do not trigger another response.
+ */
+export function hasUnansweredMention(
+  recentMessagesDesc: ReadonlyArray<{ content: string; senderId: string }>,
+  agentUserId: string,
+  agentDisplayName: string
+): boolean {
+  const name = agentDisplayName.trim().toLowerCase();
+  if (!name) return false;
+  for (const m of recentMessagesDesc) {
+    if (m.senderId === agentUserId) return false;
+    if (m.content.toLowerCase().includes(name)) return true;
+  }
+  return false;
+}
 
 /**
  * Service for autonomous group chat participation
@@ -47,13 +70,18 @@ export class AutonomousGroupChatService {
 
     const config = await getAgentConfig(agentUserId);
 
-    // Get agent's group chats
+    // Get a rotating sample of the agent's active chat memberships. Random
+    // ordering in SQL means chats beyond the limit are not permanently excluded.
     const groupChatsRaw = await db.query.chatParticipants.findMany({
-      where: (chatParticipants, { eq }) =>
-        eq(chatParticipants.userId, agentUserId),
+      where: (chatParticipants, { and, eq }) =>
+        and(
+          eq(chatParticipants.userId, agentUserId),
+          eq(chatParticipants.isActive, true)
+        ),
       with: {
         chat: true,
       },
+      orderBy: () => sql`random()`,
       limit: 20,
     });
 
@@ -61,23 +89,24 @@ export class AutonomousGroupChatService {
 
     // Filter out team chats (Agents) - agents shouldn't auto-respond there
     // Team chats use group.type = 'team'
-    const groupIds = groupChatsRaw
-      .map((c) => c.chat?.groupId)
-      .filter((gid): gid is string => !!gid);
+    const groupIds = [
+      ...new Set(
+        groupChatsRaw
+          .map((c) => c.chat?.groupId)
+          .filter((gid): gid is string => !!gid)
+      ),
+    ];
 
     let teamGroupIds = new Set<string>();
     if (groupIds.length > 0) {
       const teamGroups = await db
         .select({ id: groups.id })
         .from(groups)
-        .where(eq(groups.type, 'team'));
+        .where(and(inArray(groups.id, groupIds), eq(groups.type, 'team')));
       teamGroupIds = new Set(teamGroups.map((g) => g.id));
     }
 
-    // Shuffle to prevent starvation (deterministic order would always favor same chats)
-    const shuffledChats = shuffleArray(groupChatsRaw);
-
-    for (const chatParticipant of shuffledChats) {
+    for (const chatParticipant of groupChatsRaw) {
       const chat = chatParticipant.chat;
       if (!chat || !chat.isGroup) continue; // Skip DMs
 
@@ -99,11 +128,12 @@ export class AutonomousGroupChatService {
 
       if (recentMessages.length === 0) continue;
 
-      // Check if agent was mentioned (exclude agent's own messages)
-      const agentMentioned = recentMessages.some(
-        (m: { content: string; senderId: string }) =>
-          m.senderId !== agentUserId &&
-          m.content.toLowerCase().includes(agentDisplayName.toLowerCase())
+      // Only mentions newer than the agent's own latest message count, so a
+      // mention the agent already answered does not trigger repeat replies.
+      const agentMentioned = hasUnansweredMention(
+        recentMessages,
+        agentUserId,
+        agentDisplayName
       );
 
       // Don't spam - only respond if mentioned OR significant conversation activity
@@ -161,7 +191,7 @@ ${recentMessages
 
 Task: Generate a helpful, engaging message (1-2 sentences) that contributes to the conversation.
 Be authentic to your personality and expertise.
-Keep it under 200 characters.
+Keep it under ${MAX_GROUP_CHAT_MESSAGE_LENGTH} characters.
 Only respond if you have something valuable to add.
 
 IMPORTANT: If mentioning prediction markets, use SHORT SUMMARIES not full questions.
@@ -173,7 +203,6 @@ Generate ONLY the message text, or "SKIP" if you shouldn't respond.`;
       // Use large model (qwen3-32b) for quality group chat content
       const responseContent = await callGroqDirect({
         prompt,
-        system: config?.systemPrompt ?? undefined,
         modelSize: 'large', // Important social content
         runtime: _runtime, // Pass runtime to access W&B trained models AND trajectory context
         temperature: 0.8,
@@ -189,6 +218,15 @@ Generate ONLY the message text, or "SKIP" if you shouldn't respond.`;
         cleanContent.length < 5 ||
         cleanContent.toUpperCase() === 'SKIP'
       ) {
+        continue;
+      }
+
+      if (cleanContent.length > MAX_GROUP_CHAT_MESSAGE_LENGTH) {
+        logger.warn(
+          `Discarding over-length group chat message (${cleanContent.length} chars)`,
+          { agentUserId, chatId: chat.id },
+          'AutonomousGroupChat'
+        );
         continue;
       }
 

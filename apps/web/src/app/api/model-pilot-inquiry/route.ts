@@ -27,6 +27,19 @@ const ScenarioSchema = z.enum(MODEL_PILOT_SCENARIOS);
 const OutputSchema = z.enum(MODEL_PILOT_OUTPUTS);
 const ReviewSchema = z.enum(MODEL_PILOT_REVIEW_LEVELS);
 
+/** Bounded to the available choices; duplicates are rejected. */
+function uniqueChoices<T extends string>(
+  schema: z.ZodType<T>,
+  choices: readonly T[]
+) {
+  return z
+    .array(schema)
+    .max(choices.length)
+    .refine((values) => new Set(values).size === values.length, {
+      message: 'Duplicate choices',
+    });
+}
+
 const BodySchema = z.object({
   email: z.string().trim().email(),
   agreedToTerms: z.literal(true),
@@ -35,9 +48,11 @@ const BodySchema = z.object({
   apiEndpoint: z.string().trim().max(2000),
   toolUse: z.boolean(),
   memory: z.boolean(),
-  deliverables: z.array(DeliverableSchema).min(1),
-  scenarios: z.array(ScenarioSchema).min(1),
-  outputs: z.array(OutputSchema),
+  deliverables: uniqueChoices(DeliverableSchema, MODEL_PILOT_DELIVERABLES).min(
+    1
+  ),
+  scenarios: uniqueChoices(ScenarioSchema, MODEL_PILOT_SCENARIOS).min(1),
+  outputs: uniqueChoices(OutputSchema, MODEL_PILOT_OUTPUTS),
   concurrentAgents: z.number().int().min(10).max(5000),
   scenarioRuns: z.number().int().min(100).max(100_000),
   humanReview: ReviewSchema,
@@ -66,7 +81,6 @@ export const POST = withErrorHandling(async (request: NextRequest) => {
 
   const {
     email,
-    agreedToTerms: _a,
     modelProvider,
     modelName,
     apiEndpoint,
@@ -84,9 +98,9 @@ export const POST = withErrorHandling(async (request: NextRequest) => {
 
   const result = await sendModelPilotInquiryEmails({
     senderEmail: email,
-    modelProvider: modelProvider.trim(),
-    modelName: modelName.trim(),
-    apiEndpoint: apiEndpoint.trim(),
+    modelProvider,
+    modelName,
+    apiEndpoint,
     toolUse,
     memory,
     deliverables,

@@ -81,7 +81,7 @@ export const TIER_CONFIG: Record<TierLevel, TierConfig> = {
   },
 };
 
-export const ALL_TIERS: TierLevel[] = [1, 2, 3];
+export const ALL_TIERS: readonly TierLevel[] = VALID_TIERS;
 
 /** Get configuration for a specific tier */
 export const getTierConfig = (tier: TierLevel): TierConfig => TIER_CONFIG[tier];
@@ -172,8 +172,12 @@ export const TIER_MESSAGE_GUIDANCE: Record<TierLevel, string> = {
 
 /** Get message guidance for a tier, defaults to Tier 1 for null/legacy groups */
 export function getTierMessageGuidance(tier: TierLevel | null): string {
-  if (tier === null || !isValidTier(tier)) {
-    return TIER_MESSAGE_GUIDANCE[1]; // Legacy groups get full alpha
+  if (tier === null) {
+    return TIER_MESSAGE_GUIDANCE[1]; // Legacy (untiered) groups get full alpha
+  }
+  // A corrupt runtime tier must not silently receive the most privileged guidance.
+  if (!isValidTier(tier)) {
+    throw new RangeError(`Invalid tier level: ${String(tier)}`);
   }
   return TIER_MESSAGE_GUIDANCE[tier];
 }

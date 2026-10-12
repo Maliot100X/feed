@@ -72,13 +72,25 @@ import { sanitizeForJson } from '@/lib/json/sanitize';
 import { parseLeaderboardQuery } from './query';
 
 const CACHE_KEY_NAMESPACE = 'leaderboard';
-const CACHE_TTL_MS = (() => {
+/**
+ * LEADERBOARD_CACHE_MS: `0` disables caching; any other value must be a
+ * whole number of milliseconds >= 1000 (TTL is applied in whole seconds).
+ * Invalid values (negative, fractional, sub-second) fail fast instead of being
+ * silently turned into a zero/negative TTL.
+ */
+const CACHE_TTL_SECONDS = (() => {
   const raw = process.env.LEADERBOARD_CACHE_MS;
-  if (raw === undefined) return 120_000;
-  const parsed = Number(raw);
-  return Number.isFinite(parsed) ? parsed : 120_000;
+  if (raw === undefined || raw.trim() === '') return 120;
+  const ms = Number(raw);
+  if (ms === 0) return 0;
+  if (!Number.isInteger(ms) || ms < 1000) {
+    throw new Error(
+      `Invalid LEADERBOARD_CACHE_MS "${raw}": use 0 to disable or an integer >= 1000`
+    );
+  }
+  return Math.floor(ms / 1000);
 })();
-const CACHE_TTL_SECONDS = Math.floor(CACHE_TTL_MS / 1000);
+const CACHE_ENABLED = CACHE_TTL_SECONDS > 0;
 const STALE_SECONDS = CACHE_TTL_SECONDS * 3;
 
 type CachedLeaderboardEntry = {
@@ -128,7 +140,7 @@ export const GET = withErrorHandling(async (request: NextRequest) => {
   let generatedAt: string = new Date().toISOString();
   let cacheHit = false;
 
-  if (CACHE_TTL_MS > 0) {
+  if (CACHE_ENABLED) {
     const cached = await getCache<CachedLeaderboardEntry>(cacheKey, {
       namespace: CACHE_KEY_NAMESPACE,
     });
@@ -146,7 +158,7 @@ export const GET = withErrorHandling(async (request: NextRequest) => {
         : await leaderboardService.getWalletLeaderboard(page, pageSize);
     generatedAt = new Date().toISOString();
 
-    if (CACHE_TTL_MS > 0) {
+    if (CACHE_ENABLED) {
       await setCache(
         cacheKey,
         { data: leaderboardData, generatedAt } satisfies CachedLeaderboardEntry,
@@ -183,7 +195,7 @@ export const GET = withErrorHandling(async (request: NextRequest) => {
 
   const authUserId = authUser?.dbUserId ?? authUser?.userId;
   const canResolveFollowingUserIds =
-    authUserId !== undefined && (!userId || userId === authUserId);
+    authUserId !== undefined && (!userId || effectiveUserId === authUserId);
   let followingUserIdsResolved = false;
   let followingUserIds: string[] = [];
 
@@ -248,7 +260,9 @@ export const GET = withErrorHandling(async (request: NextRequest) => {
       'x-cache': cacheHit ? 'leaderboard-hit' : 'leaderboard-miss',
       'Cache-Control': isPersonalizedResponse
         ? 'private, no-store'
-        : `public, s-maxage=${CACHE_TTL_SECONDS}, stale-while-revalidate=${STALE_SECONDS}`,
+        : CACHE_ENABLED
+          ? `public, s-maxage=${CACHE_TTL_SECONDS}, stale-while-revalidate=${STALE_SECONDS}`
+          : 'no-store',
       Vary: 'Accept-Encoding',
     }
   );

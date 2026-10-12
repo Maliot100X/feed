@@ -103,6 +103,7 @@
 
 import {
   authenticate,
+  BadRequestError,
   checkRateLimitAndDuplicates,
   getStorageClient,
   RATE_LIMIT_CONFIGS,
@@ -152,18 +153,21 @@ export const POST = withErrorHandling(async (request: NextRequest) => {
 
   // Parse multipart form data
   const formData = await request.formData();
-  const file = formData.get('file') as File | null;
-  const imageType = formData.get('type') as string | null; // 'profile', 'cover', or 'post'
-
-  // Validate using schema
-  ImageUploadSchema.parse({
-    file: file ? { size: file.size, type: file.type } : null,
-    type: imageType || undefined,
-  });
-
-  if (!file) {
-    throw new Error('No file provided');
+  const fileEntry = formData.get('file');
+  const typeEntry = formData.get('type');
+  if (!(fileEntry instanceof File)) {
+    throw new BadRequestError('No file provided');
   }
+  if (typeEntry !== null && typeof typeEntry !== 'string') {
+    throw new BadRequestError('type must be a string field');
+  }
+  const file = fileEntry;
+
+  // Validate using schema and use the parsed output
+  const { type: imageType } = ImageUploadSchema.parse({
+    file: { size: file.size, type: file.type },
+    type: typeEntry || undefined,
+  });
 
   // Determine folder based on image type
   let folder: 'profiles' | 'covers' | 'posts' = 'posts';
@@ -182,7 +186,7 @@ export const POST = withErrorHandling(async (request: NextRequest) => {
 
   // Validate magic bytes match declared MIME type (prevents fake file uploads)
   if (!validateImageMagicBytes(buffer, file.type)) {
-    throw new Error(
+    throw new BadRequestError(
       'File content does not match declared type. Ensure you are uploading a valid image.'
     );
   }

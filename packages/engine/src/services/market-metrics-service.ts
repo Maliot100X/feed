@@ -10,7 +10,9 @@
  * @module engine/services/market-metrics-service
  */
 
+import { PredictionPricing } from '@feed/core/markets/prediction/client';
 import {
+  and,
   db,
   desc,
   eq,
@@ -92,6 +94,58 @@ export interface MarketMetricsContext {
   promptContext: string;
 }
 
+/** Probability std-dev at which the volatility score saturates to 1. */
+const PROBABILITY_STDDEV_SATURATION = 0.3;
+/** Per-observation return std-dev (10%) at which the volatility score saturates to 1. */
+const RETURN_STDDEV_SATURATION = 0.1;
+
+function standardDeviation(values: number[]): number {
+  const mean = values.reduce((sum, v) => sum + v, 0) / values.length;
+  const variance =
+    values.reduce((sum, v) => sum + (v - mean) ** 2, 0) / values.length;
+  return Math.sqrt(variance);
+}
+
+/**
+ * Volatility score (0-1) for a probability series (values in [0,1]).
+ * Returns 0 when fewer than two observations exist.
+ */
+export function calculateProbabilityVolatility(
+  probabilities: number[]
+): number {
+  if (probabilities.length < 2) return 0;
+  return Math.min(
+    1,
+    standardDeviation(probabilities) / PROBABILITY_STDDEV_SATURATION
+  );
+}
+
+/**
+ * Scale-invariant volatility score (0-1) for a chronological price series,
+ * based on the std-dev of simple per-observation returns. Non-positive or
+ * non-finite prices are excluded. Returns 0 when fewer than two returns exist.
+ */
+export function calculateReturnVolatility(
+  chronologicalPrices: number[]
+): number {
+  const valid = chronologicalPrices.filter((p) => Number.isFinite(p) && p > 0);
+  const returns: number[] = [];
+  for (let i = 1; i < valid.length; i++) {
+    returns.push(valid[i]! / valid[i - 1]! - 1);
+  }
+  if (returns.length < 2) return 0;
+  return Math.min(1, standardDeviation(returns) / RETURN_STDDEV_SATURATION);
+}
+
+/**
+ * Format the leading outcome of a binary market, e.g. 0.05 => "95% NO".
+ */
+export function formatLeadingOutcome(yesProbability: number): string {
+  return yesProbability >= 0.5
+    ? `${(yesProbability * 100).toFixed(0)}% YES`
+    : `${((1 - yesProbability) * 100).toFixed(0)}% NO`;
+}
+
 /**
  * Service for gathering market metrics to inform question generation
  */
@@ -120,11 +174,11 @@ export class MarketMetricsService {
     ]);
 
     // Calculate aggregated metrics
-    const volatilePredictions = predictionMetrics
+    const volatilePredictions = [...predictionMetrics]
       .sort((a, b) => b.volatility - a.volatility)
       .slice(0, 5);
 
-    const activePredictions = predictionMetrics
+    const activePredictions = [...predictionMetrics]
       .sort((a, b) => b.positionCount - a.positionCount)
       .slice(0, 5);
 
@@ -229,6 +283,9 @@ export class MarketMetricsService {
       .where(eq(markets.resolved, false))
       .limit(50);
 
+    if (activeMarkets.length === 0) return [];
+    const activeMarketIds = activeMarkets.map((m) => m.id);
+
     // Get position counts per market
     const positionCounts = await db
       .select({
@@ -236,7 +293,12 @@ export class MarketMetricsService {
         count: sql<number>`count(*)::int`,
       })
       .from(positions)
-      .where(eq(positions.status, 'active'))
+      .where(
+        and(
+          eq(positions.status, 'active'),
+          inArray(positions.marketId, activeMarketIds)
+        )
+      )
       .groupBy(positions.marketId);
 
     const positionCountMap = new Map(
@@ -251,7 +313,12 @@ export class MarketMetricsService {
         createdAt: predictionPriceHistories.createdAt,
       })
       .from(predictionPriceHistories)
-      .where(gte(predictionPriceHistories.createdAt, lookbackDate))
+      .where(
+        and(
+          gte(predictionPriceHistories.createdAt, lookbackDate),
+          inArray(predictionPriceHistories.marketId, activeMarketIds)
+        )
+      )
       .orderBy(desc(predictionPriceHistories.createdAt))
       .limit(1000);
 
@@ -267,17 +334,18 @@ export class MarketMetricsService {
     }
 
     return activeMarkets.map((market) => {
-      const yesShares = Number(market.yesShares);
-      const noShares = Number(market.noShares);
-      const totalShares = yesShares + noShares;
-      const currentProbability =
-        totalShares > 0 ? yesShares / totalShares : 0.5;
+      // CPMM: YES probability is the NO pool's share of reserves.
+      const currentProbability = PredictionPricing.getCurrentPrice(
+        Number(market.yesShares),
+        Number(market.noShares),
+        'yes'
+      );
       const liquidity = Number(market.liquidity);
       const positionCount = positionCountMap.get(market.id) || 0;
 
       // Calculate volatility from price history
       const history = historyByMarket.get(market.id) || [];
-      const volatility = this.calculateVolatility(
+      const volatility = calculateProbabilityVolatility(
         history.map((h) => h.yesPrice)
       );
 
@@ -413,8 +481,9 @@ export class MarketMetricsService {
           ? ((currentPrice - referencePrice) / referencePrice) * 100
           : 0;
 
-      const volatility = this.calculateVolatility(
-        prices.map((p) => Number(p.price))
+      // prices are sorted newest-first; returns are computed chronologically
+      const volatility = calculateReturnVolatility(
+        prices.map((p) => Number(p.price)).reverse()
       );
 
       // Trending if > 10% change
@@ -439,22 +508,6 @@ export class MarketMetricsService {
     }
 
     return metrics;
-  }
-
-  /**
-   * Calculate volatility from price series (standard deviation normalized)
-   */
-  private static calculateVolatility(prices: number[]): number {
-    if (prices.length < 2) return 0;
-
-    const mean = prices.reduce((sum, p) => sum + p, 0) / prices.length;
-    const squaredDiffs = prices.map((p) => Math.pow(p - mean, 2));
-    const variance =
-      squaredDiffs.reduce((sum, d) => sum + d, 0) / squaredDiffs.length;
-    const stdDev = Math.sqrt(variance);
-
-    // Normalize to 0-1 range (assuming max reasonable stdDev is 0.3 for probabilities)
-    return Math.min(1, stdDev / 0.3);
   }
 
   /**
@@ -530,7 +583,7 @@ export class MarketMetricsService {
           .slice(0, 3)
           .map(
             (m) =>
-              `- "${m.question.substring(0, 50)}..." (${(m.currentProbability * 100).toFixed(0)}% ${m.currentProbability > 0.5 ? 'YES' : 'NO'})`
+              `- "${m.question.substring(0, 50)}..." (${formatLeadingOutcome(m.currentProbability)})`
           )
           .join('\n')}`
       );

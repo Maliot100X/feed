@@ -45,6 +45,7 @@ import {
 import type { NextRequest } from 'next/server';
 import { NextResponse } from 'next/server';
 import { v4 as uuidv4 } from 'uuid';
+import { z } from 'zod';
 import { cleanupRuntimeStateCache } from '@/lib/agents/runtime-state-cache';
 import { MODEL_TIER_POINTS_COST } from '@/lib/constants';
 import { trackServerEvent } from '@/lib/posthog/server';
@@ -215,6 +216,18 @@ Output ONLY this XML with your actual response (not examples or placeholders):
 <text>Your reply in character, with any relevant details from the actions</text>
 </response>`;
 
+const AgentChatBodySchema = z.object({
+  message: z.string().min(1).max(10000),
+  usePro: z.boolean().default(false),
+  /** Optional team chat ID - if provided, agent response goes to the shared team chat */
+  teamChatId: z.string().trim().min(1).max(100).optional(),
+});
+
+const ChatHistoryQuerySchema = z.object({
+  limit: z.coerce.number().int().min(1).max(100).default(50),
+  cursor: z.string().max(200).optional(),
+});
+
 // =============================================================================
 // POST Handler
 // =============================================================================
@@ -227,21 +240,11 @@ export const POST = withErrorHandling(
     const { agentId } = await params;
     logger.info('Agent chat endpoint hit', { agentId }, 'AgentChat');
 
-    const body = (await req.json()) as {
-      message: string;
-      usePro?: boolean;
-      /** Optional team chat ID - if provided, agent response goes to the shared team chat */
-      teamChatId?: string;
-      /** Owner display name for team chat context */
-      teamChatOwnerName?: string;
-      /** Owner username for team chat context */
-      teamChatOwnerUsername?: string;
-    };
-    const message = body.message;
-    const usePro = body.usePro ?? false;
-    const teamChatId = body.teamChatId;
-    const teamChatOwnerName = body.teamChatOwnerName;
-    const teamChatOwnerUsername = body.teamChatOwnerUsername;
+    // Strict body: a non-boolean usePro (e.g. the string "false") must not
+    // select the paid tier. Owner labels are derived server-side from the
+    // authenticated user, never taken from the client.
+    const body = AgentChatBodySchema.parse(await req.json());
+    const { message, usePro, teamChatId } = body;
     const isTeamChatMode = !!teamChatId;
 
     // Get abort signal from request for cancellation support
@@ -438,8 +441,8 @@ export const POST = withErrorHandling(
           // Team chat context
           isTeamChatMode,
           teamChatId,
-          teamChatOwnerName: teamChatOwnerName || ownerName,
-          teamChatOwnerUsername: teamChatOwnerUsername || ownerUsername,
+          teamChatOwnerName: ownerName,
+          teamChatOwnerUsername: ownerUsername,
           agentName: agentWithConfig.displayName || 'Agent',
           agentUsername: agentWithConfig.username || '',
         };
@@ -735,8 +738,8 @@ export const POST = withErrorHandling(
           // Team chat context
           isTeamChatMode,
           teamChatId,
-          teamChatOwnerName: teamChatOwnerName || ownerName,
-          teamChatOwnerUsername: teamChatOwnerUsername || ownerUsername,
+          teamChatOwnerName: ownerName,
+          teamChatOwnerUsername: ownerUsername,
           agentName: agentWithConfig.displayName || 'Agent',
           agentUsername: agentWithConfig.username || '',
         };
@@ -1012,8 +1015,10 @@ export const GET = withErrorHandling(
     }
 
     const { searchParams } = new URL(req.url);
-    const limit = Number.parseInt(searchParams.get('limit') || '50');
-    const cursor = searchParams.get('cursor') || undefined;
+    const { limit, cursor } = ChatHistoryQuerySchema.parse({
+      limit: searchParams.get('limit') ?? undefined,
+      cursor: searchParams.get('cursor') || undefined,
+    });
 
     const { messages, hasMore, nextCursor } = await agentService.getChatHistory(
       agentId,

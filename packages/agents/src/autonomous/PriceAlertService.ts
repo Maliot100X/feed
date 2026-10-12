@@ -16,6 +16,9 @@
  */
 
 import {
+  and,
+  chatParticipants,
+  chats,
   db,
   eq,
   perpMarketSnapshots,
@@ -28,6 +31,42 @@ import type { PriceAlert } from '@feed/db/schema';
 import { teamChatService } from '../services/TeamChatService';
 import { logger } from '../shared/logger';
 import { executeDirectMessage } from './DirectExecutors';
+
+const DEFAULT_COOLDOWN_MINUTES = 15;
+
+export type AlertCooldownState =
+  | { status: 'ready' }
+  | { status: 'cooling-down' }
+  | { status: 'invalid'; reason: string };
+
+/**
+ * Validate an alert's numeric config and evaluate its cooldown at `nowMs`.
+ * An explicit cooldown of 0 is honored (no cooldown); a missing one uses the
+ * default. Invalid thresholds/cooldowns/timestamps are reported instead of
+ * silently disabling the cooldown or producing Infinity percentages.
+ */
+export function evaluateAlertCooldown(
+  alert: Pick<PriceAlert, 'threshold' | 'lastTriggeredAt'> & {
+    cooldownMinutes?: number;
+  },
+  nowMs: number
+): AlertCooldownState {
+  if (!Number.isFinite(alert.threshold) || alert.threshold <= 0) {
+    return { status: 'invalid', reason: 'threshold must be a positive number' };
+  }
+  const cooldownMinutes = alert.cooldownMinutes ?? DEFAULT_COOLDOWN_MINUTES;
+  if (!Number.isFinite(cooldownMinutes) || cooldownMinutes < 0) {
+    return { status: 'invalid', reason: 'cooldownMinutes must be >= 0' };
+  }
+  if (!alert.lastTriggeredAt) return { status: 'ready' };
+  const lastMs = new Date(alert.lastTriggeredAt).getTime();
+  if (!Number.isFinite(lastMs)) {
+    return { status: 'invalid', reason: 'lastTriggeredAt is not a valid date' };
+  }
+  return nowMs - lastMs < cooldownMinutes * 60 * 1000
+    ? { status: 'cooling-down' }
+    : { status: 'ready' };
+}
 
 /**
  * Price Alert Service
@@ -55,14 +94,16 @@ export class PriceAlertService {
     let alertsSent = 0;
 
     for (const alert of enabledAlerts) {
-      // Check cooldown
-      if (alert.lastTriggeredAt) {
-        const cooldownMs = (alert.cooldownMinutes || 15) * 60 * 1000;
-        const elapsed = Date.now() - new Date(alert.lastTriggeredAt).getTime();
-        if (elapsed < cooldownMs) {
-          continue;
-        }
+      const cooldown = evaluateAlertCooldown(alert, Date.now());
+      if (cooldown.status === 'invalid') {
+        logger.warn(
+          `[PriceAlert] Skipping invalid alert ${alert.id}: ${cooldown.reason}`,
+          { agentUserId, tokenSymbol: alert.tokenSymbol },
+          'PriceAlertService'
+        );
+        continue;
       }
+      if (cooldown.status === 'cooling-down') continue;
 
       // Get current price from perpetual market snapshots
       const currentPrice = await this.getCurrentPrice(alert.tokenSymbol);
@@ -80,6 +121,18 @@ export class PriceAlertService {
       let deliveryChatId: string | undefined;
 
       if (alert.deliveryChannel === 'group' && alert.deliveryChatId) {
+        // Re-check membership at delivery time: the agent may have left the
+        // group since the alert was created.
+        if (
+          !(await this.isActiveGroupMember(agentUserId, alert.deliveryChatId))
+        ) {
+          logger.warn(
+            `[PriceAlert] Agent is not an active member of group ${alert.deliveryChatId}; skipping alert ${alert.id}`,
+            { agentUserId, tokenSymbol: alert.tokenSymbol },
+            'PriceAlertService'
+          );
+          continue;
+        }
         deliveryChatId = alert.deliveryChatId;
       } else {
         // Default: deliver to team chat (agent→owner standard channel)
@@ -95,7 +148,18 @@ export class PriceAlertService {
         continue;
       }
 
-      // Send alert
+      // Claim the trigger atomically before sending: the claim only succeeds
+      // if the alert still exists, is still enabled and its lastTriggeredAt is
+      // unchanged since we read it, so concurrent ticks cannot double-send.
+      const claimedAt = new Date().toISOString();
+      const claimed = await this.setAlertTriggerIfUnchanged(
+        agentUserId,
+        alert.id,
+        alert.lastTriggeredAt ?? null,
+        claimedAt
+      );
+      if (!claimed) continue;
+
       const result = await executeDirectMessage({
         agentUserId,
         chatId: deliveryChatId,
@@ -109,10 +173,14 @@ export class PriceAlertService {
           { agentUserId, alertId: alert.id, chatId: deliveryChatId },
           'PriceAlertService'
         );
-
-        // Update lastTriggeredAt in the config
-        await this.updateAlertTimestamp(agentUserId, alert.id);
       } else {
+        // Release our claim so the alert can retry next tick.
+        await this.setAlertTriggerIfUnchanged(
+          agentUserId,
+          alert.id,
+          claimedAt,
+          alert.lastTriggeredAt ?? null
+        );
         logger.warn(
           `[PriceAlert] Failed to send alert: ${result.error}`,
           { agentUserId, alertId: alert.id },
@@ -175,20 +243,40 @@ export class PriceAlertService {
     return teamChat?.chatId;
   }
 
-  /**
-   * Update the lastTriggeredAt timestamp for a specific alert.
-   * Uses an atomic SQL JSONB update to avoid read-modify-write race conditions.
-   */
-  private async updateAlertTimestamp(
+  /** Whether the agent is an active participant of the given group chat. */
+  private async isActiveGroupMember(
     agentUserId: string,
-    alertId: string
-  ): Promise<void> {
-    const now = new Date().toISOString();
+    chatId: string
+  ): Promise<boolean> {
+    const [membership] = await db
+      .select({ chatId: chatParticipants.chatId })
+      .from(chatParticipants)
+      .innerJoin(chats, eq(chats.id, chatParticipants.chatId))
+      .where(
+        and(
+          eq(chatParticipants.chatId, chatId),
+          eq(chatParticipants.userId, agentUserId),
+          eq(chatParticipants.isActive, true),
+          eq(chats.isGroup, true)
+        )
+      )
+      .limit(1);
+    return Boolean(membership);
+  }
 
-    // Atomic JSON update: iterate the array and set lastTriggeredAt on the matching alert.
-    // This avoids the read-modify-write race of SELECT → map → UPDATE.
-    // Column is json (not jsonb), so cast to jsonb for processing, then back to json.
-    await db
+  /**
+   * Set lastTriggeredAt for one enabled alert only if its current value equals
+   * `expected` (null = never triggered). Single atomic UPDATE; returns whether
+   * a row was changed.
+   * Column is json (not jsonb), so cast to jsonb for processing, then back to json.
+   */
+  private async setAlertTriggerIfUnchanged(
+    agentUserId: string,
+    alertId: string,
+    expected: string | null,
+    next: string | null
+  ): Promise<boolean> {
+    const updated = await db
       .update(userAgentConfigs)
       .set({
         priceAlerts: sql`(
@@ -196,7 +284,10 @@ export class PriceAlertService {
             jsonb_agg(
               CASE
                 WHEN elem->>'id' = ${alertId}
-                THEN elem || jsonb_build_object('lastTriggeredAt', ${now}::text)
+                THEN CASE
+                  WHEN ${next}::text IS NULL THEN elem - 'lastTriggeredAt'
+                  ELSE elem || jsonb_build_object('lastTriggeredAt', ${next}::text)
+                END
                 ELSE elem
               END
             ),
@@ -208,7 +299,21 @@ export class PriceAlertService {
         )`,
         updatedAt: new Date(),
       })
-      .where(eq(userAgentConfigs.userId, agentUserId));
+      .where(
+        and(
+          eq(userAgentConfigs.userId, agentUserId),
+          sql`EXISTS (
+            SELECT 1 FROM jsonb_array_elements(
+              COALESCE(${userAgentConfigs.priceAlerts}::jsonb, '[]'::jsonb)
+            ) AS cur
+            WHERE cur->>'id' = ${alertId}
+              AND (cur->>'enabled')::boolean IS TRUE
+              AND (cur->>'lastTriggeredAt') IS NOT DISTINCT FROM ${expected}::text
+          )`
+        )
+      )
+      .returning({ id: userAgentConfigs.id });
+    return updated.length > 0;
   }
 }
 

@@ -37,51 +37,64 @@ export default function MarketsPage() {
   // Poll positions for the sidebar
   useUserPositionsPolling(userId ?? null);
 
-  // Ref guard to prevent Stripe redirect effect from firing multiple times
+  // Guards against re-handling the same Stripe return while router.replace
+  // is in flight; reset once the params are gone so a later checkout in the
+  // same mounted page is handled too.
   const stripeHandledRef = useRef(false);
+  // Follow-up balance refresh must survive the URL cleanup (which changes
+  // searchParams and re-runs the effect), so it is only cleared on unmount.
+  const stripeRefreshTimerRef = useRef<ReturnType<typeof setTimeout> | null>(
+    null
+  );
 
-  // Handle Stripe Checkout success/cancel redirects
-  // When user returns from Stripe, show appropriate toast and clean URL
+  useEffect(
+    () => () => {
+      if (stripeRefreshTimerRef.current) {
+        clearTimeout(stripeRefreshTimerRef.current);
+      }
+    },
+    []
+  );
+
+  // Handle Stripe Checkout success/cancel redirects: notify, refresh the
+  // balance and clean the URL. The query string only indicates a return from
+  // Checkout; points are credited by the webhook.
   useEffect(() => {
-    // Prevent re-entry if already handled (can happen before router.replace completes)
+    const stripeSuccess = searchParams.get('stripe_success') === 'true';
+    const stripeCancelled = searchParams.get('stripe_cancelled') === 'true';
+
+    if (!stripeSuccess && !stripeCancelled) {
+      stripeHandledRef.current = false;
+      return;
+    }
     if (stripeHandledRef.current) return;
+    stripeHandledRef.current = true;
 
-    const stripeSuccess = searchParams.get('stripe_success');
-    const stripeCancelled = searchParams.get('stripe_cancelled');
+    invalidateWalletBalance();
+    const url = new URL(window.location.href);
 
-    if (stripeSuccess === 'true') {
-      stripeHandledRef.current = true;
-      // Payment received - points are credited via webhook asynchronously
-      // Message is conservative since webhook timing is not guaranteed
-      const showToast = () => {
-        toast.success(
-          'Payment received! Your points will be credited shortly.',
-          {
-            duration: 5000,
-            description: 'Your balance will update automatically.',
-          }
-        );
+    if (stripeSuccess) {
+      toast.success('Checkout complete', {
+        duration: 5000,
+        description:
+          'Your points will be credited once the payment is confirmed. Your balance will update automatically.',
+      });
+      // The webhook credits points asynchronously; refresh once more after it
+      // has typically landed.
+      if (stripeRefreshTimerRef.current) {
+        clearTimeout(stripeRefreshTimerRef.current);
+      }
+      stripeRefreshTimerRef.current = setTimeout(() => {
+        stripeRefreshTimerRef.current = null;
         invalidateWalletBalance();
-      };
-      // Small delay to allow webhook to complete (typically < 1 second)
-      const timeout = setTimeout(showToast, 1000);
-
-      // Clean up URL params after showing toast
-      const url = new URL(window.location.href);
+      }, 3000);
       url.searchParams.delete('stripe_success');
       url.searchParams.delete('session_id');
-      router.replace(url.pathname + url.search, { scroll: false });
-
-      return () => clearTimeout(timeout);
-    } else if (stripeCancelled === 'true') {
-      stripeHandledRef.current = true;
-      invalidateWalletBalance();
-      // Clean up URL params
-      const url = new URL(window.location.href);
+    } else {
       url.searchParams.delete('stripe_cancelled');
-      router.replace(url.pathname + url.search, { scroll: false });
     }
-    return undefined;
+
+    router.replace(url.pathname + url.search, { scroll: false });
   }, [searchParams, router]);
 
   return (

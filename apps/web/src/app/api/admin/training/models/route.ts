@@ -72,9 +72,13 @@ export const GET = withErrorHandling(async (request: NextRequest) => {
     const blobModel = blobModels.find((b) => b.version === dbModel.version);
 
     return {
+      modelId: dbModel.modelId,
       version: dbModel.version,
       baseModel: dbModel.baseModel,
       trainedAt: dbModel.createdAt,
+      createdAt: dbModel.createdAt,
+      deployedAt: dbModel.deployedAt,
+      benchmarkScore: dbModel.benchmarkScore,
       accuracy: dbModel.accuracy,
       avgReward: dbModel.avgReward,
       status: dbModel.status,

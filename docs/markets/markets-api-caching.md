@@ -53,7 +53,9 @@ Domain packages (`packages/core`, `packages/engine`) must stay framework-agnosti
 
 ## SSE client-side patching
 
-`useMarketsPageData` subscribes to `useSSEChannel('markets', callback)` and handles three event types:
+> **Historical:** the screener hook `useMarketsPageData` described here was removed. The canonical terminal streams the selected prediction market via `usePredictionMarketStream` and merges events in `markets/_components/terminal/predictionTerminalState.ts`.
+
+The removed hook subscribed to `useSSEChannel('markets', callback)` and handled three event types:
 
 | SSE event | Client action | WHY |
 |-----------|---------------|-----|
@@ -117,7 +119,7 @@ GET /api/markets/predictions?page=1&limit=5
 | `apps/web/src/app/api/markets/predictions/[id]/buy/route.ts` | Invalidation after buy |
 | `apps/web/src/app/api/markets/predictions/[id]/sell/route.ts` | Invalidation after sell |
 | `apps/web/src/app/api/admin/markets/[marketId]/route.ts` | Invalidation after resolve/void/extend |
-| `apps/web/src/app/markets/_hooks/useMarketsPageData.ts` | SSE subscription for prediction events |
+| `apps/web/src/app/markets/_components/terminal/predictionTerminalState.ts` | Merges prediction SSE events into terminal state |
 | `apps/web/src/app/markets/page.tsx` | `usePerpMarketsPolling(30_000)` |
 | `packages/core/markets/perps/types.ts` | `PerpDbPort.countMarkets`, `listMarkets` options |
 | `packages/core/markets/perps/PerpMarketService.ts` | `countMarkets()`, `getMarketsSnapshot(options?)` |

@@ -11,11 +11,15 @@ import { NextResponse } from 'next/server';
 import { z } from 'zod';
 import { isUserInDmChatId } from '../../chats/_lib/dm-chat-id';
 
+const MAX_IDS = 100;
+const IdSchema = z.string().max(256);
+
 const BodySchema = z.object({
-  channels: z.array(z.string()).optional(),
-  chatIds: z.array(z.string()).optional(),
-  agentIds: z.array(z.string()).optional(),
-  includeNotifications: z.coerce.boolean().optional(),
+  channels: z.array(IdSchema).max(MAX_IDS).optional(),
+  chatIds: z.array(IdSchema).max(MAX_IDS).optional(),
+  agentIds: z.array(IdSchema).max(MAX_IDS).optional(),
+  // Strict boolean: z.coerce.boolean() would turn 'false' into true.
+  includeNotifications: z.boolean().optional(),
   ttlSeconds: z.number().int().positive().max(3600).optional(),
 });
 
@@ -73,7 +77,11 @@ export const POST = withErrorHandling(async function POST(
 
   if (derivedChatIds.length > 0) {
     const allowedChats = await db.chatParticipant.findMany({
-      where: { userId: user.userId, chatId: { in: derivedChatIds } },
+      where: {
+        userId: user.userId,
+        chatId: { in: derivedChatIds },
+        isActive: true,
+      },
       select: { chatId: true },
     });
     allowedChats.forEach((c) => allowedChatIds.add(c.chatId));

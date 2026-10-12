@@ -26,6 +26,39 @@ import {
   TickPhase,
 } from './types';
 
+/**
+ * The engine context installed as the unctx singleton (so useEngine() works
+ * outside an engine call, e.g. in hook handlers). Tracked here so that one
+ * engine's lifecycle never clears or overwrites another engine's context —
+ * e.g. dev reload boots the next engine before shutting down the previous one.
+ */
+let activeEngineCtx: EngineContext | null = null;
+
+function restoreActiveEngineContext(): void {
+  if (activeEngineCtx) {
+    _engine.set(activeEngineCtx, true);
+  } else {
+    _engine.unset();
+  }
+}
+
+/**
+ * Run `fn` with `ctx` bound as the engine context (AsyncLocalStorage), then
+ * restore the singleton to the active engine. unctx's callAsync() leaves
+ * its instance as the singleton afterwards, which would leak `ctx` into
+ * code running outside this engine.
+ */
+async function runWithEngineContext<T>(
+  ctx: EngineContext,
+  fn: () => Promise<T>
+): Promise<T> {
+  try {
+    return await _engine.callAsync(ctx, fn);
+  } finally {
+    restoreActiveEngineContext();
+  }
+}
+
 export class FeedEngine extends Hookable<RuntimeHooks> {
   private readonly systems: FeedSystem[] = [];
   private sorted: FeedSystem[] = [];
@@ -49,20 +82,26 @@ export class FeedEngine extends Hookable<RuntimeHooks> {
         `Invalid system ID "${system.id}". IDs must be alphanumeric with dots, hyphens, or underscores.`
       );
     }
+    if (this.systems.some((s) => s.id === system.id)) {
+      throw new FrameworkError(
+        `Duplicate system ID "${system.id}". Each system must be registered once.`
+      );
+    }
     this.systems.push(system);
     return this;
   }
 
   async boot(): Promise<void> {
-    this.engineCtx = createEngineContext({ ...this.options, hooks: this });
+    const engineCtx = createEngineContext({ ...this.options, hooks: this });
+    this.engineCtx = engineCtx;
     this.sorted = this.sortSystems(this.systems);
 
-    // Set engine context so composables (useEngine, useDB, etc.) work during register()
-    await _engine.callAsync(this.engineCtx, async () => {
+    // Bind engine context so composables (useEngine, useDB, etc.) work during register()
+    await runWithEngineContext(engineCtx, async () => {
       for (const sys of this.sorted) {
         if (sys.register) {
           try {
-            await sys.register(this.engineCtx!);
+            await sys.register(engineCtx);
           } catch (err) {
             const error = err instanceof Error ? err : new Error(String(err));
             throw new FrameworkError(
@@ -75,8 +114,10 @@ export class FeedEngine extends Hookable<RuntimeHooks> {
 
     this.booted = true;
 
-    // Set as singleton so useEngine() works between ticks (e.g. in hook handlers)
-    _engine.set(this.engineCtx);
+    // Become the singleton so useEngine() works between ticks (e.g. in hook
+    // handlers). Replaces any previous engine's context (dev hot-reload).
+    activeEngineCtx = engineCtx;
+    _engine.set(engineCtx, true);
 
     logger.info(
       `FeedEngine booted with ${this.sorted.length} system(s)`,
@@ -98,45 +139,63 @@ export class FeedEngine extends Hookable<RuntimeHooks> {
     const tickStart = Date.now();
     const ctx = createTickContext(this.engineCtx, this.tickNumber, dayNumber);
 
-    // Wrap the entire tick in unctx so useTick() works everywhere — including async
-    return _tick.callAsync(ctx, async () => {
-      await this.callHook('tick:before', ctx);
+    // Bind this engine's context and the tick context for the whole tick so
+    // useEngine()/useTick() resolve to this engine everywhere — including async.
+    return runWithEngineContext(this.engineCtx, () =>
+      _tick.callAsync(ctx, async () => {
+        await this.callHook('tick:before', ctx);
 
-      for (const sys of this.sorted) {
-        await this.executeSystem(sys, ctx);
-      }
+        for (const sys of this.sorted) {
+          await this.executeSystem(sys, ctx);
+        }
 
-      ctx.metrics.set('_tickDurationMs', Date.now() - tickStart);
-      const snapshot = ctx.metrics.snapshot();
+        ctx.metrics.set('_tickDurationMs', Date.now() - tickStart);
+        const snapshot = ctx.metrics.snapshot();
 
-      await this.callHook('tick:after', ctx, snapshot);
+        await this.callHook('tick:after', ctx, snapshot);
 
-      return snapshot;
-    });
+        return snapshot;
+      })
+    );
   }
 
   async shutdown(): Promise<void> {
-    await this.callHook('engine:shutdown');
+    const engineCtx = this.engineCtx;
+    const teardown = async () => {
+      await this.callHook('engine:shutdown');
 
-    // Destroy in reverse registration order
-    const reversed = [...this.systems].reverse();
-    for (const sys of reversed) {
-      if (sys.destroy) {
-        try {
-          await sys.destroy();
-        } catch (err) {
-          logger.error(
-            `Error destroying system "${sys.id}"`,
-            err instanceof Error ? err : new Error(String(err)),
-            'Framework'
-          );
+      // Destroy in reverse boot (dependency-sorted) order so dependents are
+      // torn down before the systems they depend on.
+      const bootOrder = this.sorted.length > 0 ? this.sorted : this.systems;
+      for (const sys of [...bootOrder].reverse()) {
+        if (sys.destroy) {
+          try {
+            await sys.destroy();
+          } catch (err) {
+            logger.error(
+              `Error destroying system "${sys.id}"`,
+              err instanceof Error ? err : new Error(String(err)),
+              'Framework'
+            );
+          }
         }
       }
+    };
+
+    if (engineCtx) {
+      await runWithEngineContext(engineCtx, teardown);
+    } else {
+      await teardown();
     }
+
     this.booted = false;
     this.engineCtx = null;
     this.lastIntervalRun.clear();
-    _engine.unset();
+    // Only clear the singleton if it still belongs to this engine.
+    if (engineCtx && activeEngineCtx === engineCtx) {
+      activeEngineCtx = null;
+      restoreActiveEngineContext();
+    }
     this.removeAllHooks();
   }
 
@@ -265,6 +324,24 @@ export class FeedEngine extends Hookable<RuntimeHooks> {
     const phases = [...byPhase.keys()].sort((a, b) => a - b);
     const result: FeedSystem[] = [];
     const allIds = new Set(systems.map((s) => s.id));
+    const phaseById = new Map(systems.map((s) => [s.id, s.phase]));
+
+    // A dependency must run before its dependent: same phase (ordered by the
+    // topological sort below) or an earlier phase. A later-phase dependency
+    // can never be satisfied.
+    for (const sys of systems) {
+      for (const dep of sys.dependencies ?? []) {
+        const depPhase = phaseById.get(dep);
+        if (depPhase === undefined) {
+          throw new SystemNotFoundError(dep, sys.id);
+        }
+        if (depPhase > sys.phase) {
+          throw new FrameworkError(
+            `System "${sys.id}" (phase ${sys.phase}) depends on "${dep}" which runs in a later phase (${depPhase}).`
+          );
+        }
+      }
+    }
 
     for (const phase of phases) {
       const group = byPhase.get(phase)!;

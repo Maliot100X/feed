@@ -59,6 +59,7 @@
  */
 
 import {
+  NotFoundError,
   requireCronAuth,
   requireUserByIdentifier,
   withErrorHandling,
@@ -67,6 +68,7 @@ import { db } from '@feed/db';
 import { NPCInvestmentManager, StaticDataRegistry } from '@feed/engine';
 import type { NextRequest } from 'next/server';
 import { NextResponse } from 'next/server';
+import { z } from 'zod';
 
 interface RouteParams {
   params: Promise<{
@@ -74,31 +76,32 @@ interface RouteParams {
   }>;
 }
 
-interface MonitorRequest {
-  action: 'monitor';
-  strategy?: 'aggressive' | 'conservative' | 'balanced';
-}
+const StrategySchema = z.enum(['aggressive', 'conservative', 'balanced']);
 
-interface RebalanceRequest {
-  action: 'rebalance';
-  strategy?: 'aggressive' | 'conservative' | 'balanced';
-}
-
-interface ExecuteRequest {
-  action: 'execute';
-  rebalanceAction: {
-    type: 'open' | 'close' | 'resize';
-    positionId?: string;
-    marketType: 'perp' | 'prediction';
-    ticker?: string;
-    marketId?: string;
-    side: string;
-    targetSize: number;
-    reason: string;
-  };
-}
-
-type InvestRequest = MonitorRequest | RebalanceRequest | ExecuteRequest;
+const InvestRequestSchema = z.discriminatedUnion('action', [
+  z.object({
+    action: z.literal('monitor'),
+    strategy: StrategySchema.optional(),
+  }),
+  z.object({
+    action: z.literal('rebalance'),
+    strategy: StrategySchema.optional(),
+  }),
+  z.object({
+    action: z.literal('execute'),
+    strategy: StrategySchema.optional(),
+    rebalanceAction: z.object({
+      type: z.enum(['open', 'close', 'resize']),
+      positionId: z.string().min(1).optional(),
+      marketType: z.enum(['perp', 'prediction']),
+      ticker: z.string().min(1).optional(),
+      marketId: z.string().min(1).optional(),
+      side: z.string().min(1),
+      targetSize: z.number().finite().nonnegative(),
+      reason: z.string().max(1000),
+    }),
+  }),
+]);
 
 export const POST = withErrorHandling(
   async (request: NextRequest, { params }: RouteParams) => {
@@ -106,7 +109,7 @@ export const POST = withErrorHandling(
 
     const { actorId } = await params;
 
-    const body = (await request.json()) as InvestRequest;
+    const body = InvestRequestSchema.parse(await request.json());
 
     const actor = await requireUserByIdentifier(actorId);
 
@@ -116,16 +119,16 @@ export const POST = withErrorHandling(
         isActive: true,
       },
     });
-
-    let actorPersonality: string | null = null;
-    if (pool) {
-      const actorDetails = StaticDataRegistry.getActor(pool.npcActorId);
-      actorPersonality = actorDetails?.personality || null;
+    if (!pool) {
+      throw new NotFoundError('Active pool for NPC');
     }
+
+    const actorPersonality =
+      StaticDataRegistry.getActor(pool.npcActorId)?.personality || null;
 
     let strategy: 'aggressive' | 'conservative' | 'balanced' = 'balanced';
 
-    if ('strategy' in body && body.strategy) {
+    if (body.strategy) {
       strategy = body.strategy;
     } else if (actorPersonality) {
       const personalityLower = actorPersonality.toLowerCase();
@@ -143,7 +146,7 @@ export const POST = withErrorHandling(
 
     if (body.action === 'monitor') {
       const actions = await NPCInvestmentManager.monitorPortfolio(
-        pool!.id,
+        pool.id,
         actor.id,
         strategy
       );
@@ -151,7 +154,7 @@ export const POST = withErrorHandling(
       return NextResponse.json({
         success: true,
         actorId: actor.id,
-        poolId: pool!.id,
+        poolId: pool.id,
         strategy,
         actions,
         actionCount: actions.length,
@@ -163,7 +166,7 @@ export const POST = withErrorHandling(
     }
     if (body.action === 'rebalance') {
       const actions = await NPCInvestmentManager.monitorPortfolio(
-        pool!.id,
+        pool.id,
         actor.id,
         strategy
       );
@@ -172,7 +175,7 @@ export const POST = withErrorHandling(
       for (const action of actions) {
         await NPCInvestmentManager.executeRebalanceAction(
           actor.id,
-          pool!.id,
+          pool.id,
           action
         );
         results.push({ action, success: true });
@@ -181,7 +184,7 @@ export const POST = withErrorHandling(
       return NextResponse.json({
         success: true,
         actorId: actor.id,
-        poolId: pool!.id,
+        poolId: pool.id,
         strategy,
         actionsExecuted: results.length,
         results,
@@ -190,14 +193,14 @@ export const POST = withErrorHandling(
     }
     await NPCInvestmentManager.executeRebalanceAction(
       actor.id,
-      pool!.id,
+      pool.id,
       body.rebalanceAction
     );
 
     return NextResponse.json({
       success: true,
       actorId: actor.id,
-      poolId: pool!.id,
+      poolId: pool.id,
       action: body.rebalanceAction,
       message: `Executed ${body.rebalanceAction.type} action for ${body.rebalanceAction.ticker || body.rebalanceAction.marketId}`,
     });

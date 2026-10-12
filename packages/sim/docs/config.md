@@ -60,7 +60,7 @@ const watcher = await watchFeedConfig('/path/to/project', (newConfig) => {
 });
 
 // Later:
-await watcher.close();
+await watcher.unwatch();
 ```
 
 The dev CLI command uses this to restart the engine when the config changes.

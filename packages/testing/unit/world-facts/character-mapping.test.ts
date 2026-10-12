@@ -338,3 +338,39 @@ describe('Case Preservation', () => {
     expect(result.transformedText).toBe('AIlon tweeted');
   });
 });
+
+describe('Per-occurrence replacement', () => {
+  let service: TestableCharacterMappingService;
+
+  beforeEach(() => {
+    service = new TestableCharacterMappingService();
+    service.setMockMappings(mockCharacterMappings, mockOrganizationMappings);
+  });
+
+  test('a parody name elsewhere does not block real-name replacement', async () => {
+    const result = await service.transformText('Arthur HAIyes met Hayes');
+    expect(result.transformedText).toBe('Arthur HAIyes met HAIyes');
+    expect(result.replacementCount).toBe(1);
+
+    const org = await service.transformText('TeslAI and Tesla');
+    expect(org.transformedText).toBe('TeslAI and TeslAI');
+  });
+
+  test('adjacent occurrences sharing one separator are all replaced', async () => {
+    const result = await service.transformText('Tesla Tesla Tesla');
+    expect(result.transformedText).toBe('TeslAI TeslAI TeslAI');
+    expect(result.replacementCount).toBe(3);
+  });
+
+  test('transformation is idempotent', async () => {
+    const once = await service.transformText('Elon and Hayes at Tesla');
+    const twice = await service.transformText(once.transformedText);
+    expect(twice.transformedText).toBe(once.transformedText);
+    expect(twice.replacementCount).toBe(0);
+  });
+
+  test('accented letters are word characters for boundaries', async () => {
+    const result = await service.transformText('Teslaé and éTesla');
+    expect(result.transformedText).toBe('Teslaé and éTesla');
+  });
+});

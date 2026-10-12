@@ -15,7 +15,6 @@ import {
   agentLogs,
   agentTrades,
   db,
-  desc,
   eq,
   type JsonValue,
   markets,
@@ -173,18 +172,6 @@ export class AgentPnLService {
         }
       );
     }
-  }
-
-  /**
-   * Get agent trades
-   */
-  async getAgentTrades(agentUserId: string, limit = 50) {
-    return db
-      .select()
-      .from(agentTrades)
-      .where(eq(agentTrades.agentUserId, agentUserId))
-      .orderBy(desc(agentTrades.executedAt))
-      .limit(limit);
   }
 
   /**

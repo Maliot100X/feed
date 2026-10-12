@@ -59,8 +59,12 @@ export class AutonomousDMService {
 
     // Get agent's DM chats (non-group chats)
     const dmChatsRaw = await db.query.chatParticipants.findMany({
-      where: (chatParticipants, { eq }) =>
-        eq(chatParticipants.userId, agentUserId),
+      // Only chats the agent is still an active member of.
+      where: (chatParticipants, { and, eq }) =>
+        and(
+          eq(chatParticipants.userId, agentUserId),
+          eq(chatParticipants.isActive, true)
+        ),
       with: {
         chat: true,
       },

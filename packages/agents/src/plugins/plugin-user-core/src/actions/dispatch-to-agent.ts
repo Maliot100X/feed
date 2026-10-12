@@ -104,8 +104,8 @@ export const dispatchToAgentAction: Action = {
     // broadcastFn is injected by the coordinator route into state.data
     const broadcastFn = state?.data?.broadcastFn as BroadcastFn | undefined;
 
-    const agentId = actionParams?.agentId;
-    const command = actionParams?.command;
+    const agentId = actionParams?.agentId?.trim();
+    const command = actionParams?.command?.trim();
     const ownerId = state?.values?.ownerId as string | undefined;
     const teamChatId = state?.values?.teamChatId as string | undefined;
     const ownerName = state?.values?.ownerName as string | undefined;
@@ -116,7 +116,7 @@ export const dispatchToAgentAction: Action = {
         success: false,
         text: 'Missing required parameters for agent dispatch.',
       };
-      _callback?.({ content: failResult as unknown as Content });
+      await _callback?.({ content: failResult as unknown as Content });
       return failResult;
     }
 
@@ -138,7 +138,7 @@ export const dispatchToAgentAction: Action = {
         text: `Failed to dispatch to agent "${agentId}": ${result.error ?? 'Unknown error'}. Check the Team Members list for the correct agent [id: ...] and retry.`,
         values: { agentId, command, error: result.error },
       } as unknown as ActionResult;
-      _callback?.({ content: failResult as unknown as Content });
+      await _callback?.({ content: failResult as unknown as Content });
       return failResult;
     }
 
@@ -153,7 +153,7 @@ export const dispatchToAgentAction: Action = {
         actionsExecuted: result.actionsExecuted,
       },
     } as unknown as ActionResult;
-    _callback?.({ content: successResult as unknown as Content });
+    await _callback?.({ content: successResult as unknown as Content });
     return successResult;
   },
 };

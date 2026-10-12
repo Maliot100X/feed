@@ -18,7 +18,7 @@ import {
 } from 'lucide-react';
 import nextDynamic from 'next/dynamic';
 import Link from 'next/link';
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useState } from 'react';
 import type { LeaderboardUser } from '@/app/leaderboard/fetchLeaderboardData';
 import {
   useLeaderboardQuery,
@@ -54,36 +54,46 @@ export default function LeaderboardPage() {
   const [selectedScope, setSelectedScope] =
     useState<LeaderboardScope>('wallet');
   const [selectedUser, setSelectedUser] = useState<SelectedUser | null>(null);
-  const [authToken, setAuthToken] = useState<string | null>(null);
-  const scrollToUserRef = useRef(false);
+  // Token is bound to the account it was issued for, so an A->B switch never
+  // sends A's token with B's userId while B's token is resolving.
+  const [resolvedToken, setResolvedToken] = useState<{
+    userId: string;
+    token: string | null;
+  } | null>(null);
+  // Bumped on each "jump to my position" so re-jumping to the current page
+  // still scrolls.
+  const [scrollRequest, setScrollRequest] = useState<{
+    page: number;
+    nonce: number;
+  } | null>(null);
 
   const pageSize = 100;
   const authenticatedUserId = authenticated ? user?.id : undefined;
+  const authToken =
+    resolvedToken && resolvedToken.userId === authenticatedUserId
+      ? resolvedToken.token
+      : null;
 
-  // Resolve auth token when authentication state changes
   useEffect(() => {
-    let cancelled = false;
-
-    if (authenticated) {
-      getAccessToken()
-        .then((token) => {
-          if (!cancelled) {
-            setAuthToken(token);
-          }
-        })
-        .catch(() => {
-          if (!cancelled) {
-            setAuthToken(null);
-          }
-        });
-    } else {
-      setAuthToken(null);
+    if (!authenticatedUserId) {
+      setResolvedToken(null);
+      return;
     }
-
+    let cancelled = false;
+    getAccessToken()
+      .then((token) => {
+        if (!cancelled)
+          setResolvedToken({ userId: authenticatedUserId, token });
+      })
+      .catch(() => {
+        if (!cancelled) {
+          setResolvedToken({ userId: authenticatedUserId, token: null });
+        }
+      });
     return () => {
       cancelled = true;
     };
-  }, [authenticated, getAccessToken]);
+  }, [authenticatedUserId, getAccessToken]);
 
   // WI-L1: React Query for client-side cached leaderboard pages.
   // Returns stale data instantly on back-navigation, revalidates in background.
@@ -91,6 +101,7 @@ export default function LeaderboardPage() {
     data: leaderboardData,
     isLoading,
     isFetching,
+    isPlaceholderData,
     error: queryError,
   } = useLeaderboardQuery({
     metric: selectedMetric,
@@ -122,25 +133,31 @@ export default function LeaderboardPage() {
     authToken,
   });
 
-  // Use position from the dedicated query, falling back to the one bundled in page data
+  // Prefer the dedicated position query once it has resolved (including an
+  // authoritative "unranked" null); fall back to the page bundle only when
+  // that query hasn't produced data (disabled, pending or failed).
   const currentUserPosition =
-    myPosition ?? leaderboardData?.currentUser ?? null;
+    myPosition !== undefined
+      ? myPosition
+      : (leaderboardData?.currentUser ?? null);
 
   // isLoading = true only on first load (no cached data). isFetching = true during any fetch.
   const loading = isLoading;
   const error =
     queryError && !leaderboardData ? 'Failed to fetch leaderboard' : null;
 
+  // Scroll once the requested page's real (non-placeholder) data is shown.
   useEffect(() => {
-    if (scrollToUserRef.current && !loading) {
-      scrollToUserRef.current = false;
-      setTimeout(() => {
-        document
-          .querySelector('[data-current-user="true"]')
-          ?.scrollIntoView({ behavior: 'smooth', block: 'center' });
-      }, 100);
-    }
-  }, [loading]);
+    if (!scrollRequest || !leaderboardData || isPlaceholderData) return;
+    if (leaderboardData.pagination.page !== scrollRequest.page) return;
+    const frame = window.requestAnimationFrame(() => {
+      document
+        .querySelector('[data-current-user="true"]')
+        ?.scrollIntoView({ behavior: 'smooth', block: 'center' });
+      setScrollRequest(null);
+    });
+    return () => window.cancelAnimationFrame(frame);
+  }, [scrollRequest, leaderboardData, isPlaceholderData]);
 
   const resetLeaderboardView = () => {
     setCurrentPage(1);
@@ -179,7 +196,10 @@ export default function LeaderboardPage() {
   const handleJumpToPosition = () => {
     if (currentUserPosition) {
       setCurrentPage(currentUserPosition.page);
-      scrollToUserRef.current = true;
+      setScrollRequest((prev) => ({
+        page: currentUserPosition.page,
+        nonce: (prev?.nonce ?? 0) + 1,
+      }));
     }
   };
 
@@ -308,7 +328,7 @@ export default function LeaderboardPage() {
 
   const renderPlayerRow = (
     player: LeaderboardUser,
-    variant: 'desktop' | 'mobile' | 'pinned'
+    variant: 'list' | 'pinned'
   ) => {
     const isCurrentUser = currentUserRowId
       ? player.id === currentUserRowId
@@ -320,11 +340,15 @@ export default function LeaderboardPage() {
         ? formatTradingPnL(getTradingLifetimePnL(player))
         : null;
     const isPinned = variant === 'pinned';
+    const agentLabel =
+      isTeamView && player.agentCount !== undefined && player.agentCount > 0
+        ? `${player.agentCount} ${player.agentCount === 1 ? 'agent' : 'agents'}`
+        : null;
 
-    const content = (
-      <div
-        className={`flex items-center ${variant === 'mobile' ? 'gap-2 sm:gap-4' : 'gap-4'}`}
-      >
+    // One row tree for every breakpoint: compact stats under the name below
+    // xl, right-aligned stats on xl.
+    return (
+      <div className="flex items-center gap-2 sm:gap-4">
         <div className="shrink-0">
           <RankNumber rank={player.rank} size="md" />
         </div>
@@ -337,8 +361,12 @@ export default function LeaderboardPage() {
           />
           {authenticated && !isCurrentUser && !isPinned && (
             <div
-              className={`absolute -right-1 -bottom-0.5 ${variant === 'mobile' ? '' : ''}`}
-              onClick={(e) => e.stopPropagation()}
+              className="absolute -right-1 -bottom-0.5"
+              onClick={(e) => {
+                // Follow button lives inside the row link: stop navigation too.
+                e.preventDefault();
+                e.stopPropagation();
+              }}
               onKeyDown={(e) => e.stopPropagation()}
             >
               <FollowButton
@@ -355,9 +383,7 @@ export default function LeaderboardPage() {
         </div>
         <div className="min-w-0 flex-1">
           <div className="flex items-center gap-1.5">
-            <h3
-              className={`truncate font-semibold text-foreground ${variant === 'mobile' ? 'text-sm sm:text-base' : ''}`}
-            >
+            <h3 className="truncate font-semibold text-foreground text-sm sm:text-base">
               {player.displayName || player.username || 'Anonymous'}
             </h3>
             {player.isAgent ? (
@@ -374,25 +400,22 @@ export default function LeaderboardPage() {
               </span>
             )}
           </div>
-          {variant !== 'mobile' && player.username && (
-            <p className="truncate text-muted-foreground text-sm">
+          {player.username && (
+            <p
+              className={`truncate text-muted-foreground text-sm ${isPinned ? '' : 'hidden xl:block'}`}
+            >
               @{player.username}
             </p>
           )}
-          {variant === 'mobile' && (
-            <div className="space-y-0.5 text-xs sm:text-sm">
+          {!isPinned && (
+            <div className="space-y-0.5 text-xs sm:text-sm xl:hidden">
               <div className="flex items-center gap-2">
                 <span className="font-bold text-foreground">
                   {formattedValue} {getDisplayLabel()}
                 </span>
-                {isTeamView &&
-                  player.agentCount !== undefined &&
-                  player.agentCount > 0 && (
-                    <span className="text-muted-foreground">
-                      {player.agentCount}{' '}
-                      {player.agentCount === 1 ? 'agent' : 'agents'}
-                    </span>
-                  )}
+                {agentLabel && (
+                  <span className="text-muted-foreground">{agentLabel}</span>
+                )}
               </div>
               {secondaryTradingPnL && (
                 <div className="text-muted-foreground text-xs">
@@ -402,39 +425,24 @@ export default function LeaderboardPage() {
             </div>
           )}
         </div>
-        {variant !== 'mobile' && (
-          <div className="shrink-0 text-right">
-            <div className="font-bold text-foreground text-lg">
-              {formattedValue}
+        <div
+          className={`shrink-0 text-right ${isPinned ? '' : 'hidden xl:block'}`}
+        >
+          <div className="font-bold text-foreground text-lg">
+            {formattedValue}
+          </div>
+          <div className="space-y-0.5 text-right text-muted-foreground text-xs">
+            <div>
+              {getDisplayLabel()}
+              {agentLabel && ` (${agentLabel})`}
             </div>
-            {selectedMetric === 'trading' ? (
-              <div className="space-y-0.5 text-right">
-                <div className="text-muted-foreground text-xs">
-                  {getDisplayLabel()}
-                  {isTeamView &&
-                    player.agentCount !== undefined &&
-                    player.agentCount > 0 &&
-                    ` (${player.agentCount} ${player.agentCount === 1 ? 'agent' : 'agents'})`}
-                </div>
-                <div className="text-muted-foreground text-xs">
-                  Lifetime P&amp;L {secondaryTradingPnL}
-                </div>
-              </div>
-            ) : (
-              <div className="text-muted-foreground text-xs">
-                {getDisplayLabel()}
-                {isTeamView &&
-                  player.agentCount !== undefined &&
-                  player.agentCount > 0 &&
-                  ` (${player.agentCount} ${player.agentCount === 1 ? 'agent' : 'agents'})`}
-              </div>
+            {secondaryTradingPnL && (
+              <div>Lifetime P&amp;L {secondaryTradingPnL}</div>
             )}
           </div>
-        )}
+        </div>
       </div>
     );
-
-    return content;
   };
 
   const renderEmptyState = () => {
@@ -496,47 +504,29 @@ export default function LeaderboardPage() {
             const isPlayerSelected = selectedUser?.id === player.id;
 
             return (
-              <div key={player.id} className="flex items-stretch">
-                {/* Desktop: clickable for sidebar widget */}
-                <div
-                  role="button"
-                  tabIndex={0}
-                  aria-label={`View profile for ${player.displayName || player.username || 'Anonymous'}`}
-                  onClick={(e) => {
+              <Link
+                key={player.id}
+                href={getProfileUrl(player.id, player.username) || '#'}
+                aria-label={`View profile for ${player.displayName || player.username || 'Anonymous'}`}
+                onClick={(e) => {
+                  // On xl the row opens the profile summary in the sidebar
+                  // instead of navigating.
+                  if (window.matchMedia('(min-width: 1280px)').matches) {
                     e.preventDefault();
                     handleUserClick(player);
-                  }}
-                  onKeyDown={(e) => {
-                    if (e.key === 'Enter' || e.key === ' ') {
-                      e.preventDefault();
-                      handleUserClick(player);
-                    }
-                  }}
-                  data-current-user={isCurrentUser ? 'true' : undefined}
-                  className={`hidden flex-1 cursor-pointer px-4 py-3 text-left transition-colors xl:block ${
-                    isPlayerSelected
-                      ? 'border-l-4 border-l-foreground bg-muted/30'
-                      : isCurrentUser
-                        ? 'border-l-4 border-l-foreground bg-muted/20 hover:bg-muted/30'
-                        : 'border-l-4 border-l-transparent hover:bg-muted/30'
-                  }`}
-                >
-                  {renderPlayerRow(player, 'desktop')}
-                </div>
-
-                {/* Mobile/Tablet: direct link to profile */}
-                <Link
-                  href={getProfileUrl(player.id, player.username) || '#'}
-                  data-current-user={isCurrentUser ? 'true' : undefined}
-                  className={`block flex-1 px-4 py-1.5 transition-colors xl:hidden ${
-                    isCurrentUser
-                      ? 'border-l-4 border-l-foreground bg-muted/20'
-                      : 'hover:bg-muted/30'
-                  }`}
-                >
-                  {renderPlayerRow(player, 'mobile')}
-                </Link>
-              </div>
+                  }
+                }}
+                data-current-user={isCurrentUser ? 'true' : undefined}
+                className={`block border-l-4 px-4 py-1.5 transition-colors xl:py-3 ${
+                  isPlayerSelected
+                    ? 'border-l-foreground bg-muted/30'
+                    : isCurrentUser
+                      ? 'border-l-foreground bg-muted/20 hover:bg-muted/30'
+                      : 'border-l-transparent hover:bg-muted/30'
+                }`}
+              >
+                {renderPlayerRow(player, 'list')}
+              </Link>
             );
           })}
         </div>
@@ -585,10 +575,9 @@ export default function LeaderboardPage() {
 
   return (
     <PageContainer noPadding className="overflow-visible! flex w-full flex-col">
-      {/* Desktop: Content + Widgets layout */}
-      <div className="hidden flex-1 overflow-hidden xl:flex">
+      <div className="flex flex-1 overflow-hidden">
         {/* Main content */}
-        <div className="flex min-w-0 flex-1 flex-col overflow-hidden border-border lg:border-r lg:border-l">
+        <div className="flex min-w-0 flex-1 flex-col overflow-hidden border-border xl:border-r xl:border-l">
           {/* Header with tabs */}
           <div className="sticky top-0 z-10 shrink-0 bg-background shadow-sm">
             <LeaderboardToggle
@@ -597,13 +586,13 @@ export default function LeaderboardPage() {
               onMetricChange={handleMetricChange}
               onScopeChange={handleScopeChange}
             />
-            <div className="flex items-center justify-between px-3 py-3 sm:px-4 lg:px-6">
-              <div className="flex items-center gap-2">
-                <p className="text-muted-foreground text-sm">
+            <div className="flex items-center justify-between px-3 py-2 sm:px-4 xl:px-6 xl:py-3">
+              <div className="flex items-center gap-1.5 xl:gap-2">
+                <p className="text-muted-foreground text-xs sm:text-sm">
                   {leaderboardDescriptions[selectedMetric][selectedScope]}
                 </p>
                 {isFetching && !isLoading && (
-                  <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-primary/60" />
+                  <span className="h-1 w-1 animate-pulse rounded-full bg-primary/60 xl:h-1.5 xl:w-1.5" />
                 )}
                 {leaderboardData?.generatedAt && !isFetching && (
                   <span className="text-muted-foreground/60 text-xs">
@@ -613,10 +602,11 @@ export default function LeaderboardPage() {
               </div>
               {authenticated && currentUserPosition && (
                 <button
+                  type="button"
                   onClick={handleJumpToPosition}
-                  className="flex shrink-0 items-center gap-1.5 rounded-md bg-primary/10 px-3 py-1.5 font-medium text-primary text-sm transition-colors hover:bg-primary/20"
+                  className="flex shrink-0 items-center gap-1 rounded-md bg-primary/10 px-2.5 py-1 font-medium text-primary text-xs transition-colors hover:bg-primary/20 xl:gap-1.5 xl:px-3 xl:py-1.5 xl:text-sm"
                 >
-                  <Crosshair className="h-3.5 w-3.5" />#
+                  <Crosshair className="h-3 w-3 xl:h-3.5 xl:w-3.5" />#
                   {currentUserPosition.rank.toLocaleString()}
                 </button>
               )}
@@ -626,51 +616,12 @@ export default function LeaderboardPage() {
           {renderLeaderboardContent()}
         </div>
 
-        {/* Widget Sidebar */}
+        {/* Widget Sidebar (xl only; hidden below via its own classes) */}
         <LeaderboardWidgetSidebar
           selectedUser={selectedUser}
           leaderboardMetric={selectedMetric}
           leaderboardScope={selectedScope}
         />
-      </div>
-
-      {/* Mobile/Tablet: Full width content */}
-      <div className="flex flex-1 flex-col overflow-hidden xl:hidden">
-        {/* Header with tabs */}
-        <div className="sticky top-0 z-10 shrink-0 bg-background shadow-sm">
-          <LeaderboardToggle
-            activeMetric={selectedMetric}
-            activeScope={selectedScope}
-            onMetricChange={handleMetricChange}
-            onScopeChange={handleScopeChange}
-          />
-          <div className="flex items-center justify-between px-3 py-2 sm:px-4">
-            <div className="flex items-center gap-1.5">
-              <p className="text-muted-foreground text-xs sm:text-sm">
-                {leaderboardDescriptions[selectedMetric][selectedScope]}
-              </p>
-              {isFetching && !isLoading && (
-                <span className="h-1 w-1 animate-pulse rounded-full bg-primary/60" />
-              )}
-              {leaderboardData?.generatedAt && !isFetching && (
-                <span className="text-muted-foreground/60 text-xs">
-                  {formatRelativeTime(leaderboardData.generatedAt)}
-                </span>
-              )}
-            </div>
-            {authenticated && currentUserPosition && (
-              <button
-                onClick={handleJumpToPosition}
-                className="flex shrink-0 items-center gap-1 rounded-md bg-primary/10 px-2.5 py-1 font-medium text-primary text-xs transition-colors hover:bg-primary/20"
-              >
-                <Crosshair className="h-3 w-3" />#
-                {currentUserPosition.rank.toLocaleString()}
-              </button>
-            )}
-          </div>
-        </div>
-
-        {renderLeaderboardContent()}
       </div>
     </PageContainer>
   );

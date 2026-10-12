@@ -18,7 +18,10 @@ import {
   groupMembers,
   groups,
   inArray,
+  isNotNull,
+  isNull,
   messages,
+  or,
   sql,
   users,
 } from '@feed/db';
@@ -103,16 +106,44 @@ export function planMultiChatSeedAssignments(
     existingMembershipMap.set(membership.userId, membershipSet);
   }
 
+  const groupIdByChatId = new Map(
+    chatSlots.map((slot) => [slot.chatId, slot.groupId])
+  );
+  const processedUsers = new Set<string>();
+
   for (const user of options.users) {
+    // Duplicate user rows must not be planned twice.
+    if (processedUsers.has(user.userId)) continue;
+    processedUsers.add(user.userId);
+
     const alreadyJoined =
       existingMembershipMap.get(user.userId) ?? new Set<string>();
+    existingMembershipMap.set(user.userId, alreadyJoined);
+    const joinedGroups = new Set(
+      [...alreadyJoined]
+        .map((chatId) => groupIdByChatId.get(chatId))
+        .filter((groupId): groupId is string => groupId !== undefined)
+    );
     const remainingChatsForUser =
       targetChatsPerUser - Number(user.activeGroupCount ?? 0);
     if (remainingChatsForUser <= 0) continue;
 
-    const available = chatSlots.filter(
-      (slot) => slot.slots > 0 && !alreadyJoined.has(slot.chatId)
-    );
+    // One membership per group: several chats of the same group would
+    // otherwise double-assign the same group membership.
+    const available: typeof chatSlots = [];
+    const seenGroups = new Set<string>();
+    for (const slot of chatSlots) {
+      if (
+        slot.slots <= 0 ||
+        alreadyJoined.has(slot.chatId) ||
+        joinedGroups.has(slot.groupId) ||
+        seenGroups.has(slot.groupId)
+      ) {
+        continue;
+      }
+      seenGroups.add(slot.groupId);
+      available.push(slot);
+    }
     if (available.length === 0) continue;
 
     const selectedChats = sampleRandom(
@@ -132,6 +163,7 @@ export function planMultiChatSeedAssignments(
       });
       selected.slots -= 1;
       alreadyJoined.add(selected.chatId);
+      joinedGroups.add(selected.groupId);
     }
   }
 
@@ -178,11 +210,13 @@ export async function autoJoinEmptyUsersToNpcGroupChats(
     )
     .where(finalUserFilter)
     .groupBy(users.id)
+    // Filter insufficient memberships BEFORE limiting so a full first batch
+    // cannot starve later eligible users; stable order for determinism.
+    .having(sql`count(${groupMembers.id}) < ${targetChatsPerUser}`)
+    .orderBy(users.id)
     .limit(options.batchSize);
 
-  const eligibleUsers = userMembershipCounts.filter(
-    (row) => Number(row.activeGroupCount ?? 0) < targetChatsPerUser
-  );
+  const eligibleUsers = userMembershipCounts;
   const userIds = eligibleUsers.map((u) => u.userId);
   if (userIds.length === 0) {
     return 0;
@@ -258,6 +292,8 @@ export async function autoJoinEmptyUsersToNpcGroupChats(
     participantCounts.map((row) => [row.chatId, row.count])
   );
 
+  // Active memberships, plus kicked ones: a kicked user must never be
+  // auto-rejoined (that would silently reverse moderation).
   const existingMemberships = await db
     .select({
       userId: groupMembers.userId,
@@ -268,7 +304,7 @@ export async function autoJoinEmptyUsersToNpcGroupChats(
     .innerJoin(chats, eq(chats.groupId, groups.id))
     .where(
       and(
-        eq(groupMembers.isActive, true),
+        or(eq(groupMembers.isActive, true), isNotNull(groupMembers.kickedAt)),
         inArray(groupMembers.userId, userIds)
       )
     );
@@ -324,62 +360,70 @@ export async function autoJoinEmptyUsersToNpcGroupChats(
 
   const now = new Date();
 
-  // Upsert membership + participant rows (idempotent)
+  // Upsert membership + participant rows (idempotent). Each pair is written
+  // in one transaction so member and participant state cannot split. Kicked
+  // memberships are never reactivated (setWhere guards a concurrent kick).
+  let membershipsCreated = 0;
   for (const a of assignments) {
-    await db
-      .insert(groupMembers)
-      .values({
-        id: await generateSnowflakeId(),
-        groupId: a.groupId,
-        userId: a.userId,
-        role: 'member',
-        addedBy: a.invitedBy,
-        joinedAt: now,
-        isActive: true,
-        messageCount: 0,
-        qualityScore: 1.0,
-      })
-      .onConflictDoUpdate({
-        target: [groupMembers.groupId, groupMembers.userId],
-        set: {
-          isActive: true,
+    const created = await db.transaction(async (tx) => {
+      const member = await tx
+        .insert(groupMembers)
+        .values({
+          id: await generateSnowflakeId(),
+          groupId: a.groupId,
+          userId: a.userId,
           role: 'member',
           addedBy: a.invitedBy,
           joinedAt: now,
-          kickedAt: sql`NULL`,
-          kickReason: sql`NULL`,
-        },
-      });
-
-    await db
-      .insert(chatParticipants)
-      .values({
-        id: await generateSnowflakeId(),
-        chatId: a.chatId,
-        userId: a.userId,
-        joinedAt: now,
-        invitedBy: a.invitedBy,
-        isActive: true,
-      })
-      .onConflictDoUpdate({
-        target: [chatParticipants.chatId, chatParticipants.userId],
-        set: {
           isActive: true,
+          messageCount: 0,
+          qualityScore: 1.0,
+        })
+        .onConflictDoUpdate({
+          target: [groupMembers.groupId, groupMembers.userId],
+          set: {
+            isActive: true,
+            role: 'member',
+            addedBy: a.invitedBy,
+            joinedAt: now,
+          },
+          setWhere: isNull(groupMembers.kickedAt),
+        })
+        .returning({ id: groupMembers.id });
+      if (member.length === 0) return false;
+
+      await tx
+        .insert(chatParticipants)
+        .values({
+          id: await generateSnowflakeId(),
+          chatId: a.chatId,
+          userId: a.userId,
           joinedAt: now,
           invitedBy: a.invitedBy,
-        },
-      });
+          isActive: true,
+        })
+        .onConflictDoUpdate({
+          target: [chatParticipants.chatId, chatParticipants.userId],
+          set: {
+            isActive: true,
+            joinedAt: now,
+            invitedBy: a.invitedBy,
+          },
+        });
+      return true;
+    });
+    if (created) membershipsCreated++;
   }
 
   logger.info(
     'Auto-joined users into NPC group chats (dev demo)',
     {
-      membershipsCreated: assignments.length,
+      membershipsCreated,
       targetChatsPerUser,
       batchSize: options.batchSize,
     },
     'NPCGroupChatOnboarding'
   );
 
-  return assignments.length;
+  return membershipsCreated;
 }

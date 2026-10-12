@@ -7,14 +7,16 @@ import { Bell, Settings } from 'lucide-react';
 import nextDynamic from 'next/dynamic';
 import Link from 'next/link';
 import { useRouter } from 'next/navigation';
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { toast } from 'sonner';
 import { GroupInviteCard } from '@/components/groups/GroupInviteCard';
 import { Avatar } from '@/components/shared/Avatar';
 import { PageContainer } from '@/components/shared/PageContainer';
 import { PullToRefreshIndicator } from '@/components/shared/PullToRefreshIndicator';
 import { useAuth } from '@/hooks/useAuth';
+import { useLoginModal } from '@/hooks/useLoginModal';
 import { usePullToRefresh } from '@/hooks/usePullToRefresh';
+import { safeReturnTo } from '@/lib/auth/safe-return-to';
 import { getNotificationPresentation } from '@/lib/notifications/presentation';
 
 const WidgetSidebar = nextDynamic(
@@ -60,19 +62,22 @@ interface GroupInvite {
 }
 
 export default function NotificationsPage() {
-  const { authenticated, user, getAccessToken, login } = useAuth();
+  const { ready, authenticated, user, getAccessToken } = useAuth();
+  const queueLoginModal = useLoginModal((state) => state.queueLoginModal);
   const router = useRouter();
   const [notifications, setNotifications] = useState<Notification[]>([]);
   const [groupInvites, setGroupInvites] = useState<GroupInvite[]>([]);
   const [loading, setLoading] = useState(true);
   const [unreadCount, setUnreadCount] = useState(0);
+  const notificationsRef = useRef(notifications);
+  notificationsRef.current = notifications;
+  const pendingReadIdsRef = useRef(new Set<string>());
 
   useEffect(() => {
-    if (authenticated) return;
-    router.push('/feed');
-    const timer = setTimeout(() => login(), 500);
-    return () => clearTimeout(timer);
-  }, [authenticated, router, login]);
+    if (!ready || authenticated) return;
+    queueLoginModal();
+    router.replace('/feed');
+  }, [ready, authenticated, router, queueLoginModal]);
 
   const fetchNotifications = useCallback(
     async (showLoading = true, silent = false) => {
@@ -88,37 +93,55 @@ export default function NotificationsPage() {
         return;
       }
 
-      const [notifResponse, invitesResponse] = await Promise.all([
-        fetch('/api/notifications?limit=100', {
-          headers: {
-            Authorization: `Bearer ${token}`,
-          },
-        }),
-        fetch('/api/groups/invites', {
-          headers: {
-            Authorization: `Bearer ${token}`,
-          },
-        }),
+      const headers = { Authorization: `Bearer ${token}` };
+
+      // Load independently so a failing invites request can't hide
+      // notifications (and vice versa).
+      const loadNotifications = async () => {
+        const response = await fetch('/api/notifications?limit=100', {
+          headers,
+        });
+        if (!response.ok) {
+          throw new Error(response.statusText || `HTTP ${response.status}`);
+        }
+        const data = (await response.json()) as {
+          notifications?: Notification[];
+          unreadCount?: number;
+        };
+        setNotifications(data.notifications ?? []);
+        setUnreadCount(data.unreadCount ?? 0);
+      };
+
+      const loadInvites = async () => {
+        const response = await fetch('/api/groups/invites', { headers });
+        if (!response.ok) {
+          throw new Error(response.statusText || `HTTP ${response.status}`);
+        }
+        const data = (await response.json()) as { invites?: GroupInvite[] };
+        setGroupInvites(data.invites ?? []);
+      };
+
+      const [notifResult, invitesResult] = await Promise.allSettled([
+        loadNotifications(),
+        loadInvites(),
       ]);
 
-      if (notifResponse.ok) {
-        const data = await notifResponse.json();
-        setNotifications(data.notifications || []);
-        setUnreadCount(data.unreadCount || 0);
-      } else {
+      if (notifResult.status === 'rejected') {
         logger.error(
           'Failed to fetch notifications',
-          { statusText: notifResponse.statusText },
+          { error: String(notifResult.reason) },
           'NotificationsPage'
         );
         if (!silent) {
           toast.error('Failed to refresh notifications');
         }
       }
-
-      if (invitesResponse.ok) {
-        const data = await invitesResponse.json();
-        setGroupInvites(data.invites || []);
+      if (invitesResult.status === 'rejected') {
+        logger.warn(
+          'Failed to fetch group invites',
+          { error: String(invitesResult.reason) },
+          'NotificationsPage'
+        );
       }
 
       if (showLoading) {
@@ -158,53 +181,82 @@ export default function NotificationsPage() {
   }, [authenticated, user, fetchNotifications]);
 
   const markAsRead = useCallback(
-    async (notificationId: string, isAlreadyRead: boolean) => {
-      // Skip if already marked as read
-      if (isAlreadyRead) {
+    async (notificationId: string) => {
+      // Read current state (not a render-time snapshot) and dedupe in-flight
+      // requests so concurrent clicks/observer timers decrement only once.
+      const current = notificationsRef.current.find(
+        (n) => n.id === notificationId
+      );
+      if (
+        !current ||
+        current.read ||
+        pendingReadIdsRef.current.has(notificationId)
+      ) {
         return;
       }
+      pendingReadIdsRef.current.add(notificationId);
 
-      const token = await getAccessToken();
+      const revert = () => {
+        // Only revert if the item is still in the list and still marked read
+        // by us; a refetch in the meantime is authoritative.
+        const stillPresent = notificationsRef.current.some(
+          (n) => n.id === notificationId && n.read
+        );
+        if (!stillPresent) return;
+        setNotifications((prev) =>
+          prev.map((n) => (n.id === notificationId ? { ...n, read: false } : n))
+        );
+        setUnreadCount((prev) => prev + 1);
+      };
 
-      if (!token) return;
-
-      // Update local state optimistically first
       setNotifications((prev) =>
         prev.map((n) => (n.id === notificationId ? { ...n, read: true } : n))
       );
       setUnreadCount((prev) => Math.max(0, prev - 1));
 
-      // Then make the API call
-      const response = await fetch('/api/notifications', {
-        method: 'PATCH',
-        headers: {
-          Authorization: `Bearer ${token}`,
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({
-          notificationIds: [notificationId],
-        }),
-      });
-
-      if (!response.ok) {
+      try {
+        const token = await getAccessToken();
+        if (!token) {
+          revert();
+          return;
+        }
+        const response = await fetch('/api/notifications', {
+          method: 'PATCH',
+          headers: {
+            Authorization: `Bearer ${token}`,
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify({ notificationIds: [notificationId] }),
+        });
+        if (!response.ok) {
+          logger.error(
+            'Failed to mark notification as read',
+            { statusText: response.statusText },
+            'NotificationsPage'
+          );
+          revert();
+        }
+      } catch (error) {
         logger.error(
           'Failed to mark notification as read',
-          { statusText: response.statusText },
+          { error: String(error) },
           'NotificationsPage'
         );
-        // Revert optimistic update on error
-        setNotifications((prev) =>
-          prev.map((n) => (n.id === notificationId ? { ...n, read: false } : n))
-        );
-        setUnreadCount((prev) => prev + 1);
+        revert();
+      } finally {
+        pendingReadIdsRef.current.delete(notificationId);
       }
     },
     [getAccessToken]
   );
 
+  // Rebuild the observer only when the set of rendered items changes, not on
+  // every read-state flip (which would reset all pending 3s timers).
+  const notificationIdsKey = notifications.map((n) => n.id).join(',');
+
   // Intersection Observer - marks notifications as read after viewing for 3 seconds
   useEffect(() => {
-    if (!authenticated || notifications.length === 0) return;
+    if (!authenticated || !notificationIdsKey) return;
 
     const timers = new Map<string, NodeJS.Timeout>();
 
@@ -216,7 +268,7 @@ export default function NotificationsPage() {
           );
           if (!notificationId) return;
 
-          const notification = notifications.find(
+          const notification = notificationsRef.current.find(
             (n) => n.id === notificationId
           );
           if (!notification || notification.read) return;
@@ -230,7 +282,10 @@ export default function NotificationsPage() {
 
             // Start a timer when notification becomes visible
             const timer = setTimeout(() => {
-              markAsRead(notificationId, false);
+              timers.delete(notificationId);
+              // Don't mark items read while the tab is in the background.
+              if (document.visibilityState !== 'visible') return;
+              void markAsRead(notificationId);
             }, 3000); // 3 seconds delay
 
             timers.set(notificationId, timer);
@@ -262,7 +317,7 @@ export default function NotificationsPage() {
       timers.forEach((timer) => clearTimeout(timer));
       timers.clear();
     };
-  }, [notifications, authenticated, markAsRead]);
+  }, [notificationIdsKey, authenticated, markAsRead]);
 
   const formatTimeAgo = (dateString: string) => {
     const date = new Date(dateString);
@@ -279,33 +334,14 @@ export default function NotificationsPage() {
     return date.toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
   };
 
-  const getNotificationIcon = (type: string) => {
-    switch (type) {
-      case 'comment':
-        return '💬';
-      case 'reaction':
-        return '❤️';
-      case 'follow':
-        return '👤';
-      case 'mention':
-        return '📢';
-      case 'reply':
-        return '↩️';
-      case 'share':
-        return '🔁';
-      case 'system':
-        return '✨';
-      default:
-        return '🔔';
-    }
-  };
-
   const getNotificationLink = (notification: Notification) => {
     if (
       notification.type === 'market_resolved' &&
       typeof notification.data?.deepLink === 'string'
     ) {
-      return notification.data.deepLink;
+      // Only follow same-origin paths; reject absolute/scheme URLs.
+      const deepLink = safeReturnTo(notification.data.deepLink);
+      if (deepLink !== '/') return deepLink;
     }
 
     if (
@@ -318,7 +354,7 @@ export default function NotificationsPage() {
 
     // DM or group chat message - go to the specific chat if chatId is available
     if (notification.chatId) {
-      return `/chats?chat=${notification.chatId}`;
+      return `/chats?chat=${encodeURIComponent(notification.chatId)}`;
     }
 
     // Group chat invite - go to chat
@@ -350,7 +386,7 @@ export default function NotificationsPage() {
 
     // Follow notification - go to the follower's profile
     if (notification.type === 'follow' && notification.actorId) {
-      return `/profile/${notification.actorId}`;
+      return `/profile/${encodeURIComponent(notification.actorId)}`;
     }
 
     // Comment or reaction on post - go to the post detail page
@@ -360,17 +396,17 @@ export default function NotificationsPage() {
         notification.type === 'reply') &&
       notification.postId
     ) {
-      return `/post/${notification.postId}`;
+      return `/post/${encodeURIComponent(notification.postId)}`;
     }
 
     // Share notification - go to the post
     if (notification.type === 'share' && notification.postId) {
-      return `/post/${notification.postId}`;
+      return `/post/${encodeURIComponent(notification.postId)}`;
     }
 
     // Mention - go to the post if available
     if (notification.type === 'mention' && notification.postId) {
-      return `/post/${notification.postId}`;
+      return `/post/${encodeURIComponent(notification.postId)}`;
     }
 
     // Default: go to feed
@@ -393,6 +429,7 @@ export default function NotificationsPage() {
                 <h1 className="font-bold text-xl">Notifications</h1>
                 <Link
                   href="/settings?tab=notifications"
+                  aria-label="Notification settings"
                   className="rounded-lg p-1.5 text-muted-foreground transition-colors hover:bg-muted/50 hover:text-foreground"
                 >
                   <Settings className="h-5 w-5" />
@@ -413,6 +450,36 @@ export default function NotificationsPage() {
                 pullDistance={pullDistance}
                 isRefreshing={isRefreshing}
               />
+              {/* Group Invites: shown even when there are no notifications */}
+              {!loading && groupInvites.length > 0 && (
+                <div className="space-y-3 sm:px-4 sm:py-4 lg:px-6">
+                  <h3 className="font-semibold text-muted-foreground text-sm">
+                    Pending Group Invites
+                  </h3>
+                  {groupInvites.map((invite) => (
+                    <GroupInviteCard
+                      key={invite.inviteId}
+                      inviteId={invite.inviteId}
+                      groupId={invite.groupId}
+                      groupName={invite.groupName}
+                      groupDescription={invite.groupDescription}
+                      memberCount={invite.memberCount}
+                      invitedAt={invite.invitedAt}
+                      onAccepted={(_groupId, chatId) => {
+                        fetchNotifications(false, true);
+                        if (chatId) {
+                          router.push(
+                            `/chats?chat=${encodeURIComponent(chatId)}`
+                          );
+                        }
+                      }}
+                      onDeclined={() => {
+                        fetchNotifications(false, true);
+                      }}
+                    />
+                  ))}
+                </div>
+              )}
               {loading ? (
                 <div className="flex flex-col items-center justify-center py-12">
                   <div className="text-muted-foreground">
@@ -432,35 +499,6 @@ export default function NotificationsPage() {
                 </div>
               ) : (
                 <div className="space-y-0">
-                  {/* Group Invites Section */}
-                  {groupInvites.length > 0 && (
-                    <div className="space-y-3 sm:px-4 sm:py-4 lg:px-6">
-                      <h3 className="font-semibold text-muted-foreground text-sm">
-                        Pending Group Invites
-                      </h3>
-                      {groupInvites.map((invite) => (
-                        <GroupInviteCard
-                          key={invite.inviteId}
-                          inviteId={invite.inviteId}
-                          groupId={invite.groupId}
-                          groupName={invite.groupName}
-                          groupDescription={invite.groupDescription}
-                          memberCount={invite.memberCount}
-                          invitedAt={invite.invitedAt}
-                          onAccepted={(_groupId, chatId) => {
-                            fetchNotifications(false, true);
-                            if (chatId) {
-                              router.push(`/chats?chat=${chatId}`);
-                            }
-                          }}
-                          onDeclined={() => {
-                            fetchNotifications(false, true);
-                          }}
-                        />
-                      ))}
-                    </div>
-                  )}
-
                   {/* Regular Notifications */}
                   {notifications.map((notification) => {
                     const presentation =
@@ -470,9 +508,7 @@ export default function NotificationsPage() {
                       <Link
                         key={notification.id}
                         href={getNotificationLink(notification)}
-                        onClick={() =>
-                          markAsRead(notification.id, notification.read)
-                        }
+                        onClick={() => void markAsRead(notification.id)}
                         data-notification-id={notification.id}
                         className={cn(
                           'block border-border border-b px-4 py-4 lg:px-6',
@@ -491,14 +527,17 @@ export default function NotificationsPage() {
                             <Avatar
                               id={notification.actor.id}
                               name={notification.actor.displayName}
+                              imageUrl={
+                                notification.actor.profileImageUrl ?? undefined
+                              }
                               size="md"
                               className="shrink-0"
                             />
                           ) : (
                             <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-full">
                               {notification.type === 'system' ? (
-                                <span className="text-xl">
-                                  {getNotificationIcon(notification.type)}
+                                <span className="text-xl" aria-hidden="true">
+                                  ✨
                                 </span>
                               ) : (
                                 <Bell className="h-5 w-5 text-muted-foreground" />
@@ -519,7 +558,10 @@ export default function NotificationsPage() {
                                     ) : null}
                                     <p className="text-muted-foreground leading-relaxed">
                                       {presentation.message}{' '}
-                                      <time className="text-muted-foreground/70 text-xs">
+                                      <time
+                                        dateTime={notification.createdAt}
+                                        className="text-muted-foreground/70 text-xs"
+                                      >
                                         {formatTimeAgo(notification.createdAt)}
                                       </time>
                                     </p>
@@ -531,14 +573,15 @@ export default function NotificationsPage() {
                                         'Someone'}
                                     </span>{' '}
                                     <span className="text-muted-foreground">
-                                      {notification.message
-                                        .replace(
-                                          notification.actor?.displayName || '',
-                                          ''
-                                        )
-                                        .replace(/^:\s*/, '')}
+                                      {stripLeadingActorName(
+                                        notification.message,
+                                        notification.actor?.displayName
+                                      )}
                                     </span>{' '}
-                                    <time className="text-muted-foreground/70 text-xs">
+                                    <time
+                                      dateTime={notification.createdAt}
+                                      className="text-muted-foreground/70 text-xs"
+                                    >
                                       {formatTimeAgo(notification.createdAt)}
                                     </time>
                                   </p>
@@ -561,4 +604,12 @@ export default function NotificationsPage() {
       </div>
     </PageContainer>
   );
+}
+
+/** Remove the actor's name only when the message starts with it. */
+function stripLeadingActorName(message: string, actorName?: string): string {
+  if (actorName && message.startsWith(actorName)) {
+    return message.slice(actorName.length).replace(/^:?\s*/, '');
+  }
+  return message;
 }

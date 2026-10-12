@@ -38,11 +38,12 @@ import {
   withErrorHandling,
 } from '@feed/api';
 import {
+  and,
   db,
-  desc,
   eq,
   games,
   generateSnowflakeId,
+  gte,
   inArray,
   posts,
 } from '@feed/db';
@@ -58,13 +59,31 @@ import type { NextRequest } from 'next/server';
 import { NextResponse } from 'next/server';
 import { z } from 'zod';
 import { ensureEngineServices } from '@/lib/engine/ensure-engine-services';
+import {
+  type OrgType,
+  selectWeightedOrganizations,
+} from './select-organizations';
+
+/**
+ * Read a positive integer env var. Unset/empty uses the default; any other
+ * non-positive-integer value (0, negative, fractional, NaN) is a
+ * configuration error rather than being silently replaced.
+ */
+function positiveIntEnv(name: string, defaultValue: number): number {
+  const raw = process.env[name]?.trim();
+  if (!raw) return defaultValue;
+  if (!/^\d+$/.test(raw) || Number(raw) < 1) {
+    throw new Error(`${name} must be a positive integer, got "${raw}"`);
+  }
+  return Number(raw);
+}
 
 /**
  * Maximum consecutive errors before aborting the tick (circuit breaker).
  * Prevents cascading failures if there's a systemic issue.
  * Mirrors the same pattern used in npc-tick.
  */
-const MAX_CONSECUTIVE_ERRORS = Number(process.env.ORG_TICK_MAX_ERRORS) || 5;
+const MAX_CONSECUTIVE_ERRORS = positiveIntEnv('ORG_TICK_MAX_ERRORS', 5);
 
 /**
  * Zod schema for validating LLM response formats.
@@ -113,7 +132,7 @@ export const dynamic = 'force-dynamic';
  * - Each org posts roughly every 20 ticks
  * - Variable batch size feels more natural than fixed counts
  */
-const BASE_ORGS_PER_TICK = Number(process.env.ORG_TICK_BATCH_SIZE) || 3;
+const BASE_ORGS_PER_TICK = positiveIntEnv('ORG_TICK_BATCH_SIZE', 3);
 
 /**
  * Calculate organizations per tick with random variance.
@@ -132,8 +151,10 @@ function getOrgsPerTick(): number {
  *
  * @env ORG_MIN_MINUTES_BETWEEN_POSTS
  */
-const ORG_MIN_MINUTES_BETWEEN_POSTS =
-  Number(process.env.ORG_MIN_MINUTES_BETWEEN_POSTS) || 45;
+const ORG_MIN_MINUTES_BETWEEN_POSTS = positiveIntEnv(
+  'ORG_MIN_MINUTES_BETWEEN_POSTS',
+  45
+);
 
 /**
  * GET /api/cron/organization-tick
@@ -149,8 +170,6 @@ export const GET = withErrorHandling(async function GET(req: NextRequest) {
  * Executes organization autonomous tick for media orgs.
  */
 export const POST = withErrorHandling(async function POST(_req: NextRequest) {
-  ensureEngineServices();
-
   // Verify cron authorization
   if (!verifyCronAuth(_req, { jobName: 'OrganizationTick' })) {
     logger.warn(
@@ -163,6 +182,9 @@ export const POST = withErrorHandling(async function POST(_req: NextRequest) {
       { status: 401 }
     );
   }
+
+  // Initialize engine services only after the caller is authorized.
+  ensureEngineServices();
 
   const startTime = Date.now();
   const processId = `org-tick-${Date.now()}-${crypto.randomUUID().slice(0, 8)}`;
@@ -290,31 +312,22 @@ export const POST = withErrorHandling(async function POST(_req: NextRequest) {
     );
     const orgIds = allOrgs.map((o) => o.id);
 
-    // Get most recent post time for each org within the cooldown window
-    const recentOrgPosts = await db
-      .select({
-        authorId: posts.authorId,
-        latestPost: posts.timestamp,
-      })
+    // Find every org that has a post inside the cooldown window (including
+    // scheduled future timestamps). This is evaluated per org, so a prolific
+    // org cannot crowd another org's recent post out of a global top-N.
+    const orgsInCooldown = await db
+      .selectDistinct({ authorId: posts.authorId })
       .from(posts)
-      .where(inArray(posts.authorId, orgIds))
-      .orderBy(desc(posts.timestamp))
-      .limit(orgIds.length * 3); // Get enough to cover recent activity
-
-    // Build a map of org ID -> most recent post time
-    const lastPostMap = new Map<string, Date>();
-    for (const post of recentOrgPosts) {
-      if (!lastPostMap.has(post.authorId) && post.latestPost) {
-        lastPostMap.set(post.authorId, post.latestPost);
-      }
-    }
+      .where(
+        and(
+          inArray(posts.authorId, orgIds),
+          gte(posts.timestamp, cooldownThreshold)
+        )
+      );
+    const cooldownOrgIds = new Set(orgsInCooldown.map((row) => row.authorId));
 
     // Filter out orgs that are still in cooldown
-    const eligibleOrgs = allOrgs.filter((org) => {
-      const lastPost = lastPostMap.get(org.id);
-      if (!lastPost) return true; // Never posted, eligible
-      return lastPost < cooldownThreshold; // Only eligible if cooldown has passed
-    });
+    const eligibleOrgs = allOrgs.filter((org) => !cooldownOrgIds.has(org.id));
 
     // Log cooldown filtering stats
     const inCooldown = allOrgs.length - eligibleOrgs.length;
@@ -554,134 +567,6 @@ export const POST = withErrorHandling(async function POST(_req: NextRequest) {
     );
   }
 });
-
-/**
- * Organization type definitions for different posting behaviors.
- * Each type has distinct posting patterns that mirror real-world counterparts.
- */
-type OrgType =
-  | 'media'
-  | 'company'
-  | 'vc'
-  | 'government'
-  | 'organization'
-  | 'financial';
-
-/**
- * Posting frequency weights for each organization type.
- * Higher weight = more likely to be selected for posting.
- *
- * Rationale (mirrors real-world social media patterns):
- * - media (1.5): News outlets post constantly, breaking news 24/7
- * - company (1.2): Tech companies active on social, product updates, PR
- * - vc (1.0): VCs post thought leadership but less frequently than companies
- * - government (0.6): Official accounts post less, more measured
- * - organization (0.8): Foundations active but not as much as companies
- * - financial (0.7): Institutions post market commentary, less frequent
- */
-const ORG_TYPE_WEIGHTS: Record<OrgType, number> = {
-  media: 1.5,
-  company: 1.2,
-  vc: 1.0,
-  organization: 0.8,
-  financial: 0.7,
-  government: 0.6,
-};
-
-/**
- * Select organizations for this tick using weighted stratified sampling.
- *
- * Strategy:
- * 1. Group orgs by type
- * 2. Apply weights to create a probability distribution
- * 3. Select ensuring diversity (try to include different types when possible)
- * 4. Fallback to weighted random if not enough diversity slots
- *
- * This ensures the feed feels balanced with a natural mix of:
- * - News outlets breaking stories
- * - Companies making announcements
- * - VCs sharing investment takes
- * - Government/orgs occasionally chiming in
- */
-function selectWeightedOrganizations<
-  T extends { id: string; type?: string; name: string },
->(orgs: T[], count: number): T[] {
-  if (orgs.length <= count) return [...orgs];
-
-  // Group by type
-  const byType = new Map<OrgType, T[]>();
-  for (const org of orgs) {
-    const type = (org.type || 'media') as OrgType;
-    const list = byType.get(type) || [];
-    list.push(org);
-    byType.set(type, list);
-  }
-
-  const selected: T[] = [];
-  const selectedIds = new Set<string>();
-
-  // Phase 1: Stratified selection - try to get one from each active type
-  // Weight determines which types get priority for the first slots
-  const typesByWeight = [...byType.entries()].sort(
-    (a, b) => (ORG_TYPE_WEIGHTS[b[0]] || 1) - (ORG_TYPE_WEIGHTS[a[0]] || 1)
-  );
-
-  // Select one from each type (in weight order) until we have enough or run out of types
-  for (const [_type, typeOrgs] of typesByWeight) {
-    if (selected.length >= count) break;
-    if (typeOrgs.length === 0) continue;
-
-    // Pick random org from this type
-    const idx = Math.floor(secureRandom() * typeOrgs.length);
-    const org = typeOrgs[idx]!;
-    if (!selectedIds.has(org.id)) {
-      selected.push(org);
-      selectedIds.add(org.id);
-    }
-  }
-
-  // Phase 2: Fill remaining slots with weighted random selection
-  if (selected.length < count) {
-    // Build weighted pool from remaining orgs
-    const remaining = orgs.filter((o) => !selectedIds.has(o.id));
-    const weightedPool: Array<{ org: T; weight: number }> = remaining.map(
-      (org) => ({
-        org,
-        weight: ORG_TYPE_WEIGHTS[(org.type || 'media') as OrgType] || 1,
-      })
-    );
-
-    // Select remaining using weighted random
-    while (selected.length < count && weightedPool.length > 0) {
-      const totalWeight = weightedPool.reduce((sum, w) => sum + w.weight, 0);
-      let random = secureRandom() * totalWeight;
-
-      for (let i = 0; i < weightedPool.length; i++) {
-        random -= weightedPool[i]!.weight;
-        if (random <= 0) {
-          selected.push(weightedPool[i]!.org);
-          selectedIds.add(weightedPool[i]!.org.id);
-          weightedPool.splice(i, 1);
-          break;
-        }
-      }
-    }
-  }
-
-  // Log the distribution for monitoring
-  const typeCounts: Record<string, number> = {};
-  for (const org of selected) {
-    const type = org.type || 'media';
-    typeCounts[type] = (typeCounts[type] || 0) + 1;
-  }
-  logger.debug(
-    'Weighted org selection',
-    { count: selected.length, distribution: typeCounts },
-    'OrganizationTick'
-  );
-
-  return selected;
-}
 
 /**
  * Build a prompt for organization POST generation (not articles).

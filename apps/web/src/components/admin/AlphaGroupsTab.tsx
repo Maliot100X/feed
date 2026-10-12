@@ -34,7 +34,8 @@ const TierStatsSchema = z.object({
   name: z.string(),
   current: z.number(),
   max: z.number(),
-  fillRate: z.number(),
+  // null when the tier has no capacity (no groups)
+  fillRate: z.number().nullable(),
 });
 
 /**
@@ -54,7 +55,7 @@ const InviteStatsSchema = z.object({
  * Zod schema for the full stats response.
  */
 const AlphaGroupStatsSchema = z.object({
-  success: z.boolean(),
+  success: z.literal(true),
   data: z.object({
     overview: z.object({
       totalNpcs: z.number(),
@@ -105,7 +106,7 @@ type AlphaGroupStats = z.infer<typeof AlphaGroupStatsSchema>['data'];
  * Zod schema for config response.
  */
 const AlphaGroupConfigSchema = z.object({
-  success: z.boolean(),
+  success: z.literal(true),
   data: z.object({
     config: z.record(
       z.string(),
@@ -172,6 +173,7 @@ export function AlphaGroupsTab() {
   const [isLoading, setIsLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [showConfig, setShowConfig] = useState(false);
+  const [configError, setConfigError] = useState<string | null>(null);
 
   /**
    * Fetch alpha group statistics.
@@ -180,58 +182,75 @@ export function AlphaGroupsTab() {
     setIsLoading(true);
     setError(null);
 
-    const response = await fetch(apiUrl('/api/admin/alpha-groups/stats'), {
-      headers: {
-        'Content-Type': 'application/json',
-      },
-    });
+    try {
+      const response = await fetch(apiUrl('/api/admin/alpha-groups/stats'), {
+        headers: {
+          'Content-Type': 'application/json',
+        },
+      });
 
-    if (!response.ok) {
-      const errorText = await response.text();
-      setError(`Failed to fetch stats: ${response.status} - ${errorText}`);
+      if (!response.ok) {
+        const errorText = await response.text();
+        setError(`Failed to fetch stats: ${response.status} - ${errorText}`);
+        return;
+      }
+
+      const json = await response.json();
+      const parsed = AlphaGroupStatsSchema.safeParse(json);
+
+      if (!parsed.success) {
+        setError(`Invalid response format: ${parsed.error.message}`);
+        return;
+      }
+
+      setStats(parsed.data.data);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Failed to fetch stats');
+    } finally {
       setIsLoading(false);
-      return;
     }
-
-    const json = await response.json();
-    const parsed = AlphaGroupStatsSchema.safeParse(json);
-
-    if (!parsed.success) {
-      setError(`Invalid response format: ${parsed.error.message}`);
-      setIsLoading(false);
-      return;
-    }
-
-    setStats(parsed.data.data);
-    setIsLoading(false);
   }, []);
 
   /**
    * Fetch alpha group configuration.
    */
   const fetchConfig = useCallback(async () => {
-    const response = await fetch(apiUrl('/api/admin/alpha-groups/config'), {
-      headers: {
-        'Content-Type': 'application/json',
-      },
-    });
+    setConfigError(null);
+    try {
+      const response = await fetch(apiUrl('/api/admin/alpha-groups/config'), {
+        headers: {
+          'Content-Type': 'application/json',
+        },
+      });
 
-    if (!response.ok) {
-      return;
-    }
+      if (!response.ok) {
+        setConfigError(
+          `Failed to fetch configuration (HTTP ${response.status})`
+        );
+        return;
+      }
 
-    const json = await response.json();
-    const parsed = AlphaGroupConfigSchema.safeParse(json);
-
-    if (parsed.success) {
+      const parsed = AlphaGroupConfigSchema.safeParse(await response.json());
+      if (!parsed.success) {
+        setConfigError('Invalid configuration response format');
+        return;
+      }
       setConfig(parsed.data.data);
+    } catch (err) {
+      setConfigError(
+        err instanceof Error ? err.message : 'Failed to fetch configuration'
+      );
     }
   }, []);
 
-  useEffect(() => {
-    fetchStats();
-    fetchConfig();
+  const refreshAll = useCallback(() => {
+    void fetchStats();
+    void fetchConfig();
   }, [fetchStats, fetchConfig]);
+
+  useEffect(() => {
+    refreshAll();
+  }, [refreshAll]);
 
   if (isLoading) {
     return (
@@ -251,7 +270,8 @@ export function AlphaGroupsTab() {
         <h2 className="font-semibold text-destructive text-xl">Error</h2>
         <p className="max-w-md text-muted-foreground">{error}</p>
         <button
-          onClick={fetchStats}
+          type="button"
+          onClick={refreshAll}
           className="mt-4 rounded-lg bg-primary px-6 py-2 text-primary-foreground hover:bg-primary/90"
         >
           Retry
@@ -278,10 +298,8 @@ export function AlphaGroupsTab() {
           </div>
         </div>
         <button
-          onClick={() => {
-            fetchStats();
-            fetchConfig();
-          }}
+          type="button"
+          onClick={refreshAll}
           className="flex items-center gap-2 rounded-lg border border-border bg-card px-3 py-2 text-sm hover:bg-muted"
         >
           <RefreshCw className="h-4 w-4" />
@@ -371,29 +389,35 @@ export function AlphaGroupsTab() {
                   <span className="font-bold text-2xl">{tier.current}</span>
                   <span className="text-sm opacity-70">/ {tier.max}</span>
                 </div>
-                <div className="mt-2 h-2 rounded-full bg-background/30">
-                  <div
-                    className={cn(
-                      'h-2 rounded-full',
-                      tier.fillRate < 0.75
-                        ? 'bg-green-500'
-                        : tier.fillRate < 0.9
-                          ? 'bg-yellow-500'
-                          : 'bg-red-500'
-                    )}
-                    style={{
-                      width: `${Math.min(100, tier.fillRate * 100)}%`,
-                    }}
-                  />
-                </div>
-                <p
-                  className={cn(
-                    'mt-1 text-sm',
-                    getFillRateColor(tier.fillRate)
-                  )}
-                >
-                  {formatPercent(tier.fillRate)} full
-                </p>
+                {tier.fillRate === null ? (
+                  <p className="mt-1 text-sm opacity-70">No capacity</p>
+                ) : (
+                  <>
+                    <div className="mt-2 h-2 rounded-full bg-background/30">
+                      <div
+                        className={cn(
+                          'h-2 rounded-full',
+                          tier.fillRate < 0.75
+                            ? 'bg-green-500'
+                            : tier.fillRate < 0.9
+                              ? 'bg-yellow-500'
+                              : 'bg-red-500'
+                        )}
+                        style={{
+                          width: `${Math.min(100, tier.fillRate * 100)}%`,
+                        }}
+                      />
+                    </div>
+                    <p
+                      className={cn(
+                        'mt-1 text-sm',
+                        getFillRateColor(tier.fillRate)
+                      )}
+                    >
+                      {formatPercent(tier.fillRate)} full
+                    </p>
+                  </>
+                )}
               </div>
             </div>
           ))}
@@ -512,6 +536,8 @@ export function AlphaGroupsTab() {
       {/* Configuration Panel */}
       <div className="rounded-xl border border-border bg-card">
         <button
+          type="button"
+          aria-expanded={showConfig}
           onClick={() => setShowConfig(!showConfig)}
           className="flex w-full items-center justify-between p-4 text-left hover:bg-muted/50"
         >
@@ -530,6 +556,23 @@ export function AlphaGroupsTab() {
             <ChevronDown className="h-5 w-5 text-muted-foreground" />
           )}
         </button>
+
+        {showConfig && !config && (
+          <div className="border-border border-t p-4 text-sm">
+            <span className="text-destructive">
+              {configError ?? 'Loading configuration...'}
+            </span>
+            {configError && (
+              <button
+                type="button"
+                onClick={() => void fetchConfig()}
+                className="ml-2 underline"
+              >
+                Retry
+              </button>
+            )}
+          </div>
+        )}
 
         {showConfig && config && (
           <div className="border-border border-t p-4">

@@ -89,7 +89,7 @@ All Capacitor plugins are lazy-loaded via dynamic `import()`. This means native 
 | `apps/web/src/app/api/notifications/register-device/route.ts` | Push token registration |
 | `apps/web/src/app/api/notifications/unregister-device/route.ts` | Push token removal |
 | `apps/web/public/.well-known/apple-app-site-association` | iOS Universal Links |
-| `apps/web/public/.well-known/assetlinks.json` | Android App Links |
+| `apps/web/public/assetlinks.json` (served at `/.well-known/assetlinks.json` via rewrite) | Android App Links |
 | `apps/mobile/` | Complete mobile app (77+ files) |
 | `apps/mobile/src/components/AppUrlListener.tsx` | Privy OAuth handler |
 | `apps/mobile/src/lib/platform.ts` | Platform detection |

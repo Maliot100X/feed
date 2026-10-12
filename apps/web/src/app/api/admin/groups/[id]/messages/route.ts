@@ -28,6 +28,9 @@
  *         name: limit
  *         schema:
  *           type: integer
+ *           minimum: 1
+ *           maximum: 200
+ *           default: 100
  *         description: Messages per page
  *       - in: query
  *         name: offset
@@ -71,6 +74,12 @@ import { db } from '@feed/db';
 import { StaticDataRegistry } from '@feed/engine';
 import type { NextRequest } from 'next/server';
 import { NextResponse } from 'next/server';
+import { z } from 'zod';
+
+const PaginationSchema = z.object({
+  limit: z.coerce.number().int().min(1).max(200).default(100),
+  offset: z.coerce.number().int().min(0).default(0),
+});
 
 /**
  * GET /api/admin/groups/[id]/messages
@@ -96,8 +105,17 @@ export const GET = withErrorHandling(
 
     // Get query parameters
     const { searchParams } = new URL(request.url);
-    const limit = Number.parseInt(searchParams.get('limit') || '100');
-    const offset = Number.parseInt(searchParams.get('offset') || '0');
+    const pagination = PaginationSchema.safeParse({
+      limit: searchParams.get('limit') ?? undefined,
+      offset: searchParams.get('offset') ?? undefined,
+    });
+    if (!pagination.success) {
+      return NextResponse.json(
+        { error: 'limit must be 1-200 and offset a non-negative integer' },
+        { status: 400 }
+      );
+    }
+    const { limit, offset } = pagination.data;
 
     // Get chat details
     const chat = await db.chat.findUnique({
@@ -130,9 +148,7 @@ export const GET = withErrorHandling(
     // Get messages with pagination
     const messages = await db.message.findMany({
       where: { chatId },
-      orderBy: {
-        createdAt: 'desc',
-      },
+      orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
       skip: offset,
       take: limit,
     });

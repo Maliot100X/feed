@@ -59,36 +59,40 @@ import { NextResponse } from 'next/server';
 export const POST = withErrorHandling(async (req: NextRequest) => {
   const admin = await requireAdmin(req);
 
-  // Audit log the emergency action
-  logAdminModify({
+  // Pause ALL autonomous agents immediately by updating their configs
+  // Status 'paused' matches the per-agent toggle so resume-all can restore
+  // exactly the administratively paused agents.
+  const paused = await db
+    .update(userAgentConfigs)
+    .set({
+      autonomousTrading: false,
+      autonomousPosting: false,
+      autonomousCommenting: false,
+      autonomousDMs: false,
+      autonomousGroupChats: false,
+      status: 'paused',
+      updatedAt: new Date(),
+    })
+    .returning({ userId: userAgentConfigs.userId });
+
+  await logAdminModify({
     adminId: admin.userId,
     ipAddress: getClientIp(req.headers) ?? undefined,
     resourceType: 'agents',
-    metadata: { action: 'emergency_pause_all' },
-  });
-
-  // Pause ALL autonomous agents immediately by updating their configs
-  await db.update(userAgentConfigs).set({
-    autonomousTrading: false,
-    autonomousPosting: false,
-    autonomousCommenting: false,
-    autonomousDMs: false,
-    autonomousGroupChats: false,
-    status: 'idle',
-    updatedAt: new Date(),
+    metadata: { action: 'emergency_pause_all', paused: paused.length },
   });
 
   logger.warn(
-    `EMERGENCY: Paused all autonomous agents`,
+    `EMERGENCY: Paused ${paused.length} autonomous agents`,
     undefined,
     'AdminAgentsAPI'
   );
 
   return NextResponse.json({
     success: true,
-    message: 'Paused all agents',
+    message: `Paused ${paused.length} agents`,
     data: {
-      paused: 'all',
+      paused: paused.length,
     },
   });
 });

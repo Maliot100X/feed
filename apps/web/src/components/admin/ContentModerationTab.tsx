@@ -147,7 +147,7 @@ export function ContentModerationTab() {
           setError(
             categorizeError(
               response.status,
-              errorData.error ?? errorData.message
+              errorData.error?.message ?? errorData.message
             )
           );
           setLoading(false);
@@ -214,7 +214,7 @@ export function ContentModerationTab() {
         const errorData = await response.json().catch(() => ({}));
         const categorized = categorizeError(
           response.status,
-          errorData.error ?? errorData.message
+          errorData.error?.message ?? errorData.message
         );
         toast.error(categorized.message);
         return;

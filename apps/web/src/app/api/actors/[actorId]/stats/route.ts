@@ -141,9 +141,14 @@ export const GET = withErrorHandling(
       db.actorFollow.count({
         where: { followerId: actualActorId },
       }),
-      // Posts by this actor
+      // Visible posts by this actor: not deleted and already published
+      // (future-scheduled posts must not be counted or hinted at).
       db.post.count({
-        where: { authorId: actualActorId },
+        where: {
+          authorId: actualActorId,
+          deletedAt: null,
+          timestamp: { lte: new Date() },
+        },
       }),
     ]);
 

@@ -79,8 +79,8 @@ export class CapitalAllocationService {
       C_TIER: 10000, // Influencers, reporters ($10k)
     };
 
-    const capital = tierCapital[tier] || tierCapital['C_TIER'];
-    if (!capital) {
+    const capital = tierCapital[tier];
+    if (capital === undefined) {
       throw new Error(`Invalid tier: ${tier}`);
     }
     return capital;
@@ -147,7 +147,7 @@ export class CapitalAllocationService {
   /**
    * Domain multiplier based on industry
    */
-  private static getDomainMultiplier(domains: string[]): number {
+  static getDomainMultiplier(domains: string[]): number {
     const domainScores: Record<string, number> = {
       finance: 1.5, // Finance people have the most capital
       crypto: 1.4, // Crypto traders loaded
@@ -160,16 +160,18 @@ export class CapitalAllocationService {
       social_media: 0.7, // Social media influencers less
     };
 
-    // Take highest domain score
-    let maxScore = 1.0;
+    // Take the highest score among recognized domains; unrecognized or empty
+    // domains are neutral (1.0). Starting from -Infinity lets below-1 domains
+    // (media, entertainment) actually apply.
+    let maxScore = Number.NEGATIVE_INFINITY;
     for (const domain of domains) {
       const score = domainScores[domain.toLowerCase()];
-      if (score && score > maxScore) {
+      if (score !== undefined && score > maxScore) {
         maxScore = score;
       }
     }
 
-    return maxScore;
+    return Number.isFinite(maxScore) ? maxScore : 1.0;
   }
 
   /**
@@ -185,7 +187,7 @@ export class CapitalAllocationService {
     const role = CapitalAllocationService.extractRole(actor.description || '');
     const primaryDomain = actor.domain?.[0] || 'general';
 
-    return `${tier.replace('_TIER', '-tier')} ${role} in ${primaryDomain}: $${tierCapital.toLocaleString()} base × ${roleMultiplier}aix role × ${domainMultiplier}aix domain`;
+    return `${tier.replace('_TIER', '-tier')} ${role} in ${primaryDomain}: $${tierCapital.toLocaleString()} base × ${roleMultiplier}x role × ${domainMultiplier}x domain`;
   }
 
   /**
@@ -210,57 +212,14 @@ export class CapitalAllocationService {
   }
 
   /**
-   * Get example allocations for common actor types
-   */
-  static getExampleAllocations(): Array<{
-    description: string;
-    capital: number;
-    reputation: number;
-  }> {
-    return [
-      {
-        description: 'S-tier Tech CEO (AIlon)',
-        capital: 500000,
-        reputation: 7071,
-      },
-      {
-        description: 'S-tier VC Founder (Peter ThAIl)',
-        capital: 450000,
-        reputation: 6708,
-      },
-      {
-        description: 'A-tier VC (Marc AIndreessen)',
-        capital: 135000,
-        reputation: 3674,
-      },
-      {
-        description: 'A-tier CEO (Jeff BAIzos)',
-        capital: 150000,
-        reputation: 3873,
-      },
-      {
-        description: 'B-tier Investor (CathAI Wood)',
-        capital: 27500,
-        reputation: 1658,
-      },
-      {
-        description: 'B-tier Media Host (Tucker)',
-        capital: 20000,
-        reputation: 1414,
-      },
-      { description: 'C-tier Influencer', capital: 8000, reputation: 894 },
-      { description: 'C-tier Journalist', capital: 8000, reputation: 894 },
-      { description: 'User (starting)', capital: 1000, reputation: 1000 },
-    ];
-  }
-
-  /**
    * Validate capital allocation makes sense
    */
   static validateAllocation(
     actor: Actor,
     allocation: CapitalAllocation
   ): boolean {
+    if (!Number.isFinite(allocation.tradingBalance)) return false;
+
     // Minimum: $5,000
     if (allocation.tradingBalance < 5000) return false;
 

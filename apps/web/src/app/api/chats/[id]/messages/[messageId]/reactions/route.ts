@@ -51,7 +51,8 @@ async function requireChatAccess(
       .where(
         and(
           eq(chatParticipants.chatId, chatId),
-          eq(chatParticipants.userId, user.userId)
+          eq(chatParticipants.userId, user.userId),
+          eq(chatParticipants.isActive, true)
         )
       )
       .limit(1);

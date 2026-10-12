@@ -45,14 +45,14 @@ export default defineCommand({
     if (!args.loop) {
       consola.start('Executing single tick...');
       const start = Date.now();
+      // A failed tick rejects (non-zero exit via runMain) after shutdown.
       try {
         const metrics = await engine.tick();
         const ms = Date.now() - start;
         consola.success(`Tick completed in ${ms}ms`, metrics);
-      } catch (err) {
-        consola.error('Tick failed:', err);
+      } finally {
+        await engine.shutdown();
       }
-      await engine.shutdown();
       return;
     }
 

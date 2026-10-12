@@ -9,6 +9,7 @@
 
 import { feedAgentCard } from '@feed/a2a';
 import { withErrorHandling } from '@feed/api';
+import { getBaseUrl } from '@feed/shared';
 import { NextResponse } from 'next/server';
 
 export const dynamic = 'force-dynamic';
@@ -18,7 +19,7 @@ export const dynamic = 'force-dynamic';
  * Returns detailed game capabilities
  */
 export const GET = withErrorHandling(async function GET() {
-  const BASE_URL = process.env.NEXT_PUBLIC_APP_URL || 'http://localhost:3000';
+  const BASE_URL = getBaseUrl();
 
   const capabilities = {
     name: feedAgentCard.name,

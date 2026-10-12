@@ -1915,12 +1915,39 @@ const WORLD_FACTS_LOCK_DURATION_MS =
     : DEFAULT_WORLD_FACTS_LOCK_DURATION_MINUTES) *
   60 *
   1000;
-// Renew lock at half the TTL to prevent expiry during long-running generation
-// No minimum floor - allows short locks for testing while ensuring renewal before expiry
-const WORLD_FACTS_LOCK_RENEWAL_INTERVAL_MS = Math.min(
-  Math.floor(WORLD_FACTS_LOCK_DURATION_MS / 2),
-  WORLD_FACTS_LOCK_DURATION_MS - 1 // Ensure renewal is always before expiry
+/**
+ * Lock renewal interval: half the lock TTL (at least 1ms), always strictly
+ * before expiry. No minimum floor so short locks work in tests.
+ */
+export function computeLockRenewalIntervalMs(lockDurationMs: number): number {
+  if (!Number.isFinite(lockDurationMs) || lockDurationMs < 2) {
+    throw new RangeError(
+      `Lock duration must be a finite number >= 2ms, got ${lockDurationMs}`
+    );
+  }
+  return Math.min(
+    Math.max(1, Math.floor(lockDurationMs / 2)),
+    lockDurationMs - 1
+  );
+}
+
+const WORLD_FACTS_LOCK_RENEWAL_INTERVAL_MS = computeLockRenewalIntervalMs(
+  WORLD_FACTS_LOCK_DURATION_MS
 );
+
+/**
+ * Whether world facts generation is due: never generated, or at least
+ * `intervalMs` elapsed since the last auto-generated fact. A future
+ * timestamp (clock skew) is not due.
+ */
+export function isWorldFactsUpdateDue(
+  lastAutoFactCreatedAt: Date | null,
+  nowMs: number,
+  intervalMs: number
+): boolean {
+  if (!lastAutoFactCreatedAt) return true;
+  return nowMs - lastAutoFactCreatedAt.getTime() >= intervalMs;
+}
 
 /**
  * Generation Marker Constants
@@ -1960,7 +1987,7 @@ async function shouldUpdateWorldFacts(): Promise<boolean> {
     .orderBy(desc(worldFacts.createdAt))
     .limit(1);
 
-  if (!lastAutoFact || !lastAutoFact.createdAt) {
+  if (!lastAutoFact?.createdAt) {
     logger.info(
       'No auto-generated world facts found, triggering initial generation',
       undefined,
@@ -1969,9 +1996,13 @@ async function shouldUpdateWorldFacts(): Promise<boolean> {
     return true; // Never generated before
   }
 
-  const timeSinceLastGeneration = Date.now() - lastAutoFact.createdAt.getTime();
-  const shouldUpdate =
-    timeSinceLastGeneration >= WORLD_FACTS_UPDATE_INTERVAL_MS;
+  const now = Date.now();
+  const timeSinceLastGeneration = now - lastAutoFact.createdAt.getTime();
+  const shouldUpdate = isWorldFactsUpdateDue(
+    lastAutoFact.createdAt,
+    now,
+    WORLD_FACTS_UPDATE_INTERVAL_MS
+  );
 
   if (shouldUpdate) {
     logger.info(

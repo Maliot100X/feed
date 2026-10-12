@@ -66,7 +66,7 @@ export function shuffleArray<T>(
  * @param count - Number of samples to return
  * @param rng - Optional random number generator (defaults to Math.random)
  * @returns Array of random samples (may be shorter than count if array is smaller)
- * @throws Never throws - returns empty array if input is empty or count is 0
+ * @throws Never throws - returns empty array if input is empty or count <= 0 / NaN
  *
  * @example
  * ```typescript
@@ -79,8 +79,13 @@ export function sampleRandom<T>(
   count: number,
   rng: RngFunction = Math.random
 ): T[] {
-  const shuffled = shuffleArray(array, rng);
-  return shuffled.slice(0, Math.min(count, array.length));
+  const take = Number.isFinite(count)
+    ? Math.min(Math.max(0, Math.floor(count)), array.length)
+    : count === Number.POSITIVE_INFINITY
+      ? array.length
+      : 0;
+  if (take === 0) return [];
+  return shuffleArray(array, rng).slice(0, take);
 }
 
 /**

@@ -17,7 +17,10 @@ import {
   gte,
   inArray,
   isNull,
+  lte,
   messages,
+  ne,
+  or,
   posts,
   users,
 } from '@feed/db';
@@ -47,8 +50,9 @@ export async function gatherPendingCommentReplies(
   agentUserId: string
 ): Promise<PendingCommentReply[]> {
   const interactions: PendingCommentReply[] = [];
+  const now = new Date();
   const windowStart = new Date(
-    Date.now() - INTERACTION_WINDOW_HOURS * 60 * 60 * 1000
+    now.getTime() - INTERACTION_WINDOW_HOURS * 60 * 60 * 1000
   );
 
   // Get agent's recent posts
@@ -85,7 +89,8 @@ export async function gatherPendingCommentReplies(
   const allCommentsRaw = await db.query.comments.findMany({
     where: and(
       inArray(comments.postId, relevantPostIds),
-      isNull(comments.deletedAt)
+      isNull(comments.deletedAt),
+      lte(comments.createdAt, now)
     ),
     with: {
       author: {
@@ -186,38 +191,32 @@ export async function gatherPendingChatMessages(
   agentUserId: string
 ): Promise<PendingChatMessage[]> {
   const interactions: PendingChatMessage[] = [];
+  const now = new Date();
   const windowStart = new Date(
-    Date.now() - INTERACTION_WINDOW_HOURS * 60 * 60 * 1000
+    now.getTime() - INTERACTION_WINDOW_HOURS * 60 * 60 * 1000
   );
 
-  // Get chats the agent is part of
+  // Chats where the agent is still an active participant. Team chats
+  // (group.type = 'team') are excluded: agents shouldn't auto-respond there.
   const agentChats = await db
     .select({
       chatId: chatParticipants.chatId,
       chat: chats,
     })
     .from(chatParticipants)
-    .leftJoin(chats, eq(chatParticipants.chatId, chats.id))
-    .where(eq(chatParticipants.userId, agentUserId));
+    .innerJoin(chats, eq(chatParticipants.chatId, chats.id))
+    .leftJoin(groups, eq(chats.groupId, groups.id))
+    .where(
+      and(
+        eq(chatParticipants.userId, agentUserId),
+        eq(chatParticipants.isActive, true),
+        or(isNull(groups.id), ne(groups.type, 'team'))
+      )
+    );
+  if (agentChats.length === 0) return interactions;
 
-  const validChats = agentChats.filter((c) => c.chat !== null);
-  if (validChats.length === 0) return interactions;
-
-  // Filter out team chats (Agents) - agents shouldn't auto-respond there
-  // Team chats use group.type = 'team'
-  const teamGroups = await db
-    .select({ id: groups.id })
-    .from(groups)
-    .where(eq(groups.type, 'team'));
-  const teamGroupIds = new Set(teamGroups.map((g) => g.id));
-
-  const nonTeamChats = validChats.filter(
-    (c) => !c.chat?.groupId || !teamGroupIds.has(c.chat.groupId)
-  );
-  if (nonTeamChats.length === 0) return interactions;
-
-  const chatIds = nonTeamChats.map((c) => c.chatId);
-  const chatMap = new Map(nonTeamChats.map((c) => [c.chatId, c.chat!]));
+  const chatIds = agentChats.map((c) => c.chatId);
+  const chatMap = new Map(agentChats.map((c) => [c.chatId, c.chat]));
 
   // Batch fetch recent messages
   const allRecentMessages = await db
@@ -226,10 +225,11 @@ export async function gatherPendingChatMessages(
     .where(
       and(
         inArray(messages.chatId, chatIds),
-        gte(messages.createdAt, windowStart)
+        gte(messages.createdAt, windowStart),
+        lte(messages.createdAt, now)
       )
     )
-    .orderBy(desc(messages.createdAt))
+    .orderBy(desc(messages.createdAt), desc(messages.id))
     .limit(100);
 
   // Group by chat
@@ -297,14 +297,16 @@ export async function gatherPendingChatMessages(
     const latestFromOther = messagesFromOthers[0];
     if (!latestFromOther) continue;
 
-    // Check if agent already responded (compare timestamps, not IDs which may be text-based)
+    // Check if agent already responded (compare timestamps, not IDs which may
+    // be text-based). A reply sharing the same timestamp counts as handled so
+    // tied timestamps cannot trigger repeated replies.
     const agentMessages = chatMessages.filter(
       (m) => m.senderId === agentUserId
     );
     const agentLastMessage = agentMessages[0];
     if (
       agentLastMessage &&
-      agentLastMessage.createdAt > latestFromOther.createdAt
+      agentLastMessage.createdAt >= latestFromOther.createdAt
     ) {
       continue;
     }
@@ -357,13 +359,17 @@ function formatUserName(
 }
 
 /** Check if agent participated in ancestor comment chain */
-function hasAgentInAncestors(
+export function hasAgentInAncestors(
   comment: { parentCommentId: string | null; authorId: string },
   commentMap: Map<string, { parentCommentId: string | null; authorId: string }>,
   agentUserId: string
 ): boolean {
+  // Visited set bounds the walk: corrupt cyclic parent chains must not loop
+  // forever.
+  const visited = new Set<string>();
   let currentId = comment.parentCommentId;
-  while (currentId) {
+  while (currentId && !visited.has(currentId)) {
+    visited.add(currentId);
     const parent = commentMap.get(currentId);
     if (!parent) break;
     if (parent.authorId === agentUserId) return true;

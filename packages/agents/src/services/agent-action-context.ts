@@ -1,4 +1,30 @@
-import type { IAgentRuntime, Memory, State } from '@elizaos/core';
+import type {
+  IAgentRuntime,
+  Memory,
+  ProviderResult,
+  State,
+} from '@elizaos/core';
+import { logger } from '@feed/shared';
+
+/** Action outcome recorded in `state.data.actionResults` during a chat run. */
+export interface AgentActionTrace {
+  actionType: string;
+  success: boolean;
+  timestamp: number;
+  text?: string;
+  error?: string | Error;
+  values?: object;
+}
+
+function isAgentActionTrace(value: unknown): value is AgentActionTrace {
+  if (!value || typeof value !== 'object') return false;
+  const obj = value as Record<string, unknown>;
+  return (
+    typeof obj.actionType === 'string' &&
+    typeof obj.timestamp === 'number' &&
+    typeof obj.success === 'boolean'
+  );
+}
 
 /** Preserve the complete outputs of actions for the next decision and summary. */
 export function formatAgentActionResults(
@@ -48,4 +74,45 @@ export async function requireAgentAction(
   }
   if (!(await action.validate(runtime, message, state)))
     throw new Error(`Agent action is not available: ${actionName}`);
+}
+
+/**
+ * Shared ACTION_STATE provider body (agent and coordinator plugins): renders
+ * `state.data.actionResults` with the same formatter the chat service uses.
+ */
+export function buildActionStateProviderResult(state: State): ProviderResult {
+  const rawResults: unknown = state.data?.actionResults;
+  const actionResults = Array.isArray(rawResults)
+    ? rawResults.filter(isAgentActionTrace)
+    : [];
+  if (Array.isArray(rawResults) && actionResults.length !== rawResults.length) {
+    logger.warn(
+      `Filtered ${rawResults.length - actionResults.length} invalid action results`,
+      { totalRaw: rawResults.length, valid: actionResults.length },
+      'ActionState'
+    );
+  }
+
+  const formattedResults = formatAgentActionResults(actionResults);
+  const completedCount = actionResults.filter((r) => r.success).length;
+  const failedCount = actionResults.length - completedCount;
+
+  return {
+    data: {
+      actionResults,
+      completedCount,
+      failedCount,
+    },
+    values: {
+      actionResults: formattedResults,
+      hasActionResults: actionResults.length > 0,
+      completedActions: completedCount,
+      failedActions: failedCount,
+      totalActions: actionResults.length,
+    },
+    text:
+      actionResults.length > 0
+        ? `# Actions Taken This Request\n\n${formattedResults}`
+        : 'No actions taken yet.',
+  };
 }

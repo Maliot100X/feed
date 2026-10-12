@@ -14,6 +14,8 @@
  *   - Safety buffer: ~30k tokens
  */
 
+import { countTokensSync } from '../llm/token-counter';
+
 /**
  * Maximum lengths for text fields (in characters, approximate tokens = chars / 4)
  */
@@ -77,22 +79,22 @@ export const CONTEXT_LIMITS = {
  */
 export function truncateText(text: string, maxLength: number): string {
   if (text.length <= maxLength) return text;
-  return text.substring(0, maxLength - 3) + '...';
+  const limit = Math.max(0, Math.floor(maxLength));
+  if (limit <= 3) return text.substring(0, limit);
+  return text.substring(0, limit - 3) + '...';
 }
 
 /**
- * Truncate array to maximum length
+ * Truncate array to maximum length (negative limits yield an empty array)
  */
 export function truncateArray<T>(array: T[], maxLength: number): T[] {
-  return array.slice(0, maxLength);
+  return array.slice(0, Math.max(0, maxLength));
 }
 
 /**
  * Estimate token count from character count (rough approximation: 1 token ≈ 4 chars)
  */
-export function estimateTokens(text: string): number {
-  return Math.ceil(text.length / 4);
-}
+export const estimateTokens = countTokensSync;
 
 /**
  * Check if context size is within safe limits

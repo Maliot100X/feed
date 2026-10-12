@@ -145,6 +145,13 @@ export class CommunicationHub {
     route.status = response.success ? 'delivered' : 'failed';
     route.error = response.error;
 
+    // Record the route before observer events so statistics reflect it even
+    // if an event handler fails.
+    this.routeHistory.push(route);
+    if (this.routeHistory.length > this.maxHistorySize) {
+      this.routeHistory.shift();
+    }
+
     // Broadcast delivery event (serialize to JsonValue)
     await this.eventBus.publish(
       response.success ? 'message.delivered' : 'message.failed',
@@ -153,11 +160,6 @@ export class CommunicationHub {
     );
 
     return response;
-    // Add route to history
-    this.routeHistory.push(route);
-    if (this.routeHistory.length > this.maxHistorySize) {
-      this.routeHistory.shift();
-    }
   }
 
   /**
@@ -274,7 +276,7 @@ export class CommunicationHub {
       (data: JsonValue) => {
         // Type guard to ensure data is a Message
         if (isMessage(data)) {
-          handler(data);
+          return handler(data);
         }
       }
     );
@@ -300,7 +302,7 @@ export class CommunicationHub {
         'to' in data
       ) {
         if (isMessage(data)) {
-          handler(data);
+          return handler(data);
         }
       }
     });
@@ -356,7 +358,7 @@ export class CommunicationHub {
       messages = messages.filter((m) => m.from === agentId || m.to === agentId);
     }
 
-    return messages.slice(-limit);
+    return takeLast(messages, limit);
   }
 
   /**
@@ -372,7 +374,7 @@ export class CommunicationHub {
       routes = routes.filter((r) => r.from === agentId || r.to === agentId);
     }
 
-    return routes.slice(-limit);
+    return takeLast(routes, limit);
   }
 
   /**
@@ -422,6 +424,16 @@ export class CommunicationHub {
   getEventHistory(eventType?: string, limit?: number): AgentEvent[] {
     return this.eventBus.getHistory(eventType, limit);
   }
+}
+
+/** Last `limit` items; `limit` must be a non-negative integer (0 returns none). */
+function takeLast<T>(items: T[], limit: number): T[] {
+  if (!Number.isInteger(limit) || limit < 0) {
+    throw new RangeError(
+      `History limit must be a non-negative integer, got ${limit}`
+    );
+  }
+  return limit === 0 ? [] : items.slice(-limit);
 }
 
 // Singleton instance

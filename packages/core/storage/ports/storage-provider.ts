@@ -2,7 +2,8 @@
  * Storage Provider Interface
  *
  * The main interface that combines all storage ports.
- * Implementations can be PostgreSQL, JSON files, or in-memory.
+ * Implementations: JSON files or in-memory. Production code uses @feed/db
+ * directly; there is no PostgreSQL implementation of these ports.
  */
 
 import type { ActorPort, OrganizationPort } from './actors';
@@ -14,13 +15,13 @@ import type { QuestionPort } from './questions';
 import type { TradingPort } from './trading';
 import type { UserPort } from './users';
 
-export type StorageMode = 'postgres' | 'json' | 'memory';
+export type StorageMode = 'json' | 'memory';
 
 export interface StorageProviderConfig {
   mode: StorageMode;
-  /** Base path for JSON storage (required for json mode) */
+  /** Base path for JSON storage (json mode; optional explicit snapshot dir for memory mode) */
   jsonBasePath?: string;
-  /** Whether to persist in-memory changes to disk (for memory mode) */
+  /** Whether to write state.json after every change (json mode only; memory mode never writes implicitly) */
   persistOnChange?: boolean;
   /** Seed data for initialization */
   seedData?: {
@@ -33,7 +34,7 @@ export interface StorageProviderConfig {
  * Complete storage provider interface.
  *
  * This is the main abstraction that allows the engine to work with
- * different storage backends (Postgres, JSON files, in-memory).
+ * different storage backends (JSON files, in-memory).
  */
 export interface IStorageProvider {
   readonly mode: StorageMode;

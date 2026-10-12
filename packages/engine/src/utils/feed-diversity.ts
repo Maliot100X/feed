@@ -1,11 +1,10 @@
 /**
  * Feed Diversity Utilities
  *
- * TikTok-inspired mechanisms for preventing action clustering and creating
- * organic social media feed patterns.
+ * Mechanisms for preventing action clustering in generated feed activity.
  *
  * Exports:
- * - shuffleWithNoConsecutive: Fisher-Yates shuffle with no-consecutive constraint
+ * - shuffleWithNoConsecutive: randomized ordering avoiding adjacent duplicates
  * - createDiscourseActionDeck: Stratified action deck for quote/reply ratios
  * - ActionDiversityTracker: Tracks recent actions to prevent clustering
  */
@@ -29,21 +28,22 @@ export type DiscourseActionType = 'quote' | 'reply';
 // =============================================================================
 
 /**
- * Fisher-Yates shuffle with constraint: no consecutive same values.
- * This is the core mechanism that prevents action clustering.
+ * Randomized ordering that avoids placing equal values next to each other.
  *
- * Algorithm:
- * 1. Build result array one element at a time
- * 2. For each position, find candidates that differ from the last selected item
- * 3. Apply safety check: only pick candidates whose removal keeps a valid ordering possible
- * 4. Pick randomly from safe candidates (fall back to valid, then any if needed)
+ * Built one element at a time. A candidate is "safe" when, after placing it,
+ * the remaining items can still be arranged with no adjacent duplicates
+ * given that the next item must differ from it:
+ *   - the picked value's remaining count <= floor(n / 2)
+ *   - every other value's remaining count <= ceil(n / 2)
+ * where n is the number of items left after the pick.
  *
- * Dead-end prevention: Before selecting a candidate, we verify that removing it
- * won't make the remaining items impossible to arrange without consecutive duplicates.
- * A valid arrangement requires maxCount <= ceil(length / 2).
+ * When no adjacent-free arrangement exists (e.g. a deck dominated by one
+ * value) the requested multiset is preserved and the function returns the
+ * best achievable arrangement by greedily placing the most frequent value
+ * that differs from the previous item.
  *
- * @param arr Array to shuffle
- * @param random RNG function
+ * @param arr Array to order
+ * @param random RNG function returning [0, 1)
  */
 export function shuffleWithNoConsecutive<T>(
   arr: T[],
@@ -54,55 +54,58 @@ export function shuffleWithNoConsecutive<T>(
   const result: T[] = [];
   const remaining = [...arr];
 
-  // Track counts of each value for efficient dead-end detection
   const countByValue = new Map<T, number>();
   for (const item of remaining) {
     countByValue.set(item, (countByValue.get(item) ?? 0) + 1);
   }
 
-  while (remaining.length > 0) {
-    const lastItem = result[result.length - 1];
-
-    // Find valid candidates (different from last item, or any if first pick)
-    const validIndices: number[] = [];
-    for (let i = 0; i < remaining.length; i++) {
-      if (result.length === 0 || remaining[i] !== lastItem) {
-        validIndices.push(i);
+  const isSafePick = (value: T): boolean => {
+    const n = remaining.length - 1;
+    if (n === 0) return true;
+    for (const [v, count] of countByValue) {
+      if (v === value) {
+        if (count - 1 > Math.floor(n / 2)) return false;
+      } else if (count > Math.ceil(n / 2)) {
+        return false;
       }
     }
+    return true;
+  };
 
-    // Filter to safe candidates: those whose removal keeps ordering possible
-    // A valid non-consecutive ordering requires maxCount <= ceil(length / 2)
-    const safeCandidates = validIndices.filter((idx) => {
-      const value = remaining[idx];
-      const newLength = remaining.length - 1;
-      if (newLength === 0) return true; // Last item, always safe
+  while (remaining.length > 0) {
+    const hasLast = result.length > 0;
+    const lastItem = result[result.length - 1];
 
-      // Simulate removal: find max count after removing this value
-      let maxCountAfter = 0;
-      for (const [v, count] of countByValue) {
-        const newCount = v === value ? count - 1 : count;
-        if (newCount > maxCountAfter) maxCountAfter = newCount;
+    const validIndices: number[] = [];
+    for (let i = 0; i < remaining.length; i++) {
+      if (!hasLast || remaining[i] !== lastItem) validIndices.push(i);
+    }
+
+    const safeIndices = validIndices.filter((idx) =>
+      isSafePick(remaining[idx]!)
+    );
+
+    let candidates: number[];
+    if (safeIndices.length > 0) {
+      candidates = safeIndices;
+    } else if (validIndices.length > 0) {
+      // No adjacent-free completion exists: place the most frequent value
+      // that still differs from the previous item.
+      let best = 0;
+      for (const idx of validIndices) {
+        best = Math.max(best, countByValue.get(remaining[idx]!) ?? 0);
       }
+      candidates = validIndices.filter(
+        (idx) => (countByValue.get(remaining[idx]!) ?? 0) === best
+      );
+    } else {
+      candidates = remaining.map((_, idx) => idx);
+    }
 
-      // Safe if max count <= ceil(newLength / 2)
-      return maxCountAfter <= Math.ceil(newLength / 2);
-    });
-
-    // Use safe candidates if any, otherwise fall back to valid, then any
-    const candidates =
-      safeCandidates.length > 0
-        ? safeCandidates
-        : validIndices.length > 0
-          ? validIndices
-          : remaining.map((_, idx) => idx);
-
-    // Pick random from candidates
     const pickIdx = candidates[Math.floor(random() * candidates.length)]!;
     const pickedValue = remaining[pickIdx]!;
     result.push(pickedValue);
 
-    // Update counts and remaining array
     countByValue.set(pickedValue, (countByValue.get(pickedValue) ?? 1) - 1);
     remaining.splice(pickIdx, 1);
   }
@@ -115,8 +118,8 @@ export function shuffleWithNoConsecutive<T>(
 // =============================================================================
 
 /**
- * Creates a stratified action deck with guaranteed ratios.
- * Inspired by TikTok (never 2 same in a row) and org-tick stratified selection.
+ * Creates a stratified action deck with exact ratios, ordered to avoid two
+ * identical actions in a row whenever the ratio makes that possible.
  *
  * Instead of rolling `random() < probability` for each action (which can cluster),
  * we pre-define action slots with guaranteed ratios and shuffle with constraints.
@@ -130,7 +133,15 @@ export function createDiscourseActionDeck(
   quoteRatio: number,
   random: () => number
 ): DiscourseActionType[] {
-  if (totalSlots <= 0) return [];
+  if (!Number.isSafeInteger(totalSlots) || totalSlots < 0) {
+    throw new Error(
+      `totalSlots must be a non-negative integer, got ${totalSlots}`
+    );
+  }
+  if (!Number.isFinite(quoteRatio)) {
+    throw new Error(`quoteRatio must be finite, got ${quoteRatio}`);
+  }
+  if (totalSlots === 0) return [];
 
   // Clamp quoteRatio to valid [0, 1] range to prevent negative/oversized counts
   const clampedRatio = Math.max(0, Math.min(1, quoteRatio));
@@ -143,7 +154,7 @@ export function createDiscourseActionDeck(
     ...Array(replyCount).fill('reply' as const),
   ];
 
-  // Shuffle with hard constraint: no 2 same in a row (TikTok rule)
+  // Order with no 2 same in a row when the ratio allows it
   return shuffleWithNoConsecutive(deck, random);
 }
 
@@ -153,7 +164,6 @@ export function createDiscourseActionDeck(
 
 /**
  * Tracks recent action types to prevent clustering.
- * Inspired by TikTok's "never 2 same in a row" rule.
  *
  * This tracker maintains a rolling buffer of recent actions and checks
  * whether adding a new action would create too many consecutive same types.
@@ -173,10 +183,16 @@ export class ActionDiversityTracker {
    * @param maxConsecutive Maximum consecutive same action type allowed
    */
   constructor(maxRecent = 5, maxConsecutive = 2) {
-    // Ensure buffer can hold enough history to check consecutive actions
-    this.maxRecent = Math.max(maxRecent, maxConsecutive);
-    // Ensure maxConsecutive is at least 1
+    if (
+      !Number.isSafeInteger(maxRecent) ||
+      !Number.isSafeInteger(maxConsecutive)
+    ) {
+      throw new Error('ActionDiversityTracker limits must be integers');
+    }
+    // Ensure maxConsecutive is at least 1, then size the buffer from the
+    // effective value so the consecutive check always has enough history.
     this.maxConsecutive = Math.max(1, maxConsecutive);
+    this.maxRecent = Math.max(maxRecent, this.maxConsecutive);
   }
 
   /**
