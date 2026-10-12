@@ -50,6 +50,11 @@ import { getCurrentWindowId, getPreviousWindowId } from './window-utils';
 
 export type { AutomationConfig };
 
+/** Cloudflare Workers have no writable local disk; models and data live in R2. */
+function hasLocalStorage(): boolean {
+  return process.env.DEPLOYMENT_PLATFORM !== 'cloudflare';
+}
+
 export class AutomationPipeline {
   private config: AutomationConfig;
   private currentTrainingJob: string | null = null;
@@ -1026,9 +1031,11 @@ export class AutomationPipeline {
         });
       }
 
-      // Check disk space for model storage
-      await fs.mkdir(this.config.modelStoragePath, { recursive: true });
-      await fs.mkdir(this.config.dataStoragePath, { recursive: true });
+      // Check disk space for model storage (Workers have no local disk)
+      if (hasLocalStorage()) {
+        await fs.mkdir(this.config.modelStoragePath, { recursive: true });
+        await fs.mkdir(this.config.dataStoragePath, { recursive: true });
+      }
     } catch (error) {
       logger.error('Health check failed', {
         error: error instanceof Error ? error.message : String(error),
@@ -1089,8 +1096,11 @@ export class AutomationPipeline {
     await db.select({ count: count() }).from(users);
     const dbHealthy = true;
 
-    await fs.access(this.config.modelStoragePath);
-    const storageHealthy = true;
+    let storageHealthy: boolean | null = null;
+    if (hasLocalStorage()) {
+      await fs.access(this.config.modelStoragePath);
+      storageHealthy = true;
+    }
 
     const atroposHealthy = !!this.config.atroposApiUrl;
 

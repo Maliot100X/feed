@@ -354,7 +354,14 @@ export const groqPlugin: Plugin = {
   },
   models: {
     [ModelType.TEXT_EMBEDDING]: async (_runtime, params) => {
-      const text = typeof params === 'string' ? params : params?.text;
+      // Eliza initializes its adapter with a null request to discover dimensions.
+      // Use a real provider embedding for that probe, rather than a fixed vector.
+      const text =
+        params === null
+          ? 'Embedding dimension discovery.'
+          : typeof params === 'string'
+            ? params
+            : params?.text;
       if (!text) throw new Error('Embedding input must not be empty');
       const embedding = await getEmbedding(text);
       if (!embedding) throw new Error('Embedding provider is unavailable');

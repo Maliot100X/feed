@@ -13,13 +13,21 @@ describe('Cloudflare cron schedule', () => {
     ]);
   });
   test('daily and funding boundaries are preserved', () => {
-    expect(at('02:00')).toContain('/api/cron/reputation-sync');
-    expect(at('02:01')).not.toContain('/api/cron/reputation-sync');
+    expect(at('00:00')).toContain('/api/cron/whitelist-topn');
+    expect(at('00:01')).not.toContain('/api/cron/whitelist-topn');
     expect(at('16:00')).toContain('/api/cron/perp-funding');
     expect(at('17:00')).not.toContain('/api/cron/perp-funding');
     expect(at('06:00')).toContain('/api/cron/world-facts');
     expect(at('18:00')).toContain('/api/cron/world-facts');
-    expect(at('00:00')).toContain('/api/cron/whitelist-topn');
+  });
+  test.each(
+    jobs.map(({ path }) => path)
+  )('scheduled route %s exists', async (path) => {
+    const route = new URL(
+      `../../../apps/web/src/app${path}/route.ts`,
+      import.meta.url
+    );
+    expect(await Bun.file(route).exists()).toBe(true);
   });
   test('all migrated jobs execute in a UTC day', () => {
     const seen = new Set<string>();
@@ -37,6 +45,12 @@ describe('Cloudflare cron schedule', () => {
       false
     );
     expect(isCronJob({ path: jobs[0].path, scheduledTime: 0 })).toBe(true);
+    for (const path of [
+      '/api/cron/reputation-sync',
+      '/api/cron/profile-chain-sync',
+    ]) {
+      expect(isCronJob({ path, scheduledTime: 0 })).toBe(false);
+    }
     expect(() => dueJobs(Number.NaN)).toThrow();
   });
 });

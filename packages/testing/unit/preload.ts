@@ -125,6 +125,19 @@ process.env.REDIS_URL ??= 'redis://localhost:6379';
 process.env.GROQ_API_KEY ??= 'mock-groq-api-key-for-testing';
 process.env.OPENAI_API_KEY ??= 'mock-openai-api-key-for-testing';
 
+// Unit tests must never reach an embedding provider: the mock OpenAI key above (or a
+// real SURPLUS_API_KEY in CI) would otherwise make network calls that cost money and
+// time out. Embedding-based checks treat null as "unavailable" and skip.
+const actualEmbeddingClient = await import(
+  '../../engine/src/llm/embedding-client'
+);
+mock.module('../../engine/src/llm/embedding-client', () => ({
+  ...actualEmbeddingClient,
+  getEmbedding: async (_text: string): Promise<number[] | null> => null,
+  getEmbeddings: async (texts: string[]): Promise<(number[] | null)[]> =>
+    texts.map(() => null),
+}));
+
 // Mock Redis/ioredis
 mock.module('ioredis', () => {
   return {

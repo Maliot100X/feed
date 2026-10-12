@@ -418,9 +418,19 @@ export default function TrainingDashboard() {
             <div className="flex justify-between">
               <span>Storage:</span>
               <Badge
-                variant={automation.health.storage ? 'default' : 'destructive'}
+                variant={
+                  automation.health.storage === null
+                    ? 'outline'
+                    : automation.health.storage
+                      ? 'default'
+                      : 'destructive'
+                }
               >
-                {automation.health.storage ? '✅ Healthy' : '❌ Error'}
+                {automation.health.storage === null
+                  ? 'N/A (R2)'
+                  : automation.health.storage
+                    ? '✅ Healthy'
+                    : '❌ Error'}
               </Badge>
             </div>
           </div>

@@ -554,6 +554,29 @@ describeTests('AutomationPipeline - Unit Tests', () => {
       expect(status.models.latest).toBeNull();
       expect(status.dataCollection.last24h).toBe(0);
     });
+
+    test('reports local model storage as not applicable on Workers', async () => {
+      mockSelectResultsQueue = [
+        [{ count: 0 }], // last24h
+        [{ count: 0 }], // last7d
+        [], // lastCompleted batch (none)
+        [], // latestModel (none)
+        [{ count: 0 }], // deployedCount
+        [{ count: 0 }], // trainingCount
+        [{ count: 1 }], // dbHealthy check
+      ];
+      const previous = process.env.DEPLOYMENT_PLATFORM;
+      process.env.DEPLOYMENT_PLATFORM = 'cloudflare';
+      mockAccess.mockClear();
+      try {
+        const status = await pipeline.getStatus();
+        expect(status.health.storage).toBeNull();
+        expect(mockAccess).not.toHaveBeenCalled();
+      } finally {
+        if (previous === undefined) delete process.env.DEPLOYMENT_PLATFORM;
+        else process.env.DEPLOYMENT_PLATFORM = previous;
+      }
+    });
   });
 
   describe('Health Checks', () => {

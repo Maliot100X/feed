@@ -44,17 +44,19 @@ Do all work on a branch in your fork. Open pull requests (PRs) into `staging`.
 The product requirements document (PRD) and the minimum viable product (MVP)
 implementation plan define the approved scope. Work only inside that scope.
 
-**This repository does not contain a PRD or an MVP plan file.** The `docs/`
-folder contains analysis reports and plans for specific subsystems. These files
-do not approve new work. Until a maintainer publishes a PRD and MVP plan:
+The PRD is [docs/product/prd.md](docs/product/prd.md). The MVP plan is
+[docs/product/mvp-plan.md](docs/product/mvp-plan.md). Other files in `docs/`
+are analysis reports and plans for specific subsystems. These files do not
+approve new work.
 
-- Work only on defects in existing behavior, or on work that a maintainer
-  confirmed in a GitHub issue.
+- Work only on defects in existing behavior, or on work inside a PRD and MVP
+  plan phase that a maintainer confirmed in a GitHub issue.
 - Before you start a feature or a behavior change, get written scope
   confirmation from a maintainer on the issue. See `.github/CODEOWNERS` for
   maintainers by area.
-- An open issue is not feature approval. A feature also needs an approved PRD
-  and MVP plan update before you implement it.
+- An open issue is not feature approval. A feature that is not in the PRD and
+  MVP plan also needs an approved PRD and MVP plan update before you implement
+  it.
 
 ## 3. What we accept
 

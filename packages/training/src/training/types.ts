@@ -300,7 +300,8 @@ export interface AutomationStatus {
   };
   health: {
     database: boolean;
-    storage: boolean;
+    /** null where local model storage does not apply (Workers keep models in R2). */
+    storage: boolean | null;
     atropos: boolean;
   };
 }

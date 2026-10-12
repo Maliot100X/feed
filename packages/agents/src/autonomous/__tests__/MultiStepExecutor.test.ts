@@ -1,8 +1,16 @@
-import { describe, expect, test } from 'bun:test';
+import { afterEach, describe, expect, mock, spyOn, test } from 'bun:test';
+import type { IAgentRuntime } from '@elizaos/core';
+import * as npcContextProvider from '../../plugins/feed/providers/npc-game-context';
+import * as agentConfig from '../../shared/agent-config';
 import { normalizeDecisionAction } from '../action-normalization';
 import { extractFirstJsonObject } from '../decision-json';
 import { MultiStepExecutor } from '../MultiStepExecutor';
 import { normalizeSocialDecisionParameters } from '../social-parameter-normalization';
+import {
+  Actions,
+  type AgentTickContext,
+  Features,
+} from '../templates/multi-step-decision';
 import { normalizeTradeDecisionParameters } from '../trade-parameter-normalization';
 
 describe('normalizeDecisionAction', () => {
@@ -421,5 +429,126 @@ describe('tick success reflects execution outcomes', () => {
         Date.now()
       ).success
     ).toBe(false);
+  });
+});
+
+describe('NPC iteration ceiling (PRD D-25)', () => {
+  afterEach(() => mock.restore());
+
+  function prepare(executor: MultiStepExecutor) {
+    const runtime = {
+      character: {
+        name: 'Budget test',
+        feed: {
+          autonomy: {
+            trading: false,
+            posting: false,
+            commenting: false,
+            dms: false,
+            groups: false,
+          },
+        },
+      },
+      getSetting: () => undefined,
+    } as unknown as IAgentRuntime;
+    const context: AgentTickContext = {
+      balance: 100,
+      pnl: 0,
+      openPositions: 0,
+      pendingCommentReplies: [],
+      pendingChatMessages: [],
+      enabledFeatures: [Features.ENGAGING],
+      predictionMarkets: [],
+      perpMarkets: [],
+      recentPosts: [
+        {
+          id: 'post-1',
+          authorId: 'other',
+          authorName: 'Other',
+          content: 'An actionable post',
+          commentCount: 0,
+          likeCount: 0,
+          repostCount: 0,
+          timeAgo: '1m',
+        },
+      ],
+      agentPositions: { predictions: [], perps: [] },
+    };
+    const internal = executor as unknown as {
+      getDecision: MultiStepExecutor['getDecision'];
+      executeAction: MultiStepExecutor['executeAction'];
+      getLatestContextRefreshSummary: MultiStepExecutor['getLatestContextRefreshSummary'];
+      recordTrajectoryStep: MultiStepExecutor['recordTrajectoryStep'];
+    };
+    spyOn(agentConfig, 'getAgentConfig').mockResolvedValue(null);
+    spyOn(npcContextProvider, 'getNpcGameContext').mockResolvedValue('');
+    spyOn(executor, 'gatherContext').mockResolvedValue(context);
+    spyOn(internal, 'getLatestContextRefreshSummary').mockResolvedValue(
+      undefined
+    );
+    spyOn(internal, 'recordTrajectoryStep').mockResolvedValue(undefined);
+    const decision = spyOn(internal, 'getDecision').mockResolvedValue({
+      decision: {
+        thought: 'Continue engaging',
+        action: Actions.LIKE,
+        parameters: { postId: 'post-1' },
+        isFinish: false,
+      },
+      rawResponse: '{}',
+    });
+    const execute = spyOn(internal, 'executeAction').mockResolvedValue({
+      actionType: Actions.LIKE,
+      success: true,
+      parameters: { postId: 'post-1' },
+      summary: 'Liked',
+      timestamp: Date.now(),
+    });
+    return { runtime, decision, execute };
+  }
+
+  for (const [label, executor, expected] of [
+    ['default', () => new MultiStepExecutor(), 4],
+    ['explicit larger budget', () => new MultiStepExecutor(7, 12), 4],
+    ['smaller budget', () => new MultiStepExecutor(5, 2), 2],
+  ] as const) {
+    test(`NPC tick respects ${label}`, async () => {
+      const instance = executor();
+      const { runtime, decision, execute } = prepare(instance);
+      const result = await instance.execute('npc-test', runtime, true);
+      expect(result.success).toBe(true);
+      expect(result.iterations).toBe(expected);
+      expect(decision).toHaveBeenCalledTimes(expected);
+      expect(execute).toHaveBeenCalledTimes(expected);
+    });
+  }
+
+  test('NPC can finish before the ceiling', async () => {
+    const executor = new MultiStepExecutor();
+    const { runtime, decision, execute } = prepare(executor);
+    decision.mockResolvedValueOnce({
+      decision: {
+        thought: 'Nothing to do',
+        action: Actions.FINISH,
+        parameters: {},
+        isFinish: true,
+      },
+      rawResponse: '{}',
+    });
+    expect((await executor.execute('npc-test', runtime, true)).iterations).toBe(
+      0
+    );
+    expect(decision).toHaveBeenCalledTimes(1);
+    expect(execute).not.toHaveBeenCalled();
+  });
+
+  test('invalid configured budgets still fail', () => {
+    for (const budget of [0, -1, 1.5, Number.NaN, Number.POSITIVE_INFINITY]) {
+      expect(() => new MultiStepExecutor(5, budget)).toThrow(
+        'Iteration budgets must be positive integers'
+      );
+      expect(() => new MultiStepExecutor(budget, 4)).toThrow(
+        'Iteration budgets must be positive integers'
+      );
+    }
   });
 });

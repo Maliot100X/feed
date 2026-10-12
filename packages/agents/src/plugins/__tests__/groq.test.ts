@@ -14,6 +14,9 @@ const mockGenerateObject = mock(async () => ({
   usage: { inputTokens: 10, outputTokens: 5, totalTokens: 15 },
 }));
 const mockLogPrompt = mock(async () => undefined);
+const mockGetEmbedding = mock(
+  async (_text: string): Promise<number[] | null> => [0.1, 0.2]
+);
 
 mock.module('@ai-sdk/groq', () => ({
   createGroq: mockCreateGroq,
@@ -26,7 +29,7 @@ mock.module('ai', () => ({
 }));
 
 mock.module('@feed/engine/embedding', () => ({
-  getEmbedding: mock(async () => [0.1, 0.2]),
+  getEmbedding: mockGetEmbedding,
 }));
 
 mock.module('@feed/shared', () => ({
@@ -89,6 +92,46 @@ const runtimeWithModelOverride = {
     return undefined;
   },
 } as unknown as IAgentRuntime;
+
+describe('groqPlugin embedding dimension discovery', () => {
+  beforeEach(() => mockGetEmbedding.mockClear());
+
+  it('supports the null dimension probe used by Eliza runtime initialization', async () => {
+    const embedding = await groqPlugin.models![ModelType.TEXT_EMBEDDING]!(
+      runtime,
+      null
+    );
+    expect(embedding).toEqual([0.1, 0.2]);
+    expect(mockGetEmbedding).toHaveBeenCalledTimes(1);
+    expect(mockGetEmbedding.mock.calls[0]?.[0]).toBeTruthy();
+  });
+
+  it.each([
+    'A memory.',
+    { text: 'A memory.' },
+  ])('embeds normal memory input %p', async (params) => {
+    const embedding = await groqPlugin.models![ModelType.TEXT_EMBEDDING]!(
+      runtime,
+      params
+    );
+    expect(embedding).toEqual([0.1, 0.2]);
+    expect(mockGetEmbedding).toHaveBeenCalledWith('A memory.');
+  });
+
+  it('rejects the dimension probe when the embedding provider is unavailable', async () => {
+    mockGetEmbedding.mockResolvedValueOnce(null);
+    await expect(
+      groqPlugin.models![ModelType.TEXT_EMBEDDING]!(runtime, null)
+    ).rejects.toThrow('Embedding provider is unavailable');
+  });
+
+  it('still rejects an empty memory instead of treating it as a dimension probe', async () => {
+    await expect(
+      groqPlugin.models![ModelType.TEXT_EMBEDDING]!(runtime, { text: '' })
+    ).rejects.toThrow('Embedding input must not be empty');
+    expect(mockGetEmbedding).not.toHaveBeenCalled();
+  });
+});
 
 describe('groqPlugin TEXT_SMALL', () => {
   beforeEach(() => {

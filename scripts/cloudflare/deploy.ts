@@ -114,22 +114,31 @@ const subdomainBody = (await subdomainResponse.json()) as {
 if (!subdomainBody.success || !subdomainBody.result.subdomain)
   throw new Error('Workers subdomain is not configured');
 const origin = `https://feed-web-${environment}.${subdomainBody.result.subdomain}.workers.dev`;
-const identityResponse = await fetch(`${origin}/__deployment`, {
-  signal: AbortSignal.timeout(30_000),
-  cache: 'no-store',
-});
-if (!identityResponse.ok)
-  throw new Error('Deployment identity endpoint failed');
-const identity = (await identityResponse.json()) as {
+interface DeploymentIdentity {
   commit?: string;
   environment?: string;
   platform?: string;
-};
-if (
-  identity.commit !== sha ||
-  identity.environment !== environment ||
-  identity.platform !== 'cloudflare'
-)
+}
+async function readIdentity(): Promise<DeploymentIdentity | null> {
+  const response = await fetch(`${origin}/__deployment`, {
+    signal: AbortSignal.timeout(30_000),
+    cache: 'no-store',
+  });
+  if (!response.ok) return null;
+  return (await response.json()) as DeploymentIdentity;
+}
+const matches = (identity: DeploymentIdentity | null) =>
+  identity?.commit === sha &&
+  identity.environment === environment &&
+  identity.platform === 'cloudflare';
+// A new version takes a short while to reach every edge location.
+let identity = await readIdentity();
+for (let attempt = 1; !matches(identity) && attempt < 12; attempt++) {
+  await new Promise((resolve) => setTimeout(resolve, 10_000));
+  identity = await readIdentity();
+}
+if (!identity) throw new Error('Deployment identity endpoint failed');
+if (!matches(identity))
   throw new Error('Live Worker does not match the selected deployment');
 const health = await fetch(`${origin}/api/health`, {
   signal: AbortSignal.timeout(30_000),

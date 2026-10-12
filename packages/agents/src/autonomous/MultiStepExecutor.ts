@@ -146,12 +146,12 @@ export interface MultiStepExecutorResult {
 // =============================================================================
 
 export class MultiStepExecutor {
-  /** NPCs get more iterations to chain actions (trade + post + engage) */
+  /** NPC ticks have a hard four-step ceiling (PRD D-25). */
   private readonly npcMaxIterations: number;
 
   private readonly maxIterations: number;
 
-  constructor(maxIterations = 5, npcMaxIterations = 12) {
+  constructor(maxIterations = 5, npcMaxIterations = 4) {
     if (
       ![maxIterations, npcMaxIterations].every(
         (n) => Number.isSafeInteger(n) && n > 0
@@ -159,7 +159,7 @@ export class MultiStepExecutor {
     )
       throw new Error('Iteration budgets must be positive integers');
     this.maxIterations = maxIterations;
-    this.npcMaxIterations = npcMaxIterations;
+    this.npcMaxIterations = Math.min(npcMaxIterations, 4);
   }
 
   private coerceParameterText(value: unknown): string {
@@ -323,7 +323,7 @@ export class MultiStepExecutor {
     const contextRefreshSummary =
       await this.getLatestContextRefreshSummary(agentUserId);
 
-    // NPCs and user agents retain their configured iteration budgets.
+    // NPC budgets may be reduced, but cannot exceed the four-step ceiling.
     const effectiveMaxIterations = isNpc
       ? this.npcMaxIterations
       : this.maxIterations;
