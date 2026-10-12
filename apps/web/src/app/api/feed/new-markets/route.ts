@@ -12,7 +12,7 @@ import {
   publicRateLimit,
   successResponse,
   withErrorHandling,
-} from '@babylon/api';
+} from '@feed/api';
 import {
   and,
   arcStates,
@@ -23,10 +23,9 @@ import {
   lt,
   markets,
   questions,
-  sql,
-} from '@babylon/db';
-import type { ArcStateType } from '@babylon/shared';
-import { toISO } from '@babylon/shared';
+} from '@feed/db';
+import type { ArcStateType } from '@feed/shared';
+import { toISO } from '@feed/shared';
 import type { NextRequest } from 'next/server';
 import { dedupeQuestionMarketRows } from '../questionMarketRows';
 
@@ -58,7 +57,7 @@ export const GET = withErrorHandling(async (request: NextRequest) => {
   );
   if (rateLimitErr) return rateLimitErr;
 
-  const cacheKey = 'feed:new-markets:v2';
+  const cacheKey = 'feed:new-markets:v3';
 
   const result = await getCacheOrFetch<NewMarketEntry[]>(
     cacheKey,
@@ -66,9 +65,8 @@ export const GET = withErrorHandling(async (request: NextRequest) => {
       const now = new Date();
       const cutoff = new Date(now.getTime() - NEW_MARKET_WINDOW_MS);
 
-      // Join questions → arcStates → markets (on matching question text).
-      // The markets table has no direct FK to questions; they are linked by
-      // the question text field. LEFT JOIN so questions without a market
+      // Join questions → arcStates → markets by stable foreign keys.
+      // LEFT JOIN so questions without a market
       // are still returned (isNewMarket card falls back to the predictions list).
       const rows = await db
         .select({
@@ -83,13 +81,7 @@ export const GET = withErrorHandling(async (request: NextRequest) => {
         })
         .from(questions)
         .leftJoin(arcStates, eq(arcStates.questionId, questions.id))
-        // Match on normalized text (trim + lower) to survive minor whitespace
-        // or casing differences. A proper questions.marketId FK would be better
-        // and is tracked as a follow-up schema migration.
-        .leftJoin(
-          markets,
-          sql`lower(trim(${markets.question})) = lower(trim(${questions.text}))`
-        )
+        .leftJoin(markets, eq(markets.id, questions.marketId))
         .where(
           and(
             eq(questions.status, 'active'),

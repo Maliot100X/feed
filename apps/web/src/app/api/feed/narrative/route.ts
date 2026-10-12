@@ -23,7 +23,7 @@ import {
   setCache,
   successResponse,
   withErrorHandling,
-} from '@babylon/api';
+} from '@feed/api';
 import {
   and,
   arcStates,
@@ -45,14 +45,10 @@ import {
   shares,
   sql,
   users,
-} from '@babylon/db';
-import { StaticDataRegistry } from '@babylon/engine';
-import type {
-  ArcStateType,
-  NarrativePost,
-  NarrativeStory,
-} from '@babylon/shared';
-import { logger, toISO } from '@babylon/shared';
+} from '@feed/db';
+import { StaticDataRegistry } from '@feed/engine';
+import type { ArcStateType, NarrativePost, NarrativeStory } from '@feed/shared';
+import { logger, toISO } from '@feed/shared';
 import type { NextRequest } from 'next/server';
 import { compareFeedStories } from '../feed-cursor';
 import { dedupeQuestionMarketRows } from '../questionMarketRows';
@@ -143,7 +139,7 @@ export const GET = withErrorHandling(async (request: NextRequest) => {
   } = await publicRateLimit(request, 'read');
   if (rateLimitErr) return rateLimitErr;
 
-  const cacheKey = 'feed:narrative:v1';
+  const cacheKey = 'feed:narrative:v2';
 
   const result = await getCacheOrFetch<CachedResult>(
     cacheKey,
@@ -600,8 +596,8 @@ export const GET = withErrorHandling(async (request: NextRequest) => {
       }
 
       // Resolve marketId for question-backed stories so the frontend can render
-      // a live probability chart (PredictionSparkline) on each post card.
-      // Same text-based join used for new market cards; this fetches only
+      // market-linked UI on each post card.
+      // Use the persisted market link; this fetches only
       // existing stories (not new markets which already have marketId set).
       const storyQuestionNumbers = stories
         .filter((s) => !s.isNewMarket && s.questionNumber !== null)
@@ -613,10 +609,7 @@ export const GET = withErrorHandling(async (request: NextRequest) => {
             marketId: markets.id,
           })
           .from(questions)
-          .innerJoin(
-            markets,
-            sql`lower(trim(${markets.question})) = lower(trim(${questions.text}))`
-          )
+          .innerJoin(markets, eq(markets.id, questions.marketId))
           .where(inArray(questions.questionNumber, storyQuestionNumbers))
           .orderBy(desc(markets.createdAt));
         const questionToMarket = new Map(
@@ -646,7 +639,7 @@ export const GET = withErrorHandling(async (request: NextRequest) => {
           .filter((n): n is number => n !== null)
       );
 
-      // Join markets on question text to get the market UUID (for deep-linking
+      // Join markets by their stable ID (for deep-linking
       // to /markets/predictions/[id]) and live share counts (for probability bars).
       // LEFT JOIN since a question may not yet have a market entry.
       const newMarketRows = await db
@@ -662,13 +655,7 @@ export const GET = withErrorHandling(async (request: NextRequest) => {
         })
         .from(questions)
         .leftJoin(arcStates, eq(arcStates.questionId, questions.id))
-        // Match on normalized text (trim + lower) to survive minor whitespace
-        // or casing differences. A proper questions.marketId FK would be better
-        // and is tracked as a follow-up schema migration.
-        .leftJoin(
-          markets,
-          sql`lower(trim(${markets.question})) = lower(trim(${questions.text}))`
-        )
+        .leftJoin(markets, eq(markets.id, questions.marketId))
         .where(
           and(
             eq(questions.status, 'active'),

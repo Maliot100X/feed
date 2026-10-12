@@ -11,7 +11,6 @@
 - Privy SDK initializes in Capacitor WebView ✅
 - Privy login modal renders correctly ✅
 - Embedded wallet iframe loads without blocking errors ✅
-- OAuth redirect flow fires correctly (Farcaster → redirected to app store since Warpcast not on emulator, expected behavior) ✅
 - No HTTPS / iframe / postMessage errors ✅
 
 ### Why Embedded Wallet Works in WebView
@@ -38,7 +37,7 @@ Per Privy's official Capacitor docs, the OAuth integration requires:
 
 1. **Plugins:** `@capacitor/browser` and `@capacitor/app`
 2. **`AppUrlListener` component** that intercepts OAuth redirect deep links (checks for `privy_oauth_code`, `privy_oauth_state`, `privy_oauth_provider` params)
-3. **`customOAuthRedirectUrl`** in PrivyProvider config pointing to an HTTPS URL on your domain (e.g., `https://babylon.market/redirect`)
+3. **`customOAuthRedirectUrl`** in PrivyProvider config pointing to an HTTPS URL on your domain (e.g., `https://feed.fun/redirect`)
 4. **Universal App Links** (HTTPS URLs) — custom URL schemes do NOT work for OAuth
 5. **Privy dashboard:** add `capacitor://localhost` (iOS) and `https://localhost` (Android) as allowed origins
 6. **Deep link verification files:** `apple-app-site-association` (iOS) and `assetlinks.json` (Android) served from `/.well-known/`
@@ -57,7 +56,7 @@ Privy uses `ASWebAuthenticationSession` on iOS and Chrome Custom Tabs on Android
 
 **`customOAuthRedirectUrl`** (`apps/mobile/src/app/layout.tsx`):
 - Passed to Privy via the `Providers` component's `privyConfigOverride` prop
-- Defaults to `https://babylon.market/redirect`
+- Defaults to `https://feed.fun/redirect`
 - Configurable via `NEXT_PUBLIC_OAUTH_REDIRECT_URL` env var
 
 ---
@@ -80,18 +79,18 @@ Capacitor's WebView sends requests from `capacitor://localhost` (iOS) or `https:
 
 ---
 
-## Privy Login Methods in Babylon
+## Privy Login Methods in Feed
 
 From `packages/shared/src/auth/privy-config.ts`:
 
 ```
-Primary: farcaster, email
+Primary: email
 Overflow: metamask, twitter, discord, telegram, phantom, rabby_wallet,
           coinbase_wallet, rainbow, backpack
 ```
 
 All of these use either:
 - **Email:** OTP code entry within the Privy modal (works in WebView, no external redirect)
-- **OAuth:** External browser redirect via Capacitor's `@capacitor/browser` plugin (Farcaster, Twitter, Discord, Telegram)
+- **OAuth:** External browser redirect via Capacitor's `@capacitor/browser` plugin (Twitter, Discord, Telegram)
 - **Wallet:** WalletConnect deep links or browser extension detection (MetaMask, Phantom, etc.)
 

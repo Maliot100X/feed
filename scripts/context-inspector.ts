@@ -41,8 +41,8 @@ import {
   npcMarketDecisions,
   renderPrompt,
   StaticDataRegistry,
-} from '@babylon/engine';
-import type { Actor } from '@babylon/shared';
+} from '@feed/engine';
+import type { Actor } from '@feed/shared';
 
 // ---------------------------------------------------------------------------
 // ANSI helpers
@@ -449,129 +449,55 @@ async function inspectAgentContext(agentUserId: string): Promise<{
   totalTokens: number;
   rawPrompt?: string;
 }> {
-  // Dynamic imports from @babylon/agents (not in @babylon/engine)
-  const {
-    getPredictionMarkets,
-    getPerpMarkets,
-    getAgentPositions,
-    getRecentPosts,
-    getAgentGroupChats,
-    getAgentOwnPosts,
-  } = await import('../packages/agents/src/autonomous/utils/context-gatherers');
-  const { gatherPendingCommentReplies, gatherPendingChatMessages } =
-    await import(
-      '../packages/agents/src/autonomous/utils/interaction-gatherers'
-    );
-  const { buildMultiStepDecisionPrompt } = await import(
+  const { MultiStepExecutor } = await import(
+    '../packages/agents/src/autonomous/MultiStepExecutor'
+  );
+  const { Features, buildMultiStepDecisionPrompt } = await import(
     '../packages/agents/src/autonomous/templates/multi-step-decision'
   );
   const { getAgentContext } = await import(
     '../packages/agents/src/autonomous/agent-context'
   );
-  const { db, eq, users } = await import('@babylon/db');
-
-  // Verify agent exists
-  const [user] = await db
-    .select({ id: users.id, displayName: users.displayName })
-    .from(users)
-    .where(eq(users.id, agentUserId))
-    .limit(1);
-
-  if (!user) {
-    error(`Agent user not found: ${agentUserId}`);
-    process.exit(1);
-  }
-
+  const { getNpcGameContext } = await import(
+    '../packages/agents/src/plugins/feed/providers/npc-game-context'
+  );
   const agentCtx = await getAgentContext(agentUserId);
-  const agentName = agentCtx.displayName || user.displayName || agentUserId;
-
-  // Gather all context (same as MultiStepExecutor.gatherContext)
-  const [
+  const agentName = agentCtx.displayName;
+  // Inspect all capabilities using the production gatherer, without executing actions.
+  const context = await new MultiStepExecutor().gatherContext(
+    agentUserId,
+    Object.values(Features),
+    agentCtx.isNpc
+  );
+  const {
+    balance,
+    pnl,
     predictionMarkets,
     perpMarkets,
     agentPositions,
     recentPosts,
     pendingCommentReplies,
     pendingChatMessages,
-    agentGroupChats,
-    agentOwnPosts,
-  ] = await Promise.all([
-    getPredictionMarkets(),
-    getPerpMarkets(),
-    getAgentPositions(agentUserId),
-    getRecentPosts(agentUserId),
-    gatherPendingCommentReplies(agentUserId).catch(() => []),
-    gatherPendingChatMessages(agentUserId).catch(() => []),
-    getAgentGroupChats(agentUserId),
-    getAgentOwnPosts(agentUserId),
-  ]);
-
-  const { generateWorldContext, WalletService } = await import(
-    '@babylon/engine'
-  );
-  let balance = 0;
-  let pnl = 0;
-  try {
-    const walletBalance = await WalletService.getBalance(agentUserId);
-    balance = walletBalance.balance;
-    pnl = walletBalance.lifetimePnL;
-  } catch {
-    // NPC or missing wallet — use 0
-  }
-
-  // Fetch world context (same as MultiStepExecutor.gatherContext)
-  const worldCtx = await generateWorldContext({
-    includeActors: true,
-    includeMarkets: false,
-    includePredictions: false,
-    includeTrades: false,
-    realityGroundingLevel: 'concise',
-    maxActors: 30,
+    groupChats: agentGroupChats = [],
+    agentOwnPosts = [],
+  } = context;
+  const worldCtx = context.worldContext;
+  if (!worldCtx) throw new Error('Missing world context in inspector');
+  const { prompt: renderedPrompt } = buildMultiStepDecisionPrompt({
+    agentName,
+    iterationCount: 1,
+    maxIterations: 5,
+    traceActionResults: [],
+    context,
+    isNpc: agentCtx.isNpc,
+    npcGameContext: agentCtx.isNpc ? await getNpcGameContext(agentUserId) : '',
   });
-
   const sections: Array<{
     name: string;
     tokens: number;
     populated: boolean;
     count?: number;
   }> = [];
-
-  // Build the actual prompt to measure it
-  const context = {
-    balance,
-    pnl,
-    openPositions:
-      agentPositions.predictions.length + agentPositions.perps.length,
-    pendingCommentReplies: pendingCommentReplies.slice(0, 3),
-    pendingChatMessages: pendingChatMessages.slice(0, 3),
-    enabledFeatures: ['TRADING', 'POSTING', 'COMMENTING', 'DMS', 'GROUP_CHATS'],
-    predictionMarkets,
-    perpMarkets,
-    recentPosts,
-    agentPositions,
-    groupChats: agentGroupChats,
-    agentOwnPosts,
-    worldContext: {
-      realityGrounding: worldCtx.realityGrounding,
-      worldActors: worldCtx.worldActors,
-    },
-  };
-
-  let renderedPrompt: string;
-  try {
-    renderedPrompt = buildMultiStepDecisionPrompt({
-      agentName,
-      iterationCount: 1,
-      maxIterations: 5,
-      traceActionResults: [],
-      context: context as never,
-      isNpc: agentCtx.isNpc,
-    });
-  } catch (e) {
-    warn(`Prompt render error: ${e instanceof Error ? e.message : String(e)}`);
-    renderedPrompt =
-      '[Failed to render prompt — missing template dependencies]';
-  }
 
   // Section breakdown
   sections.push({

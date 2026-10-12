@@ -1,11 +1,14 @@
 /**
  * Duplicate Content Detection Utility
  *
- * Prevents users from posting duplicate content in a short time period.
- * Uses content hashing to detect exact and near-duplicate content.
+ * Best-effort, per-process throttle that rejects the same normalized content
+ * from the same user within a short window. It is not a cross-instance
+ * uniqueness guarantee (each worker has its own memory), and content is
+ * recorded when checked, so a retry right after a failed write is also
+ * rejected until the window passes.
  */
 
-import { logger } from '@babylon/shared';
+import { logger } from '@feed/shared';
 
 import crypto from 'crypto';
 
@@ -14,9 +17,23 @@ interface DuplicateRecord {
   timestamp: number;
 }
 
-// In-memory store for duplicate detection
-// In production, you might want to use Redis
-const duplicateStore = new Map<string, DuplicateRecord[]>();
+// userId -> actionType -> recent records. Nested maps avoid parsing
+// colon-delimited keys (user IDs can be DIDs such as did:privy:...).
+const duplicateStore = new Map<string, Map<string, DuplicateRecord[]>>();
+
+function recordsFor(userId: string, actionType: string): DuplicateRecord[] {
+  let byAction = duplicateStore.get(userId);
+  if (!byAction) {
+    byAction = new Map();
+    duplicateStore.set(userId, byAction);
+  }
+  let records = byAction.get(actionType);
+  if (!records) {
+    records = [];
+    byAction.set(actionType, records);
+  }
+  return records;
+}
 
 /**
  * Duplicate detection configurations
@@ -57,22 +74,15 @@ export function checkDuplicate(
   content: string,
   config: { windowMs: number; actionType: string }
 ): { isDuplicate: boolean; lastPostedAt?: Date } {
-  const key = `${userId}:${config.actionType}`;
   const contentHash = hashContent(content);
   const now = Date.now();
 
-  // Get user's recent posts
-  let records = duplicateStore.get(key);
-
-  if (!records) {
-    records = [];
-    duplicateStore.set(key, records);
-  }
-
   // Remove old records outside the window
   const windowStart = now - config.windowMs;
-  records = records.filter((record) => record.timestamp > windowStart);
-  duplicateStore.set(key, records);
+  const records = recordsFor(userId, config.actionType).filter(
+    (record) => record.timestamp > windowStart
+  );
+  duplicateStore.get(userId)?.set(config.actionType, records);
 
   // Check for duplicate
   const duplicate = records.find(
@@ -114,8 +124,7 @@ export function checkDuplicate(
  * Clear duplicate records for a user and action type
  */
 export function clearDuplicates(userId: string, actionType: string): void {
-  const key = `${userId}:${actionType}`;
-  duplicateStore.delete(key);
+  duplicateStore.get(userId)?.delete(actionType);
   logger.info('Duplicate records cleared', { userId, actionType });
 }
 
@@ -127,27 +136,30 @@ export function clearAllDuplicates(): void {
   logger.info('All duplicate records cleared');
 }
 
+/** Longest configured window; records older than this are never consulted. */
+const MAX_WINDOW_MS = Math.max(
+  ...Object.values(DUPLICATE_DETECTION_CONFIGS).map((config) => config.windowMs)
+);
+
 /**
  * Cleanup old duplicate records periodically
  */
-export function cleanupDuplicates(): void {
-  const now = Date.now();
-  const maxAge = 10 * 60 * 1000; // 10 minutes (longer than any window)
-
+export function cleanupDuplicates(now: number = Date.now()): void {
   let cleanedCount = 0;
 
-  for (const [key, records] of duplicateStore.entries()) {
-    // Filter out old records
-    const validRecords = records.filter(
-      (record) => now - record.timestamp < maxAge
-    );
-
-    if (validRecords.length === 0) {
-      duplicateStore.delete(key);
-      cleanedCount++;
-    } else if (validRecords.length < records.length) {
-      duplicateStore.set(key, validRecords);
+  for (const [userId, byAction] of duplicateStore.entries()) {
+    for (const [actionType, records] of byAction.entries()) {
+      const validRecords = records.filter(
+        (record) => now - record.timestamp < MAX_WINDOW_MS
+      );
+      if (validRecords.length === 0) {
+        byAction.delete(actionType);
+        cleanedCount++;
+      } else if (validRecords.length < records.length) {
+        byAction.set(actionType, validRecords);
+      }
     }
+    if (byAction.size === 0) duplicateStore.delete(userId);
   }
 
   if (cleanedCount > 0) {
@@ -172,17 +184,18 @@ export function getDuplicateStats(): {
     recordsByType: {} as Record<string, number>,
   };
 
-  for (const [key, records] of duplicateStore.entries()) {
-    const actionType = key.split(':')[1] || 'unknown';
-    stats.totalRecords += records.length;
-    stats.recordsByType[actionType] =
-      (stats.recordsByType[actionType] || 0) + records.length;
+  for (const byAction of duplicateStore.values()) {
+    for (const [actionType, records] of byAction.entries()) {
+      stats.totalRecords += records.length;
+      stats.recordsByType[actionType] =
+        (stats.recordsByType[actionType] || 0) + records.length;
+    }
   }
 
   return stats;
 }
 
-// Run cleanup every 5 minutes
+// Run cleanup every 5 minutes; unref() so it never keeps a process alive.
 if (typeof setInterval !== 'undefined') {
-  setInterval(cleanupDuplicates, 5 * 60 * 1000);
+  setInterval(cleanupDuplicates, 5 * 60 * 1000).unref?.();
 }

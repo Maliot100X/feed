@@ -1,10 +1,11 @@
 'use client';
 
-import { cn } from '@babylon/shared';
+import { cn } from '@feed/shared';
 import { AnimatePresence, motion } from 'framer-motion';
 import { Bell, ChevronRight, TrendingDown, TrendingUp } from 'lucide-react';
 import { useRouter } from 'next/navigation';
 import { useCallback, useEffect, useRef, useState } from 'react';
+import { safeReturnTo } from '@/lib/auth/safe-return-to';
 import {
   ConfettiCanvas,
   type OutcomeNotification,
@@ -204,11 +205,7 @@ export function StackedSummaryPopup({
                     onClick={() => {
                       clearTimer();
                       onViewResult(n);
-                      // Guard against open redirects — deep links must be relative paths
-                      const safeLink = n.deepLink.startsWith('/')
-                        ? n.deepLink
-                        : '/';
-                      router.push(safeLink);
+                      router.push(safeReturnTo(n.deepLink));
                     }}
                     className="group flex w-full items-center gap-3 rounded-lg py-2 text-left transition-colors hover:bg-muted/30"
                   >

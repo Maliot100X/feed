@@ -5,7 +5,7 @@
  * 100% Drizzle ORM under the hood.
  *
  * Usage:
- *   import { db } from '@babylon/db';
+ *   import { db } from '@feed/db';
  *   const user = await db.user.findUnique({ where: { id: '123' } });
  *   const users = await db.user.findMany({ where: { isActive: true } });
  */
@@ -17,6 +17,7 @@ import {
   desc,
   count as drizzleCount,
   eq,
+  getTableColumns,
   gt,
   gte,
   ilike,
@@ -51,6 +52,77 @@ function findColumnByName(
   // columns is an array, so we need to find by name property
   return tableConfig.columns.find((col) => col.name === name);
 }
+
+/**
+ * Resolve a where/orderBy field to a column: by TypeScript property key
+ * first, then by database column name.
+ */
+function resolveColumn<TTable extends PgTable>(
+  table: TTable,
+  key: string
+): PgColumn | undefined {
+  const byKey = (getTableColumns(table) as Record<string, PgColumn>)[key];
+  return byKey ?? findColumnByName(getTableConfig(table), key);
+}
+
+/**
+ * Convert update data to a Drizzle set object, translating
+ * `{ increment: n }` / `{ decrement: n }` into SQL expressions (used by both
+ * update and updateMany).
+ */
+function buildSetData<TTable extends PgTable>(
+  table: TTable,
+  data: object
+): Record<string, DatabaseValue | JsonValue | SQL> {
+  const setData: Record<string, DatabaseValue | JsonValue | SQL> = {};
+  for (const [key, value] of Object.entries(data) as [
+    string,
+    DatabaseValue | JsonValue,
+  ][]) {
+    const column = resolveColumn(table, key);
+    if (
+      column &&
+      typeof value === 'object' &&
+      value !== null &&
+      !(value instanceof Date) &&
+      !Array.isArray(value)
+    ) {
+      if ('increment' in value) {
+        setData[key] =
+          sql`${column} + ${(value as { increment: number }).increment}`;
+        continue;
+      }
+      if ('decrement' in value) {
+        setData[key] =
+          sql`${column} - ${(value as { decrement: number }).decrement}`;
+        continue;
+      }
+    }
+    setData[key] = value;
+  }
+  return setData;
+}
+
+/** Escape LIKE wildcards so user text matches literally. */
+function escapeLike(value: DatabaseValue): string {
+  return String(value).replace(/[\\%_]/g, (char) => `\\${char}`);
+}
+
+/** Operators supported in where inputs; anything else is rejected. */
+const SUPPORTED_WHERE_OPERATORS = new Set([
+  'equals',
+  'not',
+  'in',
+  'notIn',
+  'lt',
+  'lte',
+  'gt',
+  'gte',
+  'contains',
+  'startsWith',
+  'endsWith',
+  'mode',
+]);
 
 // Helper to safely cast table for Drizzle's from() method
 // Drizzle requires specific table types, but our generic TTable extends PgTable
@@ -309,29 +381,40 @@ function buildWhereClause<
       const orConditions = value as WhereInput<
         Record<string, DatabaseValue | JsonValue>
       >[];
-      const orClauses = orConditions
-        .map((w) => buildWhereClause(table, w))
-        .filter((c): c is SQL => c !== undefined);
-      if (orClauses.length > 0) {
-        conditions.push(or(...orClauses)!);
+      if (orConditions.length === 0) {
+        // An empty OR matches nothing (never "no filter").
+        conditions.push(sql`false`);
+        continue;
       }
+      const orClauses = orConditions.map(
+        (w) => buildWhereClause(table, w) ?? sql`true`
+      );
+      conditions.push(or(...orClauses)!);
       continue;
     }
 
     if (key === 'NOT') {
-      const notCondition = buildWhereClause(
-        table,
-        value as WhereInput<Record<string, DatabaseValue | JsonValue>>
-      );
-      if (notCondition) {
-        conditions.push(sql`NOT (${notCondition})`);
+      // NOT accepts one condition or an array (none of them may match).
+      const notInputs = (Array.isArray(value) ? value : [value]) as WhereInput<
+        Record<string, DatabaseValue | JsonValue>
+      >[];
+      for (const notInput of notInputs) {
+        const notCondition = buildWhereClause(table, notInput);
+        if (notCondition) {
+          conditions.push(sql`NOT (${notCondition})`);
+        }
       }
       continue;
     }
 
-    const tableConfig = getTableConfig(table);
-    const column = findColumnByName(tableConfig, key);
-    if (!column) continue;
+    const column = resolveColumn(table, key);
+    if (!column) {
+      // Silently skipping an unknown field would broaden the filter (and
+      // updateMany/deleteMany would hit every row).
+      throw new Error(
+        `Unknown where field "${key}" for table ${getTableConfig(table).name}`
+      );
+    }
 
     if (value === null) {
       conditions.push(isNull(column));
@@ -340,8 +423,21 @@ function buildWhereClause<
 
     if (value === undefined) continue;
 
-    if (typeof value === 'object' && value !== null && !Array.isArray(value)) {
+    if (value instanceof Date) {
+      conditions.push(eq(column, value));
+      continue;
+    }
+
+    if (typeof value === 'object' && !Array.isArray(value)) {
       const ops = value as Record<string, DatabaseValue>;
+      const unsupported = Object.keys(ops).filter(
+        (op) => !SUPPORTED_WHERE_OPERATORS.has(op)
+      );
+      if (unsupported.length > 0) {
+        throw new Error(
+          `Unsupported where operator(s) ${unsupported.join(', ')} on field "${key}"`
+        );
+      }
 
       if ('equals' in ops) {
         if (ops.equals === null) {
@@ -355,7 +451,7 @@ function buildWhereClause<
           conditions.push(isNotNull(column));
         } else if (
           typeof ops.not === 'object' &&
-          ops.not !== null &&
+          !(ops.not instanceof Date) &&
           'equals' in ops.not
         ) {
           const notEqualsValue = (ops.not as { equals: DatabaseValue }).equals;
@@ -365,38 +461,29 @@ function buildWhereClause<
         }
       }
       if ('in' in ops && Array.isArray(ops.in)) {
-        conditions.push(inArray(column, ops.in));
+        conditions.push(
+          ops.in.length === 0 ? sql`false` : inArray(column, ops.in)
+        );
       }
       if ('notIn' in ops && Array.isArray(ops.notIn)) {
-        conditions.push(notInArray(column, ops.notIn));
+        if (ops.notIn.length > 0) {
+          conditions.push(notInArray(column, ops.notIn));
+        }
       }
       if ('lt' in ops) conditions.push(lt(column, ops.lt));
       if ('lte' in ops) conditions.push(lte(column, ops.lte));
       if ('gt' in ops) conditions.push(gt(column, ops.gt));
       if ('gte' in ops) conditions.push(gte(column, ops.gte));
+      const matchOp =
+        (ops as { mode?: string }).mode === 'insensitive' ? ilike : like;
       if ('contains' in ops) {
-        const mode = (ops as { mode?: string }).mode;
-        if (mode === 'insensitive') {
-          conditions.push(ilike(column, `%${ops.contains}%`));
-        } else {
-          conditions.push(like(column, `%${ops.contains}%`));
-        }
+        conditions.push(matchOp(column, `%${escapeLike(ops.contains)}%`));
       }
       if ('startsWith' in ops) {
-        const mode = (ops as { mode?: string }).mode;
-        if (mode === 'insensitive') {
-          conditions.push(ilike(column, `${ops.startsWith}%`));
-        } else {
-          conditions.push(like(column, `${ops.startsWith}%`));
-        }
+        conditions.push(matchOp(column, `${escapeLike(ops.startsWith)}%`));
       }
       if ('endsWith' in ops) {
-        const mode = (ops as { mode?: string }).mode;
-        if (mode === 'insensitive') {
-          conditions.push(ilike(column, `%${ops.endsWith}`));
-        } else {
-          conditions.push(like(column, `%${ops.endsWith}`));
-        }
+        conditions.push(matchOp(column, `%${escapeLike(ops.endsWith)}`));
       }
     } else {
       conditions.push(eq(column, value));
@@ -741,13 +828,12 @@ export class TableRepository<
         options.data as (TInsert & Record<string, DatabaseValue | JsonValue>)[]
       );
 
-    if (options.skipDuplicates) {
-      await insertQuery.onConflictDoNothing();
-    } else {
-      await insertQuery;
-    }
+    // Count rows actually inserted (skipped duplicates are not counted).
+    const inserted = options.skipDuplicates
+      ? await insertQuery.onConflictDoNothing().returning()
+      : await insertQuery.returning();
 
-    return { count: options.data.length };
+    return { count: inserted.length };
   }
 
   /**
@@ -757,38 +843,7 @@ export class TableRepository<
     const whereClause = buildWhereClause(this.table, options.where);
     if (!whereClause) throw new Error('Update requires a where clause');
 
-    // Handle increment/decrement operations
-    const data = { ...options.data } as Record<
-      string,
-      DatabaseValue | JsonValue
-    >;
-    const setData: Record<string, DatabaseValue | JsonValue> = {};
-
-    const tableConfig = getTableConfig(this.table);
-    for (const [key, value] of Object.entries(data)) {
-      // Find column by name - columns is an array
-      const column = findColumnByName(tableConfig, key);
-      if (
-        column &&
-        typeof value === 'object' &&
-        value !== null &&
-        !(value instanceof Date)
-      ) {
-        if ('increment' in value) {
-          // Convert increment to SQL expression
-          setData[key] =
-            sql`${column} + ${(value as { increment: number }).increment}`;
-        } else if ('decrement' in value) {
-          // Convert decrement to SQL expression
-          setData[key] =
-            sql`${column} - ${(value as { decrement: number }).decrement}`;
-        } else {
-          setData[key] = value;
-        }
-      } else {
-        setData[key] = value;
-      }
-    }
+    const setData = buildSetData(this.table, options.data);
 
     // Use Drizzle's typed update - set() accepts the update data type
     // setData is Record<string, DatabaseValue | JsonValue> which is compatible with Drizzle's set
@@ -836,7 +891,11 @@ export class TableRepository<
     // Use Drizzle's typed update with $dynamic() for conditional where clause
     let query = this.drizzle
       .update(this.table)
-      .set(options.data as Partial<TInsert>)
+      .set(
+        buildSetData(this.table, options.data) as Partial<
+          TInsert & Record<string, DatabaseValue | JsonValue>
+        >
+      )
       .$dynamic();
     if (whereClause) query = query.where(whereClause);
 

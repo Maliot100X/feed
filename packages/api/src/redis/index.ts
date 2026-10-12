@@ -7,11 +7,9 @@
 export {
   closeRedis,
   ensureRedisReady,
-  getRedis,
   getRedisClient,
   isRedisAvailable,
   type RedisInstance,
-  redis,
   safePoll,
   safePublish,
 } from './client';

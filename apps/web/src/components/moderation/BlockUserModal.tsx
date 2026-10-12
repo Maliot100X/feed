@@ -32,7 +32,8 @@
 import { Ban, X } from 'lucide-react';
 import { useState, useTransition } from 'react';
 import { toast } from 'sonner';
-import { apiUrl } from '@/utils/api-url';
+import { readApiErrorMessage } from '@/utils/api-error';
+import { apiFetch } from '@/utils/api-fetch';
 
 interface BlockUserModalProps {
   isOpen: boolean;
@@ -56,18 +57,28 @@ export function BlockUserModal({
 
   const handleBlock = () => {
     startBlocking(async () => {
-      const response = await fetch(apiUrl(`/api/users/${targetUserId}/block`), {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          action: 'block',
-          reason: reason || undefined,
-        }),
-      });
+      let response: Response;
+      try {
+        response = await apiFetch(
+          `/api/users/${encodeURIComponent(targetUserId)}/block`,
+          {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              action: 'block',
+              reason: reason.trim() || undefined,
+            }),
+          }
+        );
+      } catch {
+        toast.error('Network error. Please try again.');
+        return;
+      }
 
       if (!response.ok) {
-        const error = await response.json();
-        toast.error(error.message || 'Failed to block user');
+        toast.error(
+          await readApiErrorMessage(response, 'Failed to block user')
+        );
         return;
       }
 

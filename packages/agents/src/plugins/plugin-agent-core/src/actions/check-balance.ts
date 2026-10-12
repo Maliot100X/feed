@@ -3,7 +3,6 @@
  * Returns the agent's current wallet balance
  */
 
-import { WalletService } from '@babylon/engine';
 import type {
   Action,
   ActionResult,
@@ -12,6 +11,7 @@ import type {
   Memory,
   State,
 } from '@elizaos/core';
+import { WalletService } from '@feed/engine';
 import { logger } from '../../../../shared/logger';
 
 export const checkBalanceAction: Action = {

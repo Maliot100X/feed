@@ -189,7 +189,7 @@ export const systemMetricsSnapshots = pgTable(
     // ===============================
     // Legacy field name: apiUptime stores a point-in-time database health check.
     // 100.0 = database responding, 0.0 = database unreachable.
-    // For true uptime monitoring, integrate with external APM (e.g., Vercel Analytics).
+    // For true uptime monitoring, integrate with external APM (e.g., Sentry or Cloudflare analytics).
     apiUptime: doublePrecision('apiUptime').notNull(),
     // Legacy field name: avgResponseTime stores DB ping latency in milliseconds.
     avgResponseTime: doublePrecision('avgResponseTime').notNull(),

@@ -20,7 +20,8 @@ import {
   autonomousCoordinator,
   npcBootstrapService,
   releaseAgentLock,
-} from '@babylon/agents';
+  withAgentExecutionLease,
+} from '@feed/agents';
 import {
   DistributedLockService,
   getCacheOrFetch,
@@ -28,11 +29,11 @@ import {
   relayCronToStaging,
   verifyCronAuth,
   withErrorHandling,
-} from '@babylon/api';
-import { db, eq, games } from '@babylon/db';
+} from '@feed/api';
+import { db, eq, games } from '@feed/db';
 import {
   ActorSocialActions,
-  BabylonLLMClient,
+  FeedLLMClient,
   FollowingMechanics,
   generateNPCRepliesFromPreviousTicks,
   getActiveEventsForPosting,
@@ -51,8 +52,8 @@ import {
   StaticDataRegistry,
   secureRandom,
   worldFactsService,
-} from '@babylon/engine';
-import { extractErrorMessage, logger, toISO } from '@babylon/shared';
+} from '@feed/engine';
+import { extractErrorMessage, logger, toISO } from '@feed/shared';
 import type { NextRequest } from 'next/server';
 import { NextResponse } from 'next/server';
 import { ensureEngineServices } from '@/lib/engine/ensure-engine-services';
@@ -99,8 +100,6 @@ interface GameState {
   currentDay: number | null;
 }
 
-// Vercel function configuration
-export const maxDuration = 300; // 5 minutes max for NPC tick
 export const dynamic = 'force-dynamic';
 
 /**
@@ -159,10 +158,10 @@ export const POST = withErrorHandling(async function POST(_req: NextRequest) {
   }
 
   // Acquire global lock to prevent overlapping cron invocations
-  // Duration matches maxDuration (300s) to prevent overlap when ticks take longer than cron interval
+  // 300s lock duration prevents overlap when ticks take longer than cron interval
   const globalLockAcquired = await DistributedLockService.acquireLock({
     lockId: 'npc-tick-global',
-    durationMs: 300 * 1000, // 300 seconds (5 minutes) - matches maxDuration
+    durationMs: 300 * 1000, // 300 seconds (5 minutes)
     operation: 'npc-tick-global',
     processId,
   });
@@ -469,11 +468,17 @@ export const POST = withErrorHandling(async function POST(_req: NextRequest) {
 
         // Execute autonomous tick with isNpc=true
         // This triggers NPC game context injection via the MultiStepExecutor
-        const tickResult = await autonomousCoordinator.executeAutonomousTick(
+        const tickResult = await withAgentExecutionLease(
           npc.id,
-          runtime,
-          true, // recordTrajectories - enabled for trajectory linking
-          true // isNpc = true (triggers NPC game context)
+          processId,
+          (signal) =>
+            autonomousCoordinator.executeAutonomousTick(
+              npc.id,
+              runtime,
+              true,
+              true,
+              signal
+            )
         );
 
         const actionCount =
@@ -486,7 +491,7 @@ export const POST = withErrorHandling(async function POST(_req: NextRequest) {
         totalActionsExecuted += actionCount;
 
         // Update activity state for organic behavior tracking
-        // Wrapped in try/catch so memory update failures don't fail the whole tick
+        // Activity state is required for the next scheduling decision.
         const didPost = tickResult.actionsExecuted.posts > 0;
         try {
           await npcMemoryService.updateActivityState(npc.id, {
@@ -506,6 +511,7 @@ export const POST = withErrorHandling(async function POST(_req: NextRequest) {
             },
             'NPCTick'
           );
+          throw activityError;
         }
 
         results.push({
@@ -578,7 +584,7 @@ export const POST = withErrorHandling(async function POST(_req: NextRequest) {
     if (false) {
       // Legacy discourse path — kept for reference, will be deleted in cleanup phase
       try {
-        const llmClient = BabylonLLMClient.forGameTick();
+        const llmClient = FeedLLMClient.forGameTick();
 
         // Build lightweight shared context for NPC-to-NPC banter (no LLM call)
         const [worldFacts, trendingContext] = await Promise.all([

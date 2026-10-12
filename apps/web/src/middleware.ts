@@ -1,4 +1,4 @@
-import { TOTAL_AGENT_DEFAULT_PROFILE_PICTURES } from '@babylon/shared';
+import { TOTAL_AGENT_DEFAULT_PROFILE_PICTURES } from '@feed/shared';
 import type { NextRequest } from 'next/server';
 import { NextResponse } from 'next/server';
 import {
@@ -10,13 +10,13 @@ import {
  * Production and staging origins for CORS requests
  */
 const PRODUCTION_ORIGINS = [
-  'https://babylon.market',
-  'https://www.babylon.market',
-  'https://app.babylon.market',
-  // 'https://privy.babylon.market', // DEPRECATED — Privy removed in Phase 2
-  'https://staging.babylon.market',
-  'https://app.staging.babylon.market',
-  'https://play.staging.babylon.market',
+  'https://feed.fun',
+  'https://www.feed.fun',
+  'https://app.feed.fun',
+  // 'https://privy.feed.fun', // DEPRECATED — Privy removed in Phase 2
+  'https://staging.feed.fun',
+  'https://app.staging.feed.fun',
+  'https://play.staging.feed.fun',
   // Capacitor mobile app origins.
   // Capacitor iOS sets Origin: capacitor://localhost; Android sets Origin: https://localhost.
   // These are the WebView origins for the native shell — not reachable from external browsers.
@@ -71,16 +71,21 @@ function isAllowedOrigin(origin: string | null): boolean {
   return ALLOWED_ORIGINS.has(origin);
 }
 
+function isPathOrSubtree(pathname: string, base: string) {
+  return pathname === base || pathname.startsWith(`${base}/`);
+}
+
+/** `/api` and its subtree only — not lookalikes such as `/api-docs`. */
 function isApiRequest(pathname: string) {
-  return pathname.startsWith('/api');
+  return isPathOrSubtree(pathname, '/api');
 }
 
 /**
- * Check if this is an agent API route (handled separately in vercel.json)
+ * Check if this is an agent API route (CORS headers set in next.config.ts headers())
  * Agent routes use Bearer token auth, not cookies, so they can have wildcard CORS
  */
 function isAgentApiRequest(pathname: string) {
-  return pathname.startsWith('/api/agents');
+  return isPathOrSubtree(pathname, '/api/agents');
 }
 
 /**
@@ -161,7 +166,7 @@ export function middleware(request: NextRequest) {
     return legacyPfpRewrite;
   }
 
-  // Redirect legacy babylon.social domains to babylon.market
+  // Redirect the www alias to the canonical feed.fun domain
   if (isLegacyCanonicalHostname(hostname)) {
     const redirectOrigin = getLegacyCanonicalOrigin(
       hostname,
@@ -173,24 +178,7 @@ export function middleware(request: NextRequest) {
     }
   }
 
-  // NFT features are disabled — block both API routes and page routes.
-  if (
-    pathname.startsWith('/api/nft') ||
-    pathname.startsWith('/api/wallet/nfts') ||
-    pathname === '/nft' ||
-    pathname.startsWith('/nft/')
-  ) {
-    if (pathname.startsWith('/api/')) {
-      return NextResponse.json(
-        { error: 'NFT features are currently disabled.' },
-        { status: 503 }
-      );
-    }
-    // Redirect page routes to home
-    return NextResponse.redirect(new URL('/', request.url));
-  }
-
-  // Skip CORS handling for agent routes - handled in vercel.json with wildcard
+  // Skip CORS handling for agent routes - handled in next.config.ts headers() with wildcard
   // Agent routes use Bearer token auth (not cookies), so they can use wildcard CORS
   if (isAgentApiRequest(pathname)) {
     return NextResponse.next();

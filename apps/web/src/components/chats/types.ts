@@ -1,6 +1,6 @@
-import type { MessageMetadata, MessageType } from '@babylon/shared';
+import type { MessageMetadata, MessageType } from '@feed/shared';
 
-export { MessageTypeEnum } from '@babylon/shared';
+export { MessageTypeEnum } from '@feed/shared';
 export type { MessageMetadata, MessageType };
 
 export type ChatFilter = 'all' | 'dms' | 'groups';
@@ -27,12 +27,6 @@ export interface Chat {
     isAgent?: boolean;
     /** The user ID that manages this agent (for detecting own agents) */
     managedBy?: string | null;
-  };
-  nftRequirement?: {
-    contractAddress: string;
-    tokenId: number | null;
-    chainId: number;
-    chainName: string;
   };
 }
 
@@ -93,12 +87,6 @@ export interface ChatDetails {
       /** The user ID that manages this agent (for detecting own agents) */
       managedBy?: string | null;
     } | null;
-    nftRequirement?: {
-      contractAddress: string;
-      tokenId: number | null;
-      chainId: number;
-      chainName: string;
-    };
   };
   messages: Message[];
   participants: ChatParticipant[];

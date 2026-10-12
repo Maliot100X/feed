@@ -1,5 +1,5 @@
 /**
- * Entity Types for @babylon/agents
+ * Entity Types for @feed/agents
  *
  * Types for entities that can be mentioned in messages
  */
@@ -10,13 +10,13 @@
 export interface CompanyEntity {
   id: string;
   name: string;
-  ticker?: string;
+  ticker?: string | null;
   description?: string;
   bio?: string;
-  currentPrice?: number | string;
-  priceChangePercentage?: number;
+  currentPrice?: number | string | null;
+  priceChangePercentage?: number | null;
   volume24h?: number | string;
-  imageUrl?: string;
+  imageUrl?: string | null;
 }
 
 /**

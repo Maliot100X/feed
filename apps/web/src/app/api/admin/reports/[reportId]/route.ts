@@ -126,9 +126,9 @@ import {
   storeEvaluationResult,
   successResponse,
   withErrorHandling,
-} from '@babylon/api';
-import { db } from '@babylon/db';
-import { AdminReportActionSchema, logger } from '@babylon/shared';
+} from '@feed/api';
+import { db } from '@feed/db';
+import { AdminReportActionSchema, logger } from '@feed/shared';
 import type { NextRequest } from 'next/server';
 
 /**

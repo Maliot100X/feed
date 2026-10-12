@@ -8,7 +8,6 @@ import { FeedbackMessages } from './FeedbackMessages';
 import type { MentionableAgent } from './MentionAutocomplete';
 import { MessageInput } from './MessageInput';
 import { MessageList } from './MessageList';
-import { NftVerificationBanner } from './NftVerificationBanner';
 import type { ChatDetails, Message, ReplyToMessage } from './types';
 
 interface ChatViewProps {
@@ -115,14 +114,6 @@ export function ChatView({
         <div className="px-4">
           <Separator />
         </div>
-
-        {/* NFT Verification Banner */}
-        {chatDetails.chat.nftRequirement && (
-          <NftVerificationBanner
-            chatDetails={chatDetails}
-            currentUserId={currentUserId}
-          />
-        )}
       </div>
 
       {/* Messages - Scrollable */}

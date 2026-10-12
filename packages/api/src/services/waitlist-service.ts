@@ -19,9 +19,10 @@ import {
   or,
   pointsTransactions,
   referrals,
+  sql,
   users,
-} from '@babylon/db';
-import { generateSnowflakeId, logger, POINTS } from '@babylon/shared';
+} from '@feed/db';
+import { generateSnowflakeId, logger, POINTS } from '@feed/shared';
 import { nanoid } from 'nanoid';
 import { NotFoundError } from '../errors';
 import { getOrCreateReferralCode } from './referral-service';
@@ -99,68 +100,22 @@ export class WaitlistService {
       });
     }
 
-    // If user already marked as waitlisted, still check for referral code validation
-    // but don't change their position or status
+    // Already waitlisted: position, status and referral attribution are
+    // fixed; a referral code supplied now is ignored.
     if (user.waitlistPosition && user.isWaitlistActive) {
-      // Still validate referral code if provided (for self-referral/double-referral checks)
-      let referrerRewarded = false;
-
       if (referralCode) {
-        const referrerResult = await db
-          .select({ id: users.id })
-          .from(users)
-          .where(eq(users.referralCode, referralCode))
-          .limit(1);
-
-        const referrer = referrerResult[0];
-
-        if (referrer) {
-          // PREVENT SELF-REFERRAL: Can't refer yourself!
-          if (referrer.id === userId) {
-            logger.warn(
-              `User ${userId} attempted self-referral`,
-              {
-                userId,
-                referralCode,
-              },
-              'WaitlistService'
-            );
-            referrerRewarded = false;
-          }
-          // PREVENT DOUBLE-REFERRAL: Check if user was already referred
-          else if (user.referredBy) {
-            logger.warn(
-              `User ${userId} already referred by ${user.referredBy}, ignoring new referral`,
-              {
-                userId,
-                existingReferrer: user.referredBy,
-                attemptedReferrer: referrer.id,
-              },
-              'WaitlistService'
-            );
-            referrerRewarded = false;
-          }
-          // Valid referral - but user already waitlisted, so don't reward again
-          else {
-            referrerRewarded = false;
-            logger.info(
-              `User ${userId} already waitlisted, referral code ${referralCode} ignored`,
-              {
-                userId,
-                referralCode,
-              },
-              'WaitlistService'
-            );
-          }
-        }
+        logger.info(
+          `User ${userId} already waitlisted, referral code ignored`,
+          { userId, referralCode },
+          'WaitlistService'
+        );
       }
-
       return {
         success: true,
         waitlistPosition: user.waitlistPosition,
         inviteCode: user.referralCode || '',
         points: user.reputationPoints,
-        referrerRewarded,
+        referrerRewarded: false,
       };
     }
 
@@ -175,9 +130,9 @@ export class WaitlistService {
     const lastPosition = lastPositionResult[0];
     const newPosition = (lastPosition?.waitlistPosition || 0) + 1;
 
-    // Generate invite code if user doesn't have one
+    // Use the user's referral code, creating the canonical one if missing.
     const inviteCode =
-      user.referralCode || WaitlistService.generateInviteCode();
+      user.referralCode || (await getOrCreateReferralCode(userId));
 
     // Handle referral rewards with validation
     let referrerRewarded = false;
@@ -222,61 +177,36 @@ export class WaitlistService {
           );
           referrerRewarded = false;
         }
-        // Valid referral - use referral system
+        // Valid referral: record the completed referral and the referredBy
+        // link FIRST, then award, so the award is bookkept on the referral
+        // row (signupPointsAwarded) and retries are idempotent.
         else {
-          // Use ReputationService.awardReferralSignup for referral processing
-          // This handles weekly limits, IP checks, and creates proper Referral records
+          await db
+            .insert(referrals)
+            .values({
+              id: await generateSnowflakeId(),
+              referrerId: referrer.id,
+              referralCode,
+              referredUserId: userId,
+              status: 'completed',
+              completedAt: new Date(),
+            })
+            .onConflictDoUpdate({
+              target: [referrals.referralCode, referrals.referredUserId],
+              set: { status: 'completed', completedAt: new Date() },
+            });
+          await db
+            .update(users)
+            .set({ referredBy: referrer.id })
+            .where(eq(users.id, userId));
+
           const referralResult = await ReputationService.awardReferralSignup(
             referrer.id,
             userId
           );
 
-          if (referralResult.success) {
-            // Create or update Referral record if it doesn't exist
-            // Check if referral exists
-            const existingReferral = await db
-              .select({ id: referrals.id })
-              .from(referrals)
-              .where(
-                and(
-                  eq(referrals.referralCode, referralCode),
-                  eq(referrals.referredUserId, userId)
-                )
-              )
-              .limit(1);
-
-            if (existingReferral.length > 0) {
-              await db
-                .update(referrals)
-                .set({
-                  status: 'completed',
-                  completedAt: new Date(),
-                })
-                .where(
-                  and(
-                    eq(referrals.referralCode, referralCode),
-                    eq(referrals.referredUserId, userId)
-                  )
-                );
-            } else {
-              await db.insert(referrals).values({
-                id: await generateSnowflakeId(),
-                referrerId: referrer.id,
-                referralCode,
-                referredUserId: userId,
-                status: 'completed',
-                completedAt: new Date(),
-              });
-            }
-
-            // Update referredBy field on user
-            await db
-              .update(users)
-              .set({ referredBy: referrer.id })
-              .where(eq(users.id, userId));
-
+          if (referralResult.success && !referralResult.alreadyAwarded) {
             referrerRewarded = true;
-
             logger.info(
               `Rewarded referrer ${referrer.id} with ${referralResult.reputationAwarded} reputation via referral system`,
               {
@@ -286,8 +216,7 @@ export class WaitlistService {
               },
               'WaitlistService'
             );
-          } else {
-            // Referral failed (weekly limit, IP check, etc.)
+          } else if (!referralResult.success) {
             logger.warn(
               `Failed to award referral points: ${referralResult.error}`,
               {
@@ -297,7 +226,6 @@ export class WaitlistService {
               },
               'WaitlistService'
             );
-            referrerRewarded = false;
           }
         }
       } else {
@@ -310,11 +238,6 @@ export class WaitlistService {
           'WaitlistService'
         );
       }
-    }
-
-    // Ensure user has a referral code
-    if (!user.referralCode) {
-      await getOrCreateReferralCode(userId);
     }
 
     // Update user as waitlisted
@@ -445,130 +368,105 @@ export class WaitlistService {
   }
 
   /**
-   * Award bonus points for wallet connection
+   * Award the one-time bonus for a linked identity (wallet or email).
+   *
+   * The submitted value is never written to the account: it must equal the
+   * identity already linked by the authentication provider. Accepting
+   * arbitrary values let users claim other people's wallets (NFT gating
+   * trusts users.walletAddress) and admin-domain emails (admin roles are
+   * granted from users.email).
+   *
+   * The award flag is flipped with a conditional UPDATE in the same
+   * transaction as the ledger insert, so concurrent requests award once.
+   */
+  private static async awardLinkedIdentityBonus(params: {
+    userId: string;
+    kind: 'wallet' | 'email';
+    submitted: string;
+  }): Promise<boolean> {
+    const { userId, kind, submitted } = params;
+    const bonusAmount =
+      kind === 'wallet' ? POINTS.WALLET_CONNECT : POINTS.EMAIL_SUBMIT;
+    const awardedColumn =
+      kind === 'wallet'
+        ? users.pointsAwardedForWallet
+        : users.pointsAwardedForEmail;
+    const identityColumn =
+      kind === 'wallet' ? users.walletAddress : users.email;
+
+    return db.transaction(async (tx) => {
+      const conditions = [
+        eq(users.id, userId),
+        eq(awardedColumn, false),
+        sql`lower(${identityColumn}) = ${submitted.trim().toLowerCase()}`,
+      ];
+      if (kind === 'email') {
+        conditions.push(eq(users.isWaitlistActive, true));
+      }
+
+      const [updated] = await tx
+        .update(users)
+        .set({
+          ...(kind === 'wallet'
+            ? { pointsAwardedForWallet: true }
+            : { pointsAwardedForEmail: true }),
+          bonusPoints: sql`${users.bonusPoints} + ${bonusAmount}`,
+          reputationPoints: sql`${users.reputationPoints} + ${bonusAmount}`,
+        })
+        .where(and(...conditions))
+        .returning({ reputationPoints: users.reputationPoints });
+
+      if (!updated) {
+        return false;
+      }
+
+      await tx.insert(pointsTransactions).values({
+        id: await generateSnowflakeId(),
+        userId,
+        amount: bonusAmount,
+        pointsBefore: updated.reputationPoints - bonusAmount,
+        pointsAfter: updated.reputationPoints,
+        reason: kind === 'wallet' ? 'wallet_connect' : 'email_submit',
+      });
+
+      logger.info(
+        `Awarded ${kind} bonus to user ${userId}`,
+        { userId, bonusAmount },
+        'WaitlistService'
+      );
+      return true;
+    });
+  }
+
+  /**
+   * Award bonus points for the wallet linked to the account. Returns false if
+   * the submitted wallet is not the linked wallet or the bonus was awarded.
    */
   static async awardWalletBonus(
     userId: string,
     walletAddress: string
   ): Promise<boolean> {
-    const userResult = await db
-      .select({
-        pointsAwardedForWallet: users.pointsAwardedForWallet,
-        reputationPoints: users.reputationPoints,
-        bonusPoints: users.bonusPoints,
-      })
-      .from(users)
-      .where(eq(users.id, userId))
-      .limit(1);
-
-    const user = userResult[0];
-
-    if (!user) {
-      return false;
-    }
-
-    // Don't award if already awarded
-    if (user.pointsAwardedForWallet) {
-      return false;
-    }
-
-    const bonusAmount = 300;
-    const newBonusPoints = user.bonusPoints + bonusAmount;
-    const newReputationPoints = user.reputationPoints + bonusAmount;
-
-    await db
-      .update(users)
-      .set({
-        walletAddress,
-        pointsAwardedForWallet: true,
-        bonusPoints: newBonusPoints,
-        reputationPoints: newReputationPoints,
-      })
-      .where(eq(users.id, userId));
-
-    // Create points transaction
-    await db.insert(pointsTransactions).values({
-      id: await generateSnowflakeId(),
+    return WaitlistService.awardLinkedIdentityBonus({
       userId,
-      amount: bonusAmount,
-      pointsBefore: user.reputationPoints,
-      pointsAfter: newReputationPoints,
-      reason: 'wallet_connect',
-      metadata: JSON.stringify({ walletAddress }),
+      kind: 'wallet',
+      submitted: walletAddress,
     });
-
-    logger.info(
-      `Awarded wallet bonus to user ${userId}`,
-      {
-        userId,
-        bonusAmount,
-      },
-      'WaitlistService'
-    );
-
-    return true;
   }
 
   /**
-   * Award bonus points for providing an email address (one-time bonus).
-   * Saves the email and sets pointsAwardedForEmail to prevent double-awarding.
+   * Award bonus points for the verified email linked to the account. Returns
+   * false if the submitted email is not the account email, the user is not
+   * on the waitlist, or the bonus was already awarded.
    */
   static async awardEmailBonus(
     userId: string,
     email: string
   ): Promise<boolean> {
-    const userResult = await db
-      .select({
-        isWaitlistActive: users.isWaitlistActive,
-        pointsAwardedForEmail: users.pointsAwardedForEmail,
-        reputationPoints: users.reputationPoints,
-        bonusPoints: users.bonusPoints,
-      })
-      .from(users)
-      .where(eq(users.id, userId))
-      .limit(1);
-
-    const user = userResult[0];
-
-    if (!user || !user.isWaitlistActive) {
-      return false;
-    }
-
-    if (user.pointsAwardedForEmail) {
-      return false;
-    }
-
-    const normalizedEmail = email.trim().toLowerCase();
-    const bonusAmount = POINTS.EMAIL_SUBMIT;
-    const newBonusPoints = user.bonusPoints + bonusAmount;
-    const newReputationPoints = user.reputationPoints + bonusAmount;
-
-    await db
-      .update(users)
-      .set({
-        email: normalizedEmail,
-        pointsAwardedForEmail: true,
-        bonusPoints: newBonusPoints,
-        reputationPoints: newReputationPoints,
-      })
-      .where(eq(users.id, userId));
-
-    await db.insert(pointsTransactions).values({
-      id: await generateSnowflakeId(),
+    return WaitlistService.awardLinkedIdentityBonus({
       userId,
-      amount: bonusAmount,
-      pointsBefore: user.reputationPoints,
-      pointsAfter: newReputationPoints,
-      reason: 'email_submit',
+      kind: 'email',
+      submitted: email,
     });
-
-    logger.info(
-      `Awarded email bonus to user ${userId}`,
-      { userId, bonusAmount },
-      'WaitlistService'
-    );
-
-    return true;
   }
 
   /**

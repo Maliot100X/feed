@@ -64,15 +64,17 @@ type ActiveMode = 'idle' | 'single' | 'batch';
  * - idle + showOutcome → show single, mode = 'single'
  * - idle + showBatch  → show batch, mode = 'batch'
  * - single + showOutcome → queue to singleQueueRef
- * - single + showBatch  → store in pendingBatchRef
+ * - single + showBatch  → append to pendingBatchRef
  * - batch + showOutcome  → queue to singleQueueRef
- * - batch + showBatch   → ignore (already showing batch)
+ * - batch + showBatch   → append to pendingBatchRef (never dropped: the
+ *   server already marked these delivered)
  *
  * Dismiss transitions:
  * - single dismissed, queue not empty → show next single
  * - single dismissed, queue empty, pending batch → show batch, mode = 'batch'
  * - single dismissed, queue empty, no batch → mode = 'idle'
  * - batch dismissed, singles queued → show first single, mode = 'single'
+ * - batch dismissed, pending batch → show it, mode = 'batch'
  * - batch dismissed, nothing queued → mode = 'idle'
  */
 export function OutcomeNotificationProvider({
@@ -154,10 +156,10 @@ export function OutcomeNotificationProvider({
     }
   }, []);
 
+  // Dismissing the summary and choosing "view result" leave the same way.
   const handleBatchDismiss = useCallback(() => {
     setBatchNotifications([]);
 
-    // Check for queued singles
     if (singleQueueRef.current.length > 0) {
       const next = singleQueueRef.current.shift();
       if (next) {
@@ -167,24 +169,17 @@ export function OutcomeNotificationProvider({
       }
     }
 
-    modeRef.current = 'idle';
-  }, []);
-
-  const handleBatchViewResult = useCallback(() => {
-    setBatchNotifications([]);
-
-    // Same transition as dismiss — check for queued singles
-    if (singleQueueRef.current.length > 0) {
-      const next = singleQueueRef.current.shift();
-      if (next) {
-        modeRef.current = 'single';
-        setCurrent(next);
-        return;
-      }
+    if (pendingBatchRef.current) {
+      const batch = pendingBatchRef.current;
+      pendingBatchRef.current = null;
+      modeRef.current = 'batch';
+      setBatchNotifications(batch);
+      return;
     }
 
     modeRef.current = 'idle';
   }, []);
+  const handleBatchViewResult = handleBatchDismiss;
 
   const value = useMemo(
     () => ({ showOutcome, showBatchOutcomes }),

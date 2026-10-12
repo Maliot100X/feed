@@ -47,12 +47,11 @@
 
 import type { NextRequest } from 'next/server';
 import { NextResponse } from 'next/server';
-import { automationPipeline } from '@babylon/training';
-import { logger } from '@babylon/shared';
-import { requireAdmin, withErrorHandling } from '@babylon/api';
+import { automationPipeline } from '@feed/training';
+import { logger } from '@feed/shared';
+import { requireAdmin, withErrorHandling } from '@feed/api';
 
 export const dynamic = 'force-dynamic';
-export const maxDuration = 60;
 
 export const GET = withErrorHandling(async (request: NextRequest) => {
   // Security: ALWAYS require ADMIN authentication
@@ -113,7 +112,7 @@ export const GET = withErrorHandling(async (request: NextRequest) => {
         'Accept': 'application/vnd.github.v3+json',
         'Authorization': `Bearer ${githubToken}`,
         'Content-Type': 'application/json',
-        'User-Agent': 'Babylon-Training-Trigger'
+        'User-Agent': 'Feed-Training-Trigger'
       },
       body: JSON.stringify({
         event_type: 'trigger-training',
@@ -160,7 +159,7 @@ export const GET = withErrorHandling(async (request: NextRequest) => {
     message: 'Training workflow dispatched. Check GitHub Actions tab to monitor progress.',
     links: {
       githubActions: `https://github.com/${githubRepo}/actions/workflows/rl-training.yml`,
-      wandbProject: `https://wandb.ai/${process.env.WANDB_ENTITY || 'your-entity'}/${process.env.WANDB_PROJECT || 'babylon'}`
+      wandbProject: `https://wandb.ai/${process.env.WANDB_ENTITY || 'your-entity'}/${process.env.WANDB_PROJECT || 'feed'}`
     }
   });
 });

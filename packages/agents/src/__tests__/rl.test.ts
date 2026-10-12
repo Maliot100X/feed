@@ -10,8 +10,8 @@
  */
 
 import { describe, expect, it } from 'bun:test';
-import { getModelTokenLimit, truncateToTokenLimitSync } from '@babylon/api';
-import { getRLModelConfig } from '@babylon/training';
+import { getModelTokenLimit, truncateToTokenLimitSync } from '@feed/api';
+import { getRLModelConfig } from '@feed/training';
 
 describe('RL Training System', () => {
   describe('Configuration', () => {
@@ -51,8 +51,8 @@ describe('RL Training System', () => {
     });
   });
 
-  describe('Agent Services Use Truncation', () => {
-    it('AutonomousTradingService should import truncation', async () => {
+  describe('Agent Services Preserve Required Context', () => {
+    it('AutonomousTradingService should reject oversized required context', async () => {
       const module = await import('../autonomous/AutonomousTradingService');
       expect(module.AutonomousTradingService).toBeDefined();
 
@@ -63,40 +63,44 @@ describe('RL Training System', () => {
         path.join(__dirname, '../autonomous/AutonomousTradingService.ts'),
         'utf-8'
       );
-      expect(content).toContain('truncateToTokenLimitSync');
+      expect(content).not.toContain('truncateToTokenLimitSync');
+      expect(content).toContain('required context exceeds token budget');
       expect(content).toContain('30000'); // 30K limit
     });
 
-    it('AutonomousPostingService should import truncation', async () => {
+    it('AutonomousPostingService should reject oversized required context', async () => {
       const fs = await import('fs/promises');
       const path = await import('path');
       const content = await fs.readFile(
         path.join(__dirname, '../autonomous/AutonomousPostingService.ts'),
         'utf-8'
       );
-      expect(content).toContain('truncateToTokenLimitSync');
+      expect(content).not.toContain('truncateToTokenLimitSync');
+      expect(content).toContain('required context exceeds token budget');
       expect(content).toContain('30000');
     });
 
-    it('AutonomousPlanningCoordinator should import truncation', async () => {
+    it('AutonomousPlanningCoordinator should reject oversized required context', async () => {
       const fs = await import('fs/promises');
       const path = await import('path');
       const content = await fs.readFile(
         path.join(__dirname, '../autonomous/AutonomousPlanningCoordinator.ts'),
         'utf-8'
       );
-      expect(content).toContain('truncateToTokenLimitSync');
+      expect(content).not.toContain('truncateToTokenLimitSync');
+      expect(content).toContain('required context exceeds token budget');
       expect(content).toContain('30000');
     });
 
-    it('AutonomousBatchResponseService should import truncation', async () => {
+    it('AutonomousBatchResponseService should reject oversized required context', async () => {
       const fs = await import('fs/promises');
       const path = await import('path');
       const content = await fs.readFile(
         path.join(__dirname, '../autonomous/AutonomousBatchResponseService.ts'),
         'utf-8'
       );
-      expect(content).toContain('truncateToTokenLimitSync');
+      expect(content).not.toContain('truncateToTokenLimitSync');
+      expect(content).toContain('required context exceeds token budget');
       expect(content).toContain('30000');
     });
   });
@@ -122,7 +126,7 @@ describe('RL Training System', () => {
       expect(trajectoryLogger.TrajectoryLoggerService).toBeDefined();
 
       // 2. RL Model config
-      const config = await import('@babylon/training');
+      const config = await import('@feed/training');
       expect(config.getRLModelConfig).toBeDefined();
 
       // 3. Agent runtime

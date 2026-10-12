@@ -2,7 +2,7 @@
 // Run: bun test integration/admin-dashboard-rbac.integration.test.ts --preload ./integration/preload.ts
 
 import { afterAll, beforeAll, describe, expect, test } from 'bun:test';
-import { getAllAdmins } from '@babylon/api';
+import { getAllAdmins } from '@feed/api';
 import {
   ADMIN_PERMISSIONS,
   ADMIN_ROLES,
@@ -11,8 +11,8 @@ import {
   eq,
   ROLE_PERMISSIONS,
   users,
-} from '@babylon/db';
-import { generateSnowflakeId } from '@babylon/shared';
+} from '@feed/db';
+import { generateSnowflakeId } from '@feed/shared';
 import {
   getAdminToken,
   requireAuth as requireAuthShared,
@@ -517,7 +517,8 @@ describe('Admin Dashboard RBAC Integration Tests', () => {
 
       expect(stats.llm).toBeDefined();
       expect(typeof stats.llm.callsLast24h).toBe('number');
-      expect(typeof stats.llm.errorsLastHour).toBe('number');
+      // LLM call errors are not persisted, so no count is reported.
+      expect(stats.llm.errorsLastHour).toBeNull();
 
       expect(stats.content).toBeDefined();
       expect(typeof stats.content.lookaheadMinutes).toBe('number');

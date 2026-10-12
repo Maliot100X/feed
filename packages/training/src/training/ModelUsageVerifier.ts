@@ -5,6 +5,7 @@
  * Provides assertions and logging for model usage verification.
  */
 
+import type { IAgentRuntime } from '@elizaos/core';
 import {
   and,
   count,
@@ -15,8 +16,7 @@ import {
   llmCallLogs,
   trajectories,
   users,
-} from '@babylon/db';
-import type { IAgentRuntime } from '@elizaos/core';
+} from '@feed/db';
 import { logger } from '../utils/logger';
 
 export interface ModelUsageStats {

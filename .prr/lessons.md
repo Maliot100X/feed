@@ -7,4 +7,4 @@
 
 ## Global Lessons
 
-- Fixer attempted disallowed file(s): scripts/__tests__/generate-skills-md.test.ts, scripts/__tests__/test-unit-isolated.test.ts. Only edit the file(s) listed in TARGET FILE(S): scripts/generate-skills-md.ts, skills/babylon/SKILL.md, scripts/test-unit-isolated.ts.
+- Fixer attempted disallowed file(s): scripts/__tests__/generate-skills-md.test.ts, scripts/__tests__/test-unit-isolated.test.ts. Only edit the file(s) listed in TARGET FILE(S): scripts/generate-skills-md.ts, skills/feed/SKILL.md, scripts/test-unit-isolated.ts.

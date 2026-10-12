@@ -3,14 +3,13 @@ import {
   requireCronAuth,
   successResponse,
   withErrorHandling,
-} from '@babylon/api';
-import { logger } from '@babylon/shared';
+} from '@feed/api';
+import { logger } from '@feed/shared';
 import type { NextRequest } from 'next/server';
 import { drainTradingFeeOutboxBatch } from '@/lib/services/trading-fee-outbox';
 
 export const dynamic = 'force-dynamic';
 export const runtime = 'nodejs';
-export const maxDuration = 120;
 
 const handler = async (request: NextRequest) => {
   const startTime = new Date();

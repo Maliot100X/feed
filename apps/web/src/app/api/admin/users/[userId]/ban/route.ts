@@ -97,9 +97,9 @@ import {
   requireAdmin,
   successResponse,
   withErrorHandling,
-} from '@babylon/api';
-import { db } from '@babylon/db';
-import { logger } from '@babylon/shared';
+} from '@feed/api';
+import { db } from '@feed/db';
+import { logger } from '@feed/shared';
 import type { NextRequest } from 'next/server';
 import { z } from 'zod';
 
@@ -213,7 +213,7 @@ export const POST = withErrorHandling(
     );
 
     // Audit log the ban/unban action (persist to database)
-    logAdminAction(action === 'ban' ? 'BAN' : 'UNBAN', {
+    await logAdminAction(action === 'ban' ? 'BAN' : 'UNBAN', {
       adminId: adminUser.userId,
       ipAddress: getClientIp(request.headers) ?? undefined,
       resourceType: 'user',

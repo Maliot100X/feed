@@ -1,5 +1,5 @@
 /**
- * Babylon Engine Package
+ * Feed Engine Package
  * Core game simulation, generation, and decision engines
  */
 
@@ -8,7 +8,7 @@ export {
   PredictionPricing,
   type ShareCalculation,
   type ShareCalculationWithFees,
-} from '@babylon/core/markets/prediction';
+} from '@feed/core/markets/prediction';
 // Article Generator
 export { type Article, ArticleGenerator } from './ArticleGenerator';
 // Actors Data Loader
@@ -166,11 +166,12 @@ export {
 } from './llm/json-continuation-parser';
 // LLM Exports (re-exported for convenience)
 export {
-  BabylonLLMClient,
+  FeedLLMClient,
   getTokenUsageCallback,
   setTokenUsageCallback,
   type TokenUsageCallback,
 } from './llm/openai-client';
+export { countTokensSync, getSafeContextLimit } from './llm/token-counter';
 export {
   type LLMGenerateJSONOptions,
   type LLMJsonClient,
@@ -248,7 +249,7 @@ export {
   type RelationshipChange,
   RelationshipEvolutionEngine,
 } from './RelationshipEvolutionEngine';
-// Rate limiting (backward-compatible re-exports from @babylon/api)
+// Rate limiting (backward-compatible re-exports from @feed/api)
 export * from './rate-limiting';
 // Reputation Module
 export {
@@ -293,6 +294,7 @@ export {
   getSignalDirection,
 } from './services/narrative-state-service';
 export { sharedChatContextService } from './services/shared-chat-context-service';
+export { setGeneratedImageStorage } from './services/surplus-image-service';
 // Tier Configuration
 export {
   ALL_TIERS,

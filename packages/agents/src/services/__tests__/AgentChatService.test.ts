@@ -13,11 +13,15 @@
  * - Max iterations boundary
  * - DB write correctness (exact values)
  * - broadcastFn called with correct shape
- * - broadcastFn rejection is swallowed (fire-and-forget)
+ * - broadcastFn rejection propagates
  * - Summary generation and fallback
  */
 
 import { afterEach, beforeEach, describe, expect, it, mock } from 'bun:test';
+
+mock.module('../team-chat-notifications', () => ({
+  notifyTeamChatMessage: mock(async () => {}),
+}));
 
 // ─── AuthorizationError (internal, must match actual class) ──────────────────
 
@@ -52,7 +56,7 @@ class MockLoggerClass {
   setLevel() {}
 }
 
-mock.module('@babylon/shared', () => ({
+mock.module('@feed/shared', () => ({
   checkUserInput: mockCheckUserInput,
   logger: mockLogger,
   Logger: MockLoggerClass,
@@ -62,7 +66,7 @@ mock.module('@babylon/shared', () => ({
   MessageTypeEnum: { COORDINATOR: 'coordinator' },
   extractErrorMessage: (err: unknown) =>
     err instanceof Error ? err.message : String(err),
-  BabylonError: class BabylonError extends Error {},
+  FeedAppError: class FeedAppError extends Error {},
   ValidationError: class ValidationError extends Error {},
   CHAIN: {},
   POINTS: {},
@@ -87,7 +91,7 @@ const mockDb = {
   update: mockDbUpdate,
 };
 
-mock.module('@babylon/db', () => ({
+mock.module('@feed/db', () => ({
   db: mockDb,
   // Drizzle operators
   aliasedTable: (table: unknown) => table,
@@ -143,7 +147,6 @@ mock.module('@babylon/db', () => ({
   llmCallLogs: {},
   markets: {},
   messages: { id: 'messages' },
-  nftOwnership: {},
   npcTrades: {},
   perpPositions: {},
   positions: {},
@@ -164,7 +167,7 @@ mock.module('@babylon/db', () => ({
   isValidSnowflakeId: () => true,
 }));
 
-mock.module('@babylon/api', () => ({
+mock.module('@feed/api', () => ({
   assertPrivyOfflineConfig: () => undefined,
   broadcastAgentActivity: async () => undefined,
   broadcastToChannel: async () => undefined,
@@ -184,7 +187,10 @@ mock.module('@babylon/api', () => ({
 
 const mockParseKeyValueXml =
   mock<(text: string) => Record<string, unknown> | null>();
-const mockComposePromptFromState = mock(() => 'MOCKED_PROMPT');
+const mockComposePromptFromState = mock(
+  (_input: { template: string; state: { values: Record<string, unknown> } }) =>
+    'MOCKED_PROMPT'
+);
 
 mock.module('@elizaos/core', () => ({
   composePromptFromState: mockComposePromptFromState,
@@ -220,7 +226,13 @@ mock.module('../../errors', () => ({
 }));
 
 // Mock runtime — shared and reset per test
-const mockComposeState = mock(async () => ({ values: {}, data: {} }));
+const mockComposeState = mock(async (..._args: unknown[]) => ({
+  values: {
+    recentMessages: 'No previous conversation history.',
+    actionsWithParams: 'Available action schemas',
+  },
+  data: {},
+}));
 const mockUseModel =
   mock<
     (
@@ -232,6 +244,11 @@ const mockProcessActions = mock(async () => undefined);
 
 const mockRuntime = {
   agentId: 'runtime-agent-id',
+  actions: ['OPEN_PERP', 'CHECK_PERPS'].map((name) => ({
+    name,
+    validate: async () => true,
+    handler: async () => ({ success: true }),
+  })),
   composeState: mockComposeState,
   useModel: mockUseModel,
   processActions: mockProcessActions,
@@ -314,7 +331,13 @@ beforeEach(() => {
   mockGetRuntime.mockClear();
   mockGetRuntime.mockResolvedValue(mockRuntime);
   mockComposeState.mockClear();
-  mockComposeState.mockResolvedValue({ values: {}, data: {} });
+  mockComposeState.mockResolvedValue({
+    values: {
+      recentMessages: 'No previous conversation history.',
+      actionsWithParams: 'Available action schemas',
+    },
+    data: {},
+  });
   mockUseModel.mockClear();
   mockParseKeyValueXml.mockClear();
   mockProcessActions.mockClear();
@@ -636,21 +659,18 @@ describe('dispatchAgentChat', () => {
       expect(typeof calledMessage.createdAt).toBe('string');
     });
 
-    it('injects ownerName and ownerUsername into state values', async () => {
+    it('passes team and identity context before providers compose state', async () => {
       setupSuccessfulImmediateFinish();
-
-      const capturedStateValues: Array<Record<string, unknown>> = [];
-      mockComposeState.mockImplementation(async () => {
-        const state = { values: {}, data: {} };
-        return state;
+      await dispatchAgentChat(BASE_PARAMS);
+      const input = mockComposeState.mock.calls[0]?.[0] as {
+        content: Record<string, unknown>;
+      };
+      expect(input.content).toMatchObject({
+        teamChatId: TEAM_CHAT_ID,
+        agentId: AGENT_ID,
+        ownerId: BASE_PARAMS.ownerId,
       });
-      // We verify the LLM is called, which means state was built — ownerName is in the prompt
-      // (composePromptFromState receives the state)
-      await dispatchAgentChat({ ...BASE_PARAMS, ownerName: 'BobOwner' });
-
-      // composePromptFromState was called
-      expect(mockComposePromptFromState).toHaveBeenCalled();
-      void capturedStateValues; // suppress unused warning
+      expect(mockComposeState.mock.calls.length).toBeGreaterThanOrEqual(2);
     });
   });
 
@@ -711,7 +731,7 @@ describe('dispatchAgentChat', () => {
       expect(mockProcessActions).toHaveBeenCalledTimes(1);
     });
 
-    it('records failed actions in traceActionResults without crashing', async () => {
+    it('returns failed actions without a success summary', async () => {
       mockGetAgentWithConfig.mockResolvedValue(MOCK_AGENT_WITH_CONFIG);
 
       mockUseModel
@@ -739,9 +759,11 @@ describe('dispatchAgentChat', () => {
 
       const result = await dispatchAgentChat(BASE_PARAMS);
 
-      // Should still succeed overall — action failure is caught
-      expect(result.success).toBe(true);
-      // Action was counted (even as failure)
+      expect(result.success).toBe(false);
+      expect(result.error).toContain('Insufficient balance');
+      expect(result.response).toBe('');
+      expect(mockUseModel).toHaveBeenCalledTimes(1);
+      // The failed attempt remains visible.
       expect(result.actionsExecuted).toBe(1);
     });
   });
@@ -759,8 +781,9 @@ describe('dispatchAgentChat', () => {
 
       // isLLMFailure because decision could not be parsed
       expect(result.isLLMFailure).toBe(true);
-      expect(result.response).toBeDefined(); // has a fallback response
-      expect(result.response.length).toBeGreaterThan(0);
+      expect(result.success).toBe(false);
+      expect(result.response).toBe('');
+      expect(result.error).toContain('could not be parsed');
     });
 
     it('retries LLM parse up to 3 times before giving up', async () => {
@@ -774,7 +797,7 @@ describe('dispatchAgentChat', () => {
       expect(mockUseModel.mock.calls.length).toBeGreaterThanOrEqual(3);
     });
 
-    it('returns fallback text when summary parse fails', async () => {
+    it('reports a failure when summary parsing is exhausted', async () => {
       mockGetAgentWithConfig.mockResolvedValue(MOCK_AGENT_WITH_CONFIG);
 
       // Decision succeeds (no action)
@@ -793,10 +816,11 @@ describe('dispatchAgentChat', () => {
 
       const result = await dispatchAgentChat(BASE_PARAMS);
 
-      expect(result.success).toBe(true);
+      expect(result.success).toBe(false);
       // Falls back to default summary text
       expect(result.response).toBeDefined();
-      expect(result.response.length).toBeGreaterThan(0);
+      expect(result.response).toBe('');
+      expect(result.isLLMFailure).toBe(true);
     });
 
     it('injects formatted action results into reused state before the next decision and summary', async () => {
@@ -915,17 +939,15 @@ describe('dispatchAgentChat', () => {
   // ── Broadcast fault tolerance ─────────────────────────────────────────────
 
   describe('broadcastFn fault tolerance', () => {
-    it('swallows broadcast failure — dispatch still returns success', async () => {
+    it('rejects dispatch when broadcast fails', async () => {
       setupSuccessfulImmediateFinish();
       MOCK_BROADCAST_FN.mockRejectedValue(
         new Error('Redis stream unavailable')
       );
 
-      const result = await dispatchAgentChat(BASE_PARAMS);
-
-      // The broadcast rejection is fire-and-forget; dispatch itself succeeds
-      expect(result.success).toBe(true);
-      expect(result.response).toBe('Your trade was executed.');
+      await expect(dispatchAgentChat(BASE_PARAMS)).rejects.toThrow(
+        'Redis stream unavailable'
+      );
     });
   });
 
@@ -1004,7 +1026,10 @@ describe('dispatchAgentChat', () => {
         .mockReturnValueOnce({ thought: 'done', text: 'Executed.' });
 
       mockComposeState.mockImplementation(async () => ({
-        values: {},
+        values: {
+          recentMessages: 'No previous conversation history.',
+          actionsWithParams: 'Available action schemas',
+        },
         data: {},
       }));
 
@@ -1075,4 +1100,42 @@ describe('dispatchAgentChat', () => {
       expect(capturedParams[0]).toMatchObject({ ticker: 'NVDAI' });
     });
   });
+});
+
+it('rejects missing history before calling a model', async () => {
+  setupSuccessfulImmediateFinish();
+  mockComposeState.mockResolvedValue({
+    values: { recentMessages: '', actionsWithParams: 'actions' },
+    data: {},
+  });
+  await expect(dispatchAgentChat(BASE_PARAMS)).rejects.toThrow(
+    'history context is missing'
+  );
+  expect(mockUseModel).not.toHaveBeenCalled();
+});
+
+it('rejects partial action names before the SDK can fuzzy-match a trade', async () => {
+  mockGetAgentWithConfig.mockResolvedValue(MOCK_AGENT_WITH_CONFIG);
+  mockUseModel.mockResolvedValueOnce('ACTION_RESP');
+  mockParseKeyValueXml.mockReturnValueOnce({
+    thought: 'trade',
+    action: 'OPEN',
+    parameters: {},
+    isFinish: 'false',
+  });
+  await expect(dispatchAgentChat(BASE_PARAMS)).rejects.toThrow(
+    'Unknown or ambiguous agent action'
+  );
+  expect(mockProcessActions).not.toHaveBeenCalled();
+  expect(mockUseModel).toHaveBeenCalledTimes(1);
+});
+
+it('passes the required conversation into the final summary template', async () => {
+  setupSuccessfulImmediateFinish();
+  await dispatchAgentChat(BASE_PARAMS);
+  const summary = mockComposePromptFromState.mock.calls.at(-1)?.[0];
+  expect(summary?.state.values.recentMessages).toBe(
+    'No previous conversation history.'
+  );
+  expect(summary?.template).toContain('{{recentMessages}}');
 });

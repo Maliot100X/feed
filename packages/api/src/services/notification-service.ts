@@ -11,14 +11,15 @@ import {
   eq,
   gt,
   hasBlocked,
+  isNotNull,
   notifications,
   users,
-} from '@babylon/db';
+} from '@feed/db';
 import {
   generateSnowflakeId,
   logger,
   type NotificationData,
-} from '@babylon/shared';
+} from '@feed/shared';
 import { CACHE_KEYS, invalidateCachePattern } from '../cache/cache-service';
 import {
   type EmailNotificationCategory,
@@ -37,7 +38,6 @@ export type NotificationType =
   | 'appeal_status'
   | 'points_received'
   | 'group_invite'
-  | 'nft_access_revoked'
   | 'market_resolved'
   | 'hourly_summary'
   | 'daily_summary'
@@ -259,7 +259,10 @@ export async function createNotification(
     const inserted = await db
       .insert(notifications)
       .values(values)
-      .onConflictDoNothing({ target: notifications.dedupeKey })
+      .onConflictDoNothing({
+        target: notifications.dedupeKey,
+        where: isNotNull(notifications.dedupeKey),
+      })
       .returning({ id: notifications.id });
 
     if (inserted.length === 0) {
@@ -431,13 +434,6 @@ export async function notifyReplyToComment(
     return;
   }
 
-  // Use commentId to create notification context
-  const notificationContext = {
-    commentId,
-    replyCommentId,
-    postId,
-  };
-
   const result = await db
     .select({
       displayName: users.displayName,
@@ -452,15 +448,18 @@ export async function notifyReplyToComment(
     replyAuthor?.displayName || replyAuthor?.username || 'Someone';
   const message = `${userName} replied to your comment`;
 
-  // Use notificationContext when creating the notification
+  // Each reply is its own event: key on the reply comment so a second reply
+  // to the same parent is not suppressed by the time-window dedupe, while a
+  // retried notification for the same reply is.
   await createNotification({
     userId: commentAuthorId,
     type: 'reply',
     actorId: replyAuthorId,
-    postId: notificationContext.postId,
-    commentId: notificationContext.commentId,
+    postId,
+    commentId,
     title: 'New Reply',
     message,
+    dedupeKey: `reply:${replyCommentId}`,
   });
 }
 
@@ -546,12 +545,12 @@ export async function notifyMention(
  */
 export async function notifyNewAccount(userId: string): Promise<void> {
   const message =
-    'Welcome to Babylon! Edit your profile details to earn free points and unlock rewards.';
+    'Welcome to Feed! Edit your profile details to earn free points and unlock rewards.';
 
   await createNotification({
     userId,
     type: 'system',
-    title: 'Welcome to Babylon',
+    title: 'Welcome to Feed',
     message,
   });
 }
@@ -643,9 +642,9 @@ export async function notifyGroupChatInvite(
   const inviterName = inviter?.displayName || inviter?.username || 'Someone';
   const message = `${inviterName} invited you to "${chatName}"`;
 
-  // Create notification with groupId and inviteId for proper linking
-  await db.insert(notifications).values({
-    id: await generateSnowflakeId(),
+  // createNotification applies user-existence and block checks, cache
+  // invalidation and email preferences (a direct insert skipped them all).
+  await createNotification({
     userId,
     type: 'group_invite',
     actorId: inviterId,
@@ -653,6 +652,7 @@ export async function notifyGroupChatInvite(
     message,
     groupId: groupId ?? undefined,
     inviteId,
+    ...(inviteId && { dedupeKey: `group_invite:${inviteId}` }),
   });
 }
 
@@ -845,28 +845,4 @@ export async function notifyGroupChatMessage(
     );
 
   await Promise.all(notificationPromises);
-}
-
-/**
- * Create notification when user is removed from an NFT-gated chat
- * This happens when the user no longer owns the required NFT
- */
-export async function notifyNftAccessRevoked(
-  userId: string,
-  chatId: string,
-  chatName: string,
-  reason: string
-): Promise<void> {
-  const message =
-    reason === 'No wallet connected'
-      ? `You were removed from "${chatName}" because your wallet was disconnected`
-      : `You were removed from "${chatName}" because you no longer own the required NFT`;
-
-  await createNotification({
-    userId,
-    type: 'nft_access_revoked',
-    chatId,
-    title: 'NFT Access Revoked',
-    message,
-  });
 }

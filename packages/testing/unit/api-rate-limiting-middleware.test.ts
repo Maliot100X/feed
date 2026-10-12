@@ -3,10 +3,10 @@ import { afterEach, beforeEach, describe, expect, mock, test } from 'bun:test';
 // Restore real modules before importing to prevent leakage from other tests
 const _realNextServer = await import('next/server');
 mock.module('next/server', () => _realNextServer);
-const _realApi = await import('@babylon/api');
-mock.module('@babylon/api', () => _realApi);
-const _realShared = await import('@babylon/shared');
-mock.module('@babylon/shared', () => _realShared);
+const _realApi = await import('@feed/api');
+mock.module('@feed/api', () => _realApi);
+const _realShared = await import('@feed/shared');
+mock.module('@feed/shared', () => _realShared);
 
 const { NextRequest } = _realNextServer;
 
@@ -95,7 +95,7 @@ describe('API rate-limiting middleware', () => {
     const content = 'Repeat me';
 
     expect(
-      checkRateLimitAndDuplicates(
+      await checkRateLimitAndDuplicates(
         userId,
         content,
         RATE_LIMIT_CONFIGS.CREATE_POST,
@@ -103,7 +103,7 @@ describe('API rate-limiting middleware', () => {
       )
     ).toBeNull();
 
-    const duplicateResponse = checkRateLimitAndDuplicates(
+    const duplicateResponse = await checkRateLimitAndDuplicates(
       userId,
       content,
       RATE_LIMIT_CONFIGS.CREATE_POST,
@@ -125,7 +125,7 @@ describe('API rate-limiting middleware', () => {
       index += 1
     ) {
       expect(
-        checkRateLimitAndDuplicates(
+        await checkRateLimitAndDuplicates(
           userId,
           null,
           RATE_LIMIT_CONFIGS.CREATE_POST
@@ -133,7 +133,7 @@ describe('API rate-limiting middleware', () => {
       ).toBeNull();
     }
 
-    const limitedResponse = checkRateLimitAndDuplicates(
+    const limitedResponse = await checkRateLimitAndDuplicates(
       userId,
       null,
       RATE_LIMIT_CONFIGS.CREATE_POST

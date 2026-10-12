@@ -4,6 +4,14 @@
  * Returns the agent's balance, P&L, open positions (with IDs), and recent trades.
  */
 
+import type {
+  Action,
+  ActionResult,
+  HandlerCallback,
+  IAgentRuntime,
+  Memory,
+  State,
+} from '@elizaos/core';
 import {
   agentTrades,
   and,
@@ -15,17 +23,9 @@ import {
   perpPositions,
   positions,
   users,
-} from '@babylon/db';
-import { calculatePortfolioBreakdown, WalletService } from '@babylon/engine';
-import type { MessageTag } from '@babylon/shared';
-import type {
-  Action,
-  ActionResult,
-  HandlerCallback,
-  IAgentRuntime,
-  Memory,
-  State,
-} from '@elizaos/core';
+} from '@feed/db';
+import { calculatePortfolioBreakdown, WalletService } from '@feed/engine';
+import type { MessageTag } from '@feed/shared';
 import { logger } from '../../../../shared/logger';
 
 /** Extended ActionResult with optional tag for UI */

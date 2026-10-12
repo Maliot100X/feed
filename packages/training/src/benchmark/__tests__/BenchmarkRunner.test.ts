@@ -158,6 +158,39 @@ describe('BenchmarkDataGenerator - Data Generation', () => {
     );
   });
 
+  test('ticks do not mutate initial state or earlier snapshots', async () => {
+    const generator = new BenchmarkDataGenerator({
+      ...baseConfig,
+      durationMinutes: 240,
+    });
+    const snapshot = await generator.generate();
+    const firstTick = snapshot.ticks[0];
+    const lastTick = snapshot.ticks[snapshot.ticks.length - 1];
+    expect(firstTick).toBeDefined();
+    expect(lastTick).toBeDefined();
+    if (!firstTick || !lastTick) return;
+
+    for (const perp of snapshot.initialState.perpetualMarkets) {
+      const history = snapshot.groundTruth.priceHistory[perp.ticker] ?? [];
+      const firstPrice = history[0]?.price;
+      const lastPrice = history[snapshot.ticks.length - 1]?.price;
+      const atFirstTick = firstTick.state.perpetualMarkets.find(
+        (p) => p.ticker === perp.ticker
+      );
+      const atLastTick = lastTick.state.perpetualMarkets.find(
+        (p) => p.ticker === perp.ticker
+      );
+
+      expect(atFirstTick?.price).toBe(firstPrice);
+      expect(atLastTick?.price).toBe(lastPrice);
+      // initialState keeps its pre-simulation price instead of the final one.
+      if (firstPrice !== lastPrice) {
+        expect(perp.price).not.toBe(lastPrice);
+      }
+      expect(atFirstTick).not.toBe(atLastTick);
+    }
+  });
+
   test('generates correct number of markets', async () => {
     const generator = new BenchmarkDataGenerator(baseConfig);
     const snapshot = await generator.generate();
@@ -228,11 +261,19 @@ describe('BenchmarkDataGenerator - Data Generation', () => {
     const snapshot1 = await generator1.generate();
     const snapshot2 = await generator2.generate();
 
-    // Prices should differ with different seeds
-    const price1 = snapshot1.initialState.perpetualMarkets[0]?.price;
-    const price2 = snapshot2.initialState.perpetualMarkets[0]?.price;
+    // Simulated price paths differ with different seeds. (Initial prices are
+    // fixed per ticker; this test previously compared initialState, which only
+    // differed because ticks leaked final prices into it.)
+    const ticker = snapshot1.initialState.perpetualMarkets[0]?.ticker ?? '';
+    const path1 = snapshot1.groundTruth.priceHistory[ticker]?.map(
+      (p) => p.price
+    );
+    const path2 = snapshot2.groundTruth.priceHistory[ticker]?.map(
+      (p) => p.price
+    );
 
-    expect(price1).not.toBe(price2);
+    expect(path1?.length).toBeGreaterThan(0);
+    expect(path1).not.toEqual(path2);
   });
 });
 

@@ -6,7 +6,7 @@
  */
 'use client';
 
-import { cn } from '@babylon/shared';
+import { cn } from '@feed/shared';
 import {
   Activity,
   AlertCircle,
@@ -26,7 +26,7 @@ import {
 } from 'lucide-react';
 import { useCallback, useEffect, useState, useTransition } from 'react';
 import { Skeleton } from '@/components/shared/Skeleton';
-import { apiUrl } from '@/utils/api-url';
+import { apiFetch } from '@/utils/api-fetch';
 
 type SystemStatusLevel = 'healthy' | 'warning' | 'critical';
 
@@ -93,7 +93,7 @@ interface SystemStatusData {
   };
   llm: {
     callsLast24h: number;
-    errorsLastHour: number;
+    errorsLastHour: number | null;
   };
   realtime: {
     outboxPending: number;
@@ -317,26 +317,33 @@ export function SystemHealthTab() {
   const [loading, setLoading] = useState(true);
   const [isRefreshing, startRefresh] = useTransition();
   const [lastUpdated, setLastUpdated] = useState<Date | null>(null);
+  // Set when the latest poll failed; the last snapshot is then stale and must
+  // not keep presenting as current/healthy.
+  const [fetchError, setFetchError] = useState<string | null>(null);
 
   const fetchHealth = useCallback((showRefreshing = false) => {
     const runFetch = async () => {
-      const response = await fetch(apiUrl('/api/admin/stats/system'));
-
-      if (!response.ok) {
+      try {
+        const response = await apiFetch('/api/admin/stats/system');
+        if (!response.ok) {
+          setFetchError(`Status endpoint returned ${response.status}`);
+          return;
+        }
+        const result: SystemStatusData = await response.json();
+        setData(result);
+        setLastUpdated(new Date());
+        setFetchError(null);
+      } catch {
+        setFetchError('Status endpoint unreachable');
+      } finally {
         setLoading(false);
-        return;
       }
-
-      const result: SystemStatusData = await response.json();
-      setData(result);
-      setLastUpdated(new Date());
-      setLoading(false);
     };
 
     if (showRefreshing) {
-      startRefresh(() => {
-        void runFetch();
-      });
+      // Return the promise so the transition (and the Refresh lock) lasts
+      // until the request settles.
+      startRefresh(runFetch);
       return;
     }
 
@@ -375,12 +382,25 @@ export function SystemHealthTab() {
       <div className="py-12 text-center text-muted-foreground">
         <Server className="mx-auto mb-3 h-12 w-12 opacity-50" />
         <p>Failed to load system health data</p>
+        {fetchError ? <p className="mt-1 text-sm">{fetchError}</p> : null}
       </div>
     );
   }
 
   return (
     <div className="space-y-6">
+      {fetchError ? (
+        <div
+          role="alert"
+          className="rounded-lg border border-yellow-500/30 bg-yellow-500/10 p-3 text-sm text-yellow-600 dark:text-yellow-400"
+        >
+          Monitoring data is stale: {fetchError}. Showing the last snapshot
+          {lastUpdated
+            ? ` from ${formatTimeSince(Date.now() - lastUpdated.getTime())}`
+            : ''}
+          .
+        </div>
+      ) : null}
       <div className="flex flex-wrap items-center justify-between gap-4">
         <div className="flex items-center gap-4">
           <div
@@ -476,13 +496,21 @@ export function SystemHealthTab() {
         <MetricCard
           icon={HardDrive}
           label="Heap usage"
-          value={`${data.performance.memory.usagePercent}%`}
+          value={
+            data.performance.memory
+              ? `${data.performance.memory.usagePercent}%`
+              : 'n/a'
+          }
           subValue={`${data.realtime.outboxPending} pending realtime events`}
         />
         <MetricCard
           icon={Activity}
           label="LLM errors"
-          value={String(data.llm.errorsLastHour)}
+          value={
+            data.llm.errorsLastHour === null
+              ? 'n/a'
+              : String(data.llm.errorsLastHour)
+          }
           subValue={`${data.llm.callsLast24h.toLocaleString()} calls in the last 24h`}
         />
       </div>

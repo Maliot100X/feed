@@ -7,17 +7,20 @@ import { useEffect } from 'react';
 import { AchievementsTab } from '@/components/rewards/v2/achievements-tab';
 import { PageContainer } from '@/components/shared/PageContainer';
 import { useAuth } from '@/hooks/useAuth';
+import { useLoginModal } from '@/hooks/useLoginModal';
 
 export default function AchievementsPage() {
   const router = useRouter();
-  const { ready, authenticated, login } = useAuth();
+  const { ready, authenticated } = useAuth();
+  const { queueLoginModal } = useLoginModal();
 
   useEffect(() => {
     if (!ready || authenticated) return;
-    router.push('/feed');
-    const timer = setTimeout(() => login(), 500);
-    return () => clearTimeout(timer);
-  }, [ready, authenticated, router, login]);
+    // Queue the login modal before leaving: a timer started here would be
+    // cancelled by this page's unmount and the modal would never open.
+    queueLoginModal();
+    router.replace('/feed');
+  }, [ready, authenticated, router, queueLoginModal]);
 
   return (
     <PageContainer

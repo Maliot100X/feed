@@ -1,8 +1,8 @@
 'use client';
 
-import { cn, GROUP_CONFIG, getCurrentChainId, logger } from '@babylon/shared';
+import { cn, GROUP_CONFIG, logger } from '@feed/shared';
 
-import { Check, Loader2, Search, Shield, Users, X } from 'lucide-react';
+import { Check, Loader2, Search, Users, X } from 'lucide-react';
 import { useEffect, useState } from 'react';
 import { Avatar } from '@/components/shared/Avatar';
 import { useAuth } from '@/hooks/useAuth';
@@ -61,10 +61,6 @@ export function CreateGroupModal({
   const [searching, setSearching] = useState(false);
   const [creating, setCreating] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [nftGated, setNftGated] = useState(false);
-  const [nftContractAddress, setNftContractAddress] = useState('');
-  const [nftTokenId, setNftTokenId] = useState<string>('');
-  const [nftChainId, setNftChainId] = useState<number | undefined>(undefined);
 
   // Reset state when modal opens/closes
   useEffect(() => {
@@ -74,10 +70,6 @@ export function CreateGroupModal({
       setSearchResults([]);
       setSelectedMembers([]);
       setError(null);
-      setNftGated(false);
-      setNftContractAddress('');
-      setNftTokenId('');
-      setNftChainId(undefined);
     }
   }, [isOpen]);
 
@@ -177,24 +169,10 @@ export function CreateGroupModal({
     setCreating(true);
     setError(null);
 
-    if (nftGated && !nftContractAddress.trim()) {
-      setError('Contract address required');
-      setCreating(false);
-      return;
-    }
-
     const token = await getAccessToken();
     const requestBody = {
       name: finalGroupName,
       memberIds: selectedMembers.map((m) => m.id),
-      ...(nftGated &&
-        nftContractAddress.trim() && {
-          requiredNftContractAddress: nftContractAddress.trim(),
-          requiredNftTokenId: nftTokenId.trim()
-            ? parseInt(nftTokenId.trim(), 10)
-            : null,
-          requiredNftChainId: nftChainId ?? getCurrentChainId(),
-        }),
     };
 
     try {
@@ -425,130 +403,6 @@ export function CreateGroupModal({
                 </p>
               </div>
             )}
-
-            {/* NFT Gating Section */}
-            <div className="mt-6 space-y-4 border-border border-t pt-4">
-              <div className="flex items-center justify-between">
-                <div className="flex items-center gap-2">
-                  <Shield className="h-4 w-4 text-primary" />
-                  <label className="font-medium text-sm">
-                    NFT Gating (Optional)
-                  </label>
-                </div>
-                <button
-                  type="button"
-                  onClick={() => {
-                    setNftGated(!nftGated);
-                    if (!nftGated) {
-                      setNftChainId(getCurrentChainId());
-                    } else {
-                      setNftContractAddress('');
-                      setNftTokenId('');
-                      setNftChainId(undefined);
-                    }
-                  }}
-                  className={cn(
-                    'relative inline-flex h-6 w-11 items-center rounded-full transition-colors',
-                    nftGated ? 'bg-primary' : 'bg-muted'
-                  )}
-                  disabled={creating}
-                >
-                  <span
-                    className={cn(
-                      'inline-block h-4 w-4 transform rounded-full bg-white transition-transform',
-                      nftGated ? 'translate-x-6' : 'translate-x-1'
-                    )}
-                  />
-                </button>
-              </div>
-
-              {nftGated && (
-                <div className="space-y-3 rounded-lg border border-border bg-sidebar p-4">
-                  <p className="text-muted-foreground text-xs">
-                    Users must hold an NFT from the specified contract to join
-                    this group
-                  </p>
-
-                  <div>
-                    <label className="mb-2 block font-medium text-sm">
-                      NFT Contract Address{' '}
-                      <span className="font-normal text-red-500">*</span>
-                    </label>
-                    <input
-                      type="text"
-                      placeholder="0x..."
-                      value={nftContractAddress}
-                      onChange={(e) => setNftContractAddress(e.target.value)}
-                      className="w-full rounded-lg border border-border bg-background px-4 py-2 font-mono text-sm transition-colors focus:border-primary focus:outline-none"
-                      disabled={creating}
-                    />
-                    <p className="mt-1 text-muted-foreground text-xs">
-                      ERC721 contract address (required)
-                    </p>
-                  </div>
-
-                  <div>
-                    <label className="mb-2 block font-medium text-sm">
-                      Token ID{' '}
-                      <span className="font-normal text-muted-foreground text-xs">
-                        (Optional - leave blank for any token from collection)
-                      </span>
-                    </label>
-                    <input
-                      type="text"
-                      placeholder="123"
-                      value={nftTokenId}
-                      onChange={(e) => {
-                        const value = e.target.value;
-                        if (value === '' || /^\d+$/.test(value)) {
-                          setNftTokenId(value);
-                        }
-                      }}
-                      className="w-full rounded-lg border border-border bg-background px-4 py-2 text-sm transition-colors focus:border-primary focus:outline-none"
-                      disabled={creating}
-                    />
-                    <p className="mt-1 text-muted-foreground text-xs">
-                      Specific token ID, or leave blank to allow any token from
-                      the collection
-                    </p>
-                  </div>
-
-                  <div>
-                    <label className="mb-2 block font-medium text-sm">
-                      Chain
-                    </label>
-                    <select
-                      value={nftChainId ?? getCurrentChainId()}
-                      onChange={(e) =>
-                        setNftChainId(parseInt(e.target.value, 10))
-                      }
-                      className="w-full rounded-lg border border-border bg-background px-4 py-2 text-sm transition-colors focus:border-primary focus:outline-none"
-                      disabled={creating}
-                    >
-                      <option value={31337}>Local (Hardhat)</option>
-                      <option value={84532}>Base Sepolia</option>
-                      <option value={8453}>Base Mainnet</option>
-                      <option value={1}>Ethereum Mainnet</option>
-                      <option value={11155111}>Ethereum Sepolia</option>
-                    </select>
-                    <p className="mt-1 text-muted-foreground text-xs">
-                      Blockchain network for the NFT contract
-                    </p>
-                  </div>
-
-                  {nftContractAddress.trim() && (
-                    <div className="rounded-lg border border-blue-500/20 bg-blue-500/10 p-3">
-                      <p className="text-blue-700 text-xs dark:text-blue-300">
-                        <strong>NFT Requirement:</strong>{' '}
-                        {nftTokenId.trim()
-                          ? `Token #${nftTokenId.trim()} from ${nftContractAddress.slice(0, 6)}...${nftContractAddress.slice(-4)}`
-                          : `Any token from ${nftContractAddress.slice(0, 6)}...${nftContractAddress.slice(-4)}`}
-                      </p>
-                    </div>
-                  )}
-                </div>
-              )}
-            </div>
           </div>
 
           {/* Preview of auto-generated name */}

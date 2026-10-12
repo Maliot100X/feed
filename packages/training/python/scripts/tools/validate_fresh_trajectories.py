@@ -23,7 +23,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 # Add parent to path for imports
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from src.training.rewards import (
     TrajectoryRewardInputs,

@@ -17,7 +17,7 @@ Use the capacity planner before changing local or Nebius training recipes.
 ## Canonical Entrypoint
 
 ```bash
-cd /Users/shawwalters/babylon-workspace/babylon/packages/training/python
+cd packages/training/python
 python3 scripts/plan_qwen_training.py --format markdown
 ```
 
@@ -55,7 +55,7 @@ python3 scripts/plan_qwen_training.py \
 The Nebius unified matrix runner now uses the canonical Qwen registry and rejects known single-GPU configurations that do not fit the requested H100/H200 target:
 
 ```bash
-python3 scripts/run_nebius_unified_matrix.py \
+python3 scripts/tools/run_nebius_unified_matrix.py \
   --base-model Qwen/Qwen3.5-9B \
   --gpu-type h200 \
   --dry-run

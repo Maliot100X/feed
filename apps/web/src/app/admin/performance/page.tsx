@@ -106,22 +106,23 @@ interface NetworkStats {
     }>;
   };
   server: {
+    /** null on Cloudflare Workers, which have no per-process metrics. */
     uptime: {
       seconds: number;
       formatted: string;
-    };
+    } | null;
     memory: {
       heapUsed: number;
       heapTotal: number;
       external: number;
       rss: number;
-    };
+    } | null;
     env: string;
     pid: number;
   };
   health: {
     database: 'healthy' | 'warning' | 'critical';
-    memory: 'healthy' | 'warning' | 'critical';
+    memory: 'healthy' | 'warning' | 'critical' | 'unavailable';
     overall: 'healthy' | 'warning' | 'critical';
   };
 }
@@ -236,9 +237,11 @@ export default function AdminPerformancePage() {
   }, [autoRefresh, fetchLoadTestStatus, fetchStats]);
 
   const getHealthBadgeVariant = (
-    health: 'healthy' | 'warning' | 'critical'
-  ): 'default' | 'secondary' | 'destructive' => {
+    health: 'healthy' | 'warning' | 'critical' | 'unavailable'
+  ): 'default' | 'secondary' | 'destructive' | 'outline' => {
     switch (health) {
+      case 'unavailable':
+        return 'outline';
       case 'healthy':
         return 'default';
       case 'warning':
@@ -317,10 +320,12 @@ export default function AdminPerformancePage() {
                 <Badge variant={getHealthBadgeVariant(stats.health.memory)}>
                   {stats.health.memory.toUpperCase()}
                 </Badge>
-                <span className="text-muted-foreground text-sm">
-                  {stats.server.memory.heapUsed.toFixed(0)}MB /{' '}
-                  {stats.server.memory.heapTotal.toFixed(0)}MB
-                </span>
+                {stats.server.memory && (
+                  <span className="text-muted-foreground text-sm">
+                    {stats.server.memory.heapUsed.toFixed(0)}MB /{' '}
+                    {stats.server.memory.heapTotal.toFixed(0)}MB
+                  </span>
+                )}
               </div>
             </CardContent>
           </Card>
@@ -514,7 +519,7 @@ export default function AdminPerformancePage() {
             <div className="grid grid-cols-2 gap-4 text-sm md:grid-cols-4">
               <div>
                 <div className="font-semibold">Uptime</div>
-                <div>{stats.server.uptime.formatted}</div>
+                <div>{stats.server.uptime?.formatted ?? '—'}</div>
               </div>
               <div>
                 <div className="font-semibold">Environment</div>

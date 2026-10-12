@@ -91,39 +91,7 @@ export async function retryIfRetryable<T>(
   operation: () => Promise<T>,
   options: RetryOptions = {}
 ): Promise<T> {
-  const opts = { ...DEFAULT_OPTIONS, ...options };
-  let lastError: Error | undefined;
-
-  for (let attempt = 0; attempt < opts.maxAttempts; attempt++) {
-    try {
-      return await operation();
-    } catch (error) {
-      lastError = error as Error;
-
-      // Check if we should retry
-      if (!isRetryableError(error)) {
-        throw error; // Not retryable, throw immediately
-      }
-
-      // Don't retry if we've exhausted attempts
-      if (attempt === opts.maxAttempts - 1) {
-        throw error;
-      }
-
-      // Calculate delay with exponential backoff
-      const delay = Math.min(
-        opts.initialDelayMs * opts.backoffMultiplier ** attempt,
-        opts.maxDelayMs
-      );
-
-      // Call optional retry callback
-      options.onRetry?.(attempt + 1, lastError, delay);
-
-      await sleep(delay);
-    }
-  }
-
-  throw lastError || new Error('Operation failed with unknown error');
+  return retryWithCondition(operation, isRetryableError, options);
 }
 
 /**

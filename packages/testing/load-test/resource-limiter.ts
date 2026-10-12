@@ -5,7 +5,7 @@
  * backs off or stops if memory/CPU gets too high
  */
 
-import { logger } from '@babylon/shared';
+import { logger } from '@feed/shared';
 
 export interface ResourceLimits {
   maxMemoryMB: number;
@@ -36,6 +36,7 @@ export class ResourceLimiter {
    * Start monitoring resources
    */
   start(onStop?: () => void): void {
+    this.clearTimer();
     this.stopped = false;
     this.onStopCallback = onStop;
 
@@ -58,12 +59,7 @@ export class ResourceLimiter {
    * Stop monitoring
    */
   stop(): void {
-    if (this.checkInterval) {
-      clearInterval(this.checkInterval);
-      this.checkInterval = null;
-    }
-    this.stopped = false;
-
+    this.clearTimer();
     logger.info('Resource limiter stopped', undefined, 'ResourceLimiter');
   }
 
@@ -190,11 +186,20 @@ export class ResourceLimiter {
       'ResourceLimiter'
     );
 
+    // Dispose the timer without resetting the stopped state: admission stays
+    // blocked until start() is called again.
+    this.clearTimer();
+
     if (this.onStopCallback) {
       this.onStopCallback();
     }
+  }
 
-    this.stop();
+  private clearTimer(): void {
+    if (this.checkInterval) {
+      clearInterval(this.checkInterval);
+      this.checkInterval = null;
+    }
   }
 
   /**

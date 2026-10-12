@@ -5,7 +5,7 @@
  * Similar to A2A's JsonRpcTransportHandler
  */
 
-import type { JsonValue, StringRecord } from '@babylon/shared';
+import type { JsonValue, StringRecord } from '@feed/shared';
 import { authenticateAgent } from '../auth/agent-auth';
 import { getAvailableTools, getInitializeResult } from '../server/mcp-server';
 import type {
@@ -24,11 +24,13 @@ import { executeTool } from './tool-handlers';
 
 /**
  * MCP Request Handler
- * Processes JSON-RPC 2.0 requests and routes to appropriate handlers
+ * Processes JSON-RPC 2.0 requests and routes to appropriate handlers.
+ *
+ * Stateless: the auth context is passed per request and never retained, so a
+ * shared handler instance cannot leak one caller's credentials into another
+ * caller's request.
  */
 export class MCPRequestHandler {
-  private authContext: MCPAuthContext | null = null;
-
   /**
    * Handle JSON-RPC request
    */
@@ -36,11 +38,6 @@ export class MCPRequestHandler {
     request: JsonRpcRequest,
     authContext?: MCPAuthContext
   ): Promise<JsonRpcResponse> {
-    // Store auth context if provided
-    if (authContext) {
-      this.authContext = authContext;
-    }
-
     // Route to appropriate handler based on method
     switch (request.method) {
       case MCPMethod.INITIALIZE:
@@ -50,7 +47,7 @@ export class MCPRequestHandler {
       case MCPMethod.TOOLS_LIST:
         return await this.handleToolsList(request);
       case MCPMethod.TOOLS_CALL:
-        return await this.handleToolsCall(request);
+        return await this.handleToolsCall(request, authContext);
       default:
         return this.createErrorResponse(
           request.id,
@@ -128,10 +125,11 @@ export class MCPRequestHandler {
    * Handle tools/call request
    */
   private async handleToolsCall(
-    request: JsonRpcRequest
+    request: JsonRpcRequest,
+    authContext: MCPAuthContext | undefined
   ): Promise<JsonRpcResponse> {
     // Require authentication for tool calls
-    if (!this.authContext) {
+    if (!authContext) {
       return this.createErrorResponse(
         request.id,
         -32000,
@@ -151,7 +149,7 @@ export class MCPRequestHandler {
 
     // Authenticate agent using API key
     const agent = await authenticateAgent({
-      apiKey: this.authContext.apiKey,
+      apiKey: authContext.apiKey,
     });
 
     if (!agent) {

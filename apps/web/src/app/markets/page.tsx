@@ -111,9 +111,6 @@ export default function MarketsPage() {
         <BuyPointsModal
           isOpen={showBuyPointsModal}
           onClose={() => setShowBuyPointsModal(false)}
-          onSuccess={() => {
-            invalidateWalletBalance();
-          }}
         />
       )}
     </PageContainer>

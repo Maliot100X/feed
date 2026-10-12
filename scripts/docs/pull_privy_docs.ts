@@ -12,6 +12,7 @@
  */
 
 import { mkdir } from 'node:fs/promises';
+import { runPool } from './run-pool';
 
 const DEFAULT_BASE_URL = 'https://docs.privy.io';
 const SITEMAP_PATH = '/sitemap.xml';
@@ -100,11 +101,9 @@ async function pullDocs(options: Options) {
   }
   console.log(`Discovered ${pages.length} pages from sitemap.`);
 
-  let active = 0;
-  let idx = 0;
   let ok = 0;
-  let skipped = 0;
-  const results: Promise<void>[] = [];
+  const skipped = 0;
+  let failed = 0;
 
   async function worker(page: Page) {
     const mdUrl = `${page.url}.md`;
@@ -114,26 +113,14 @@ async function pullDocs(options: Options) {
       ok++;
       console.log(`[ok] ${page.output}`);
     } catch (err) {
-      skipped++;
+      failed++;
       console.log(`[err] ${page.path}: ${(err as Error).message}`);
     }
   }
 
-  function next(): void {
-    if (idx >= pages.length) return;
-    const page = pages[idx++];
-    active++;
-    const p = worker(page).finally(() => {
-      active--;
-      next();
-    });
-    results.push(p);
-    if (active < options.workers && idx < pages.length) next();
-  }
-
-  for (let i = 0; i < options.workers && i < pages.length; i++) next();
-  await Promise.all(results);
-  console.log(`Done. ok=${ok} skipped=${skipped}`);
+  await runPool(pages, options.workers, worker);
+  console.log(`Done. ok=${ok} skipped=${skipped} failed=${failed}`);
+  if (failed > 0) process.exitCode = 1;
 }
 
 pullDocs(opts).catch((err) => {

@@ -7,19 +7,9 @@
  * @module services/world-facts-service
  */
 
-import type { WorldFact } from '@babylon/db';
-import {
-  and,
-  db,
-  desc,
-  eq,
-  gte,
-  isNull,
-  lte,
-  or,
-  worldFacts,
-} from '@babylon/db';
-import { generateSnowflakeId, logger } from '@babylon/shared';
+import type { WorldFact } from '@feed/db';
+import { and, db, desc, eq, gte, isNull, lte, or, worldFacts } from '@feed/db';
+import { generateSnowflakeId, logger } from '@feed/shared';
 import {
   buildDailyTopicPromptContext,
   dailyTopicService,

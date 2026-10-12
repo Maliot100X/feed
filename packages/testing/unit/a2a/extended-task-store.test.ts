@@ -6,7 +6,7 @@
 
 import { beforeEach, describe, expect, it } from 'bun:test';
 import type { Task } from '@a2a-js/sdk';
-import { ExtendedTaskStore } from '@babylon/a2a';
+import { ExtendedTaskStore } from '@feed/a2a';
 
 describe('A2A ExtendedTaskStore', () => {
   let store: ExtendedTaskStore;
@@ -263,6 +263,75 @@ describe('A2A ExtendedTaskStore', () => {
       if (!firstTask) throw new Error('Expected task to exist');
       expect(firstTask.artifacts).toBeDefined();
       expect(firstTask.artifacts?.length).toBe(1);
+    });
+  });
+
+  describe('lifecycle and validation regressions', () => {
+    it('clear() removes tasks from load() as well as list()', async () => {
+      await store.save(createMockTask('task-clear', 'submitted'));
+      await store.clear();
+      expect(await store.load('task-clear')).toBeUndefined();
+      expect((await store.list()).totalSize).toBe(0);
+    });
+
+    it('historyLength 0 returns an empty history', async () => {
+      const task = createMockTask('task-hist', 'working');
+      task.history = [
+        {
+          kind: 'message',
+          messageId: 'm1',
+          role: 'user',
+          parts: [{ kind: 'text', text: 'hi' }],
+        },
+      ];
+      await store.save(task);
+      const result = await store.list({ historyLength: 0 });
+      expect(result.tasks[0]?.history).toEqual([]);
+      // Projection does not mutate the stored task.
+      expect((await store.load('task-hist'))?.history).toHaveLength(1);
+    });
+
+    it('rejects invalid pagination input', async () => {
+      await expect(store.list({ pageToken: 'abc' })).rejects.toThrow(
+        'Invalid pageToken'
+      );
+      await expect(store.list({ pageToken: '-1' })).rejects.toThrow(
+        'Invalid pageToken'
+      );
+      await expect(store.list({ pageSize: 0 })).rejects.toThrow(
+        'Invalid pageSize'
+      );
+      await expect(store.list({ pageSize: 2.5 })).rejects.toThrow(
+        'Invalid pageSize'
+      );
+      await expect(store.list({ historyLength: -1 })).rejects.toThrow(
+        'Invalid historyLength'
+      );
+    });
+
+    it('traverses every task exactly once across pages', async () => {
+      for (let i = 0; i < 25; i++) {
+        const task = createMockTask(`task-page-${i}`, 'completed');
+        task.status.timestamp = new Date(1_700_000_000_000 + i).toISOString();
+        await store.save(task);
+      }
+      const seen: string[] = [];
+      let pageToken: string | undefined;
+      do {
+        const page = await store.list({ pageSize: 10, pageToken });
+        seen.push(...page.tasks.map((t) => t.id));
+        pageToken = page.nextPageToken || undefined;
+      } while (pageToken);
+      expect(seen).toHaveLength(25);
+      expect(new Set(seen).size).toBe(25);
+      expect(seen[0]).toBe('task-page-24');
+    });
+
+    it('returns copies so callers cannot mutate stored tasks', async () => {
+      await store.save(createMockTask('task-copy', 'working'));
+      const loaded = await store.load('task-copy');
+      loaded!.contextId = 'tampered';
+      expect((await store.load('task-copy'))?.contextId).toBe('ctx-001');
     });
   });
 });

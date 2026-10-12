@@ -41,7 +41,7 @@ from run_pipeline import CanonicalPipeline, _find_ancestor_with_child
 
 def test_find_ancestor_with_child_resolves_repo_and_workspace_roots(tmp_path: Path):
     workspace_root = tmp_path / "workspace"
-    repo_root = workspace_root / "babylon"
+    repo_root = workspace_root / "feed"
     script_dir = repo_root / "packages" / "training" / "python" / "scripts"
     script_dir.mkdir(parents=True)
     (repo_root / "packages" / "training").mkdir(parents=True, exist_ok=True)
@@ -836,7 +836,7 @@ async def test_served_eval_stage_runs_tinker_remote_comparison(tmp_path: Path):
             "training_backend": "tinker",
             "training_base_model": "Qwen/Qwen3.5-4B",
             "training_remote_base_ref": "tinker://run/train/sampler_weights/000000",
-            "training_remote_ref": "babylon-remote-final",
+            "training_remote_ref": "feed-remote-final",
             "trained_model_path": tmp_path / "tinker_trained",
             "served_eval_path": None,
             "served_eval_summary": None,
@@ -1567,9 +1567,7 @@ async def test_main_returns_failure_and_writes_report_on_pipeline_error(
 
 
 def test_run_pipeline_cli_prepare_only_real_smoke(tmp_path: Path) -> None:
-    venv_python = Path(__file__).resolve().parents[1] / ".venv" / "bin" / "python"
-    if not venv_python.exists():
-        pytest.skip("training venv is not available for real smoke execution")
+    venv_python = Path(sys.executable)
 
     export_dir = tmp_path / "export"
     export_dir.mkdir()
@@ -1619,9 +1617,7 @@ def test_run_pipeline_cli_prepare_only_real_smoke(tmp_path: Path) -> None:
 
 
 def test_run_pipeline_cli_failure_writes_failed_stage_report(tmp_path: Path) -> None:
-    venv_python = Path(__file__).resolve().parents[1] / ".venv" / "bin" / "python"
-    if not venv_python.exists():
-        pytest.skip("training venv is not available for real smoke execution")
+    venv_python = Path(sys.executable)
 
     export_dir = tmp_path / "bad-export"
     export_dir.mkdir()
@@ -1665,3 +1661,20 @@ def test_run_pipeline_cli_failure_writes_failed_stage_report(tmp_path: Path) -> 
     report = json.loads((output_dir / "pipeline_report.json").read_text(encoding="utf-8"))
     assert report["stages"]["sft"]["status"] == "failed"
     assert "Insufficient training data" in report["stages"]["sft"]["reason"]
+
+
+def test_served_eval_gate_blocks_non_finite_metrics(tmp_path: Path) -> None:
+    pipeline = CanonicalPipeline(mode="full", output_dir=str(tmp_path))
+    gate = pipeline._evaluate_served_eval_gate(
+        {
+            "status": "completed",
+            "base_summary": {"format_rate": 0.5},
+            "trained_summary": {"avg_score": float("nan"), "format_rate": 0.6},
+            "comparison": {"avg_score_delta": float("nan"), "distinct_response_count": 3},
+        }
+    )
+
+    assert gate["avg_score_delta"] is None
+    assert gate["trained_avg_score"] is None
+    assert "missing_avg_score_delta" in gate["blocking_reasons"]
+    assert "missing_trained_avg_score" in gate["blocking_reasons"]

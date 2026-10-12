@@ -162,15 +162,6 @@ export interface InteractionResponse<T = JsonValue> {
   error?: string;
 }
 
-export interface PostInteractionsResponse {
-  postId: string;
-  likeCount: number;
-  commentCount: number;
-  shareCount: number;
-  isLiked: boolean;
-  isShared: boolean;
-}
-
 export interface CommentsResponse {
   comments: CommentWithReplies[];
   total: number;

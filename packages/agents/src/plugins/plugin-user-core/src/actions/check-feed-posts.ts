@@ -5,8 +5,6 @@
  * Similar to what users see on the /feed page.
  */
 
-import type { MessageTag } from '@babylon/shared';
-import { getTimeAgo } from '@babylon/shared';
 import type {
   Action,
   ActionResult,
@@ -16,6 +14,8 @@ import type {
   Memory,
   State,
 } from '@elizaos/core';
+import type { MessageTag } from '@feed/shared';
+import { getTimeAgo } from '@feed/shared';
 import { logger } from '../../../../shared/logger';
 
 /** Extended ActionResult with optional tag for UI */

@@ -1,13 +1,13 @@
 'use client';
 
-import type { OnboardingProfilePayload } from '@babylon/shared';
+import type { OnboardingProfilePayload } from '@feed/shared';
 import {
   cn,
   getAgentDefaultProfileImageUrl,
   logger,
   sanitizeOnboardingUsername,
   TOTAL_AGENT_DEFAULT_PROFILE_PICTURES,
-} from '@babylon/shared';
+} from '@feed/shared';
 import { AnimatePresence, motion, useReducedMotion } from 'framer-motion';
 import {
   AlertCircle,
@@ -31,14 +31,13 @@ import { GAME_GUIDE_SLIDES } from './game-guide-slides';
  * Imported profile data structure from social platforms.
  */
 export interface ImportedProfileData {
-  platform: 'twitter' | 'farcaster';
+  platform: 'twitter';
   username: string;
   displayName: string;
   bio?: string;
   profileImageUrl?: string | null;
   coverImageUrl?: string | null;
   twitterId?: string;
-  farcasterFid?: string;
 }
 
 const PROFILE_FORM_ID = 'user-onboarding-profile-form';
@@ -368,12 +367,6 @@ export function UserOnboardingFlow({
         importedData?.platform === 'twitter' ? importedData.twitterId : null,
       twitterUsername:
         importedData?.platform === 'twitter' ? importedData.username : null,
-      farcasterFid:
-        importedData?.platform === 'farcaster'
-          ? importedData.farcasterFid
-          : null,
-      farcasterUsername:
-        importedData?.platform === 'farcaster' ? importedData.username : null,
       tosAccepted: acceptedTerms,
       privacyPolicyAccepted: acceptedTerms,
     };
@@ -641,7 +634,7 @@ export function UserOnboardingFlow({
         )}
         {!usernameStatus && username.length === 0 && (
           <p className="text-center text-muted-foreground text-sm">
-            This will be your unique handle on Babylon
+            This will be your unique handle on Feed
           </p>
         )}
       </div>
@@ -664,7 +657,7 @@ export function UserOnboardingFlow({
           <span className="text-muted-foreground text-sm leading-relaxed group-hover:text-foreground">
             I accept the{' '}
             <a
-              href="https://docs.babylon.market/legal/terms-of-service/"
+              href="https://docs.feed.fun/legal/terms-of-service/"
               target="_blank"
               rel="noopener noreferrer"
               className="font-medium text-[#0066FF] hover:underline"
@@ -674,7 +667,7 @@ export function UserOnboardingFlow({
             </a>{' '}
             and{' '}
             <a
-              href="https://docs.babylon.market/legal/privacy-policy/"
+              href="https://docs.feed.fun/legal/privacy-policy/"
               target="_blank"
               rel="noopener noreferrer"
               className="font-medium text-[#0066FF] hover:underline"
@@ -811,7 +804,7 @@ export function UserOnboardingFlow({
       ? 'Set up your profile'
       : isReplayGuide
         ? 'Game guide'
-        : 'Welcome to Babylon';
+        : 'Welcome to Feed';
 
   return (
     <div
@@ -831,10 +824,7 @@ export function UserOnboardingFlow({
               {headerTitle}
             </h1>
             {phase === 'profile' && importedData && (
-              <p className="text-[#0066FF] text-xs">
-                Imported from{' '}
-                {importedData.platform === 'twitter' ? '𝕏' : 'Farcaster'}
-              </p>
+              <p className="text-[#0066FF] text-xs">Imported from 𝕏</p>
             )}
             {phase === 'guide' && !isReplayGuide && (
               <p className="text-muted-foreground text-xs">

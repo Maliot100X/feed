@@ -23,18 +23,14 @@ import {
   shares,
   sql,
   users,
-} from '@babylon/db';
+} from '@feed/db';
 import {
   dailyTopicService,
   isTextOnTopic,
   StaticDataRegistry,
-} from '@babylon/engine';
-import type {
-  ArcStateType,
-  NarrativePost,
-  NarrativeStory,
-} from '@babylon/shared';
-import { logger } from '@babylon/shared';
+} from '@feed/engine';
+import type { ArcStateType, NarrativePost, NarrativeStory } from '@feed/shared';
+import { logger } from '@feed/shared';
 import { compareFeedStories } from '@/app/api/feed/feed-cursor';
 import { spreadNewMarkets } from '@/app/api/feed/for-you/scoring';
 import {
@@ -356,7 +352,10 @@ export async function buildStoriesFeed(): Promise<StoriesPipelineResult> {
         timestamp: posts.timestamp,
       })
       .from(posts)
-      .where(inArray(posts.id, repostOriginalIds));
+      // Deleted originals must not be rendered inside reposts.
+      .where(
+        and(inArray(posts.id, repostOriginalIds), isNull(posts.deletedAt))
+      );
     const originalAuthorIds = [...new Set(originalRows.map((r) => r.authorId))];
     const originalAuthorUsers =
       originalAuthorIds.length > 0
@@ -549,6 +548,9 @@ export async function buildStoriesFeed(): Promise<StoriesPipelineResult> {
   const stories: NarrativeStory[] = [];
 
   for (const [storyKey, storyPosts] of storyPostMap) {
+    // General posts are emitted below as standalone cards; grouping them into
+    // a "General" mega-story as well duplicated every one of them.
+    if (storyKey === GENERAL_STORY_KEY) continue;
     storyPosts.sort(
       (a, b) =>
         new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime()
@@ -643,7 +645,7 @@ export async function buildStoriesFeed(): Promise<StoriesPipelineResult> {
     });
   }
 
-  // Resolve marketId for question-backed stories (enables PredictionSparkline)
+  // Resolve marketId for question-backed stories (enables market links on cards)
   const storyQuestionNumbers = stories
     .filter((s) => s.questionNumber !== null)
     .map((s) => s.questionNumber as number);
@@ -654,10 +656,7 @@ export async function buildStoriesFeed(): Promise<StoriesPipelineResult> {
         marketId: markets.id,
       })
       .from(questions)
-      .innerJoin(
-        markets,
-        sql`lower(trim(${markets.question})) = lower(trim(${questions.text}))`
-      )
+      .innerJoin(markets, eq(markets.id, questions.marketId))
       .where(inArray(questions.questionNumber, storyQuestionNumbers))
       .orderBy(desc(markets.createdAt));
     const questionToMarket = new Map(
@@ -699,10 +698,7 @@ export async function buildStoriesFeed(): Promise<StoriesPipelineResult> {
     })
     .from(questions)
     .leftJoin(arcStates, eq(arcStates.questionId, questions.id))
-    .leftJoin(
-      markets,
-      sql`lower(trim(${markets.question})) = lower(trim(${questions.text}))`
-    )
+    .leftJoin(markets, eq(markets.id, questions.marketId))
     .where(
       and(
         eq(questions.status, 'active'),

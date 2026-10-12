@@ -29,7 +29,7 @@
  * @packageDocumentation
  */
 
-import { DistributedLockService } from '@babylon/api';
+import { DistributedLockService } from '@feed/api';
 import { randomBytes } from 'crypto';
 
 /**
@@ -44,7 +44,15 @@ import { randomBytes } from 'crypto';
  * - Set below function timeout (13.3 minutes) to ensure proper recovery
  */
 export const AGENT_LOCK_DURATION_MS =
-  Number(process.env.AGENT_LOCK_DURATION_MS) || 10 * 60 * 1000; // 10 minutes
+  process.env.AGENT_LOCK_DURATION_MS === undefined
+    ? 10 * 60 * 1000
+    : Number(process.env.AGENT_LOCK_DURATION_MS);
+if (
+  !Number.isSafeInteger(AGENT_LOCK_DURATION_MS) ||
+  AGENT_LOCK_DURATION_MS <= 0
+) {
+  throw new Error('AGENT_LOCK_DURATION_MS must be a positive integer');
+}
 
 function getAgentLockId(agentId: string): string {
   return `agent-tick-${agentId}`;
@@ -77,4 +85,61 @@ export async function releaseAgentLock(
 export async function checkAgentLock(agentId: string) {
   const lockId = getAgentLockId(agentId);
   return DistributedLockService.checkLock(lockId);
+}
+
+/** Keep an acquired lease until work settles; cancellation prevents subsequent actions. */
+export async function withAgentExecutionLease<T>(
+  agentId: string,
+  processId: string,
+  work: (signal: AbortSignal) => Promise<T>,
+  options: { timeoutMs?: number; timeoutError?: Error } = {}
+): Promise<T> {
+  const controller = new AbortController();
+  const renew = async () => {
+    if (
+      !(await DistributedLockService.renewLock(
+        getAgentLockId(agentId),
+        processId,
+        AGENT_LOCK_DURATION_MS
+      ))
+    ) {
+      throw new Error(`Agent ${agentId} lost its execution lease`);
+    }
+  };
+  await renew();
+  let renewal: Promise<void> = Promise.resolve();
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  let stopped = false;
+  const schedule = () => {
+    timer = setTimeout(
+      () => {
+        renewal = renew()
+          .catch((error: Error) => controller.abort(error))
+          .then(() => {
+            if (!stopped && !controller.signal.aborted) schedule();
+          });
+      },
+      Math.max(1, Math.floor(AGENT_LOCK_DURATION_MS / 3))
+    );
+  };
+  schedule();
+  const deadline =
+    options.timeoutMs === undefined
+      ? undefined
+      : setTimeout(() => {
+          controller.abort(
+            options.timeoutError ??
+              new Error(`Agent ${agentId} execution deadline exceeded`)
+          );
+        }, options.timeoutMs);
+  try {
+    const result = await work(controller.signal);
+    controller.signal.throwIfAborted();
+    return result;
+  } finally {
+    stopped = true;
+    if (timer) clearTimeout(timer);
+    if (deadline) clearTimeout(deadline);
+    await renewal;
+  }
 }

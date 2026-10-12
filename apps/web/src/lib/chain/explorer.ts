@@ -1,76 +1,40 @@
 /**
  * Block Explorer URL Utilities
  *
- * Provides chain-aware URLs for viewing transactions on block explorers.
- * Supports Ethereum mainnet, Sepolia testnet, Base mainnet, and Base Sepolia.
+ * Chain-aware URLs for viewing transactions on block explorers. Supports
+ * Ethereum mainnet, Sepolia, Base mainnet and Base Sepolia. Local (31337) and
+ * unknown chains have no explorer: callers get null and render no link,
+ * rather than a link to an unrelated network.
  */
 
-import { getCurrentChainId } from '@babylon/shared';
+import { getCurrentChainId } from '@feed/shared';
 
-/**
- * Get the block explorer URL for a transaction hash based on the current chain.
- *
- * @param txHash - The transaction hash to link to
- * @returns The full URL to view the transaction, or empty string for local chains
- */
-export function getExplorerTxUrl(txHash: string): string {
-  const chainId = getCurrentChainId();
-  switch (chainId) {
-    case 1:
-      return `https://etherscan.io/tx/${txHash}`;
-    case 11155111:
-      return `https://sepolia.etherscan.io/tx/${txHash}`;
-    case 8453:
-      return `https://basescan.org/tx/${txHash}`;
-    case 84532:
-      return `https://sepolia.basescan.org/tx/${txHash}`;
-    case 31337:
-      return '';
-    default:
-      return `https://sepolia.basescan.org/tx/${txHash}`;
-  }
+interface ExplorerInfo {
+  name: string;
+  baseUrl: string;
 }
 
-/**
- * Get the base block explorer URL for the current chain (without transaction path).
- *
- * @returns The base URL of the block explorer, or empty string for local chains
- */
-export function getExplorerBaseUrl(): string {
-  const chainId = getCurrentChainId();
-  switch (chainId) {
-    case 1:
-      return 'https://etherscan.io';
-    case 11155111:
-      return 'https://sepolia.etherscan.io';
-    case 8453:
-      return 'https://basescan.org';
-    case 84532:
-      return 'https://sepolia.basescan.org';
-    case 31337:
-      return '';
-    default:
-      return 'https://sepolia.basescan.org';
-  }
+const EXPLORERS: Readonly<Record<number, ExplorerInfo>> = {
+  1: { name: 'Etherscan', baseUrl: 'https://etherscan.io' },
+  11155111: { name: 'Etherscan', baseUrl: 'https://sepolia.etherscan.io' },
+  8453: { name: 'BaseScan', baseUrl: 'https://basescan.org' },
+  84532: { name: 'BaseScan', baseUrl: 'https://sepolia.basescan.org' },
+};
+
+/** Explorer for a chain, or null when the chain has none (local/unknown). */
+export function getExplorer(
+  chainId: number = getCurrentChainId()
+): ExplorerInfo | null {
+  return EXPLORERS[chainId] ?? null;
 }
 
-/**
- * Get the display name for the current chain's block explorer.
- *
- * @returns Human-readable name like "BaseScan" or "Etherscan"
- */
-export function getExplorerName(): string {
-  const chainId = getCurrentChainId();
-  switch (chainId) {
-    case 1:
-    case 11155111:
-      return 'Etherscan';
-    case 8453:
-    case 84532:
-      return 'BaseScan';
-    case 31337:
-      return 'Local';
-    default:
-      return 'BaseScan';
-  }
+/** Transaction URL on the current chain's explorer, or null if unsupported. */
+export function getExplorerTxUrl(
+  txHash: string,
+  chainId: number = getCurrentChainId()
+): string | null {
+  const explorer = getExplorer(chainId);
+  return explorer
+    ? `${explorer.baseUrl}/tx/${encodeURIComponent(txHash)}`
+    : null;
 }

@@ -46,9 +46,9 @@
  * ```
  */
 
-import { requireAdmin, successResponse, withErrorHandling } from '@babylon/api';
-import { count, db, isNotNull, reports } from '@babylon/db';
-import { logger } from '@babylon/shared';
+import { requireAdmin, successResponse, withErrorHandling } from '@feed/api';
+import { count, db, isNotNull, reports } from '@feed/db';
+import { logger } from '@feed/shared';
 import type { NextRequest } from 'next/server';
 
 export const GET = withErrorHandling(async (request: NextRequest) => {

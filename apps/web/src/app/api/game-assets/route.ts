@@ -6,8 +6,8 @@
  *
  * @description
  * Returns game assets including group chats, actors, and other game-related
- * data needed for client-side game initialization. Designed for Vercel
- * serverless deployment where file system access is limited.
+ * data needed for client-side game initialization. Designed for Cloudflare
+ * Workers deployment where file system access is unavailable.
  *
  * @openapi
  * /api/game-assets:
@@ -83,9 +83,9 @@
  * @see {@link /api/games} Games listing endpoint
  */
 
-import { optionalAuth, successResponse, withErrorHandling } from '@babylon/api';
-import { asPublic, asUser } from '@babylon/db';
-import { logger } from '@babylon/shared';
+import { optionalAuth, successResponse, withErrorHandling } from '@feed/api';
+import { asPublic, asUser } from '@feed/db';
+import { logger } from '@feed/shared';
 import type { NextRequest } from 'next/server';
 
 export const GET = withErrorHandling(async (_request: NextRequest) => {

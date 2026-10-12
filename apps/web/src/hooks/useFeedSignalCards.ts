@@ -65,14 +65,11 @@ function markShown(
 export interface FeedSignalCardsResult {
   gainerCard: TopGainerProps | null;
   loserCard: TopLoserProps | null;
-  /** Always null until backend exposes closesAt on positions (TODO BAB-285) */
-  closingCard: null;
 }
 
 interface DerivedFeedSignalCards {
   gainerCard: TopGainerProps | null;
   loserCard: TopLoserProps | null;
-  closingCard: null;
   /** Updated cap state to persist, or null if no new cards were selected. */
   pendingCapState: FeedSignalCapState | null;
 }
@@ -81,9 +78,6 @@ interface DerivedFeedSignalCards {
  * Derives feed signal cards (top gainer / top loser) from the user's open
  * prediction positions. Applies daily capping and dedup via localStorage so
  * the same market is not surfaced more than once per day per card type.
- *
- * `closingCard` is always null — blocked on backend exposing `closesAt`.
- * TODO(BAB-285): enable MarketClosingSoonCard when closesAt is available on positions.
  */
 export function useFeedSignalCards(): FeedSignalCardsResult {
   const { user } = useAuth();
@@ -94,7 +88,6 @@ export function useFeedSignalCards(): FeedSignalCardsResult {
     const noCards: DerivedFeedSignalCards = {
       gainerCard: null,
       loserCard: null,
-      closingCard: null,
       pendingCapState: null,
     };
 
@@ -154,7 +147,6 @@ export function useFeedSignalCards(): FeedSignalCardsResult {
     return {
       gainerCard,
       loserCard,
-      closingCard: null,
       // Only carry the updated state when new cards were selected
       pendingCapState: gainerCard || loserCard ? capState : null,
     };
@@ -170,6 +162,5 @@ export function useFeedSignalCards(): FeedSignalCardsResult {
   return {
     gainerCard: derived.gainerCard,
     loserCard: derived.loserCard,
-    closingCard: derived.closingCard,
   };
 }

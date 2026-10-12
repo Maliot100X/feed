@@ -2,7 +2,6 @@
 
 export const dynamic = 'force-dynamic';
 
-import { IDENTITY_REGISTRY_BASE_SEPOLIA } from '@babylon/shared';
 import { Award, Medal, Target, Trophy } from 'lucide-react';
 import { useEffect, useState } from 'react';
 import { PageContainer } from '@/components/shared/PageContainer';
@@ -34,6 +33,7 @@ const emptyStats: ReputationStats = {
 export default function ReputationPage() {
   const { user, authenticated } = useAuth();
   const [loading, setLoading] = useState(true);
+  const [error, setError] = useState(false);
   const [stats, setStats] = useState<ReputationStats>(emptyStats);
 
   useEffect(() => {
@@ -44,11 +44,12 @@ export default function ReputationPage() {
 
     const fetchReputation = async () => {
       setLoading(true);
+      setError(false);
       const response = await fetch(
         apiUrl(`/api/reputation/${encodeURIComponent(user.id)}`)
       );
       if (!response.ok) {
-        setStats(emptyStats);
+        setError(true);
         setLoading(false);
         return;
       }
@@ -78,8 +79,6 @@ export default function ReputationPage() {
     return () => clearInterval(interval);
   }, [authenticated, user]);
 
-  const hasNft = false;
-
   if (!authenticated) {
     return (
       <PageContainer>
@@ -87,21 +86,7 @@ export default function ReputationPage() {
           <Award className="mx-auto mb-4 h-16 w-16 text-muted-foreground" />
           <h1 className="mb-2 font-bold text-2xl">Reputation Dashboard</h1>
           <p className="mb-6 text-muted-foreground">
-            Connect your wallet to view your on-chain reputation
-          </p>
-        </div>
-      </PageContainer>
-    );
-  }
-
-  if (!loading && !hasNft) {
-    return (
-      <PageContainer>
-        <div className="mx-auto max-w-4xl py-12 text-center">
-          <Award className="mx-auto mb-4 h-16 w-16 text-muted-foreground" />
-          <h1 className="mb-2 font-bold text-2xl">Missing Reputation NFT</h1>
-          <p className="mb-6 text-muted-foreground">
-            Complete on-chain onboarding to activate your public scores
+            Sign in to view your reputation
           </p>
         </div>
       </PageContainer>
@@ -114,6 +99,16 @@ export default function ReputationPage() {
         <div className="mx-auto max-w-4xl py-12 text-center">
           <p className="text-muted-foreground">Loading reputation...</p>
         </div>
+      </PageContainer>
+    );
+  }
+
+  if (error) {
+    return (
+      <PageContainer>
+        <p role="alert" className="py-12 text-center text-muted-foreground">
+          Reputation could not be loaded. Please try again later.
+        </p>
       </PageContainer>
     );
   }
@@ -188,26 +183,6 @@ export default function ReputationPage() {
             <p className="mt-1 text-muted-foreground text-xs">
               {stats.totalWins}W / {stats.totalLosses}L
             </p>
-          </div>
-        </div>
-
-        <div className="rounded-lg border border-border bg-card p-6">
-          <h2 className="mb-4 font-semibold text-lg">Your Reputation NFT</h2>
-          <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
-            <div>
-              <label className="mb-1 block text-muted-foreground text-sm">
-                Token ID
-              </label>
-              <p className="font-mono text-foreground">#N/A</p>
-            </div>
-            <div>
-              <label className="mb-1 block text-muted-foreground text-sm">
-                Contract Address
-              </label>
-              <p className="truncate font-mono text-foreground text-sm">
-                {IDENTITY_REGISTRY_BASE_SEPOLIA}
-              </p>
-            </div>
           </div>
         </div>
 

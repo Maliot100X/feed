@@ -5,7 +5,7 @@
  * @access Admin
  *
  * @description
- * Uploads trained model to Vercel Blob storage. Called by Python deployment
+ * Uploads trained model to object storage (R2). Called by Python deployment
  * script after training completes. Supports multipart file uploads.
  *
  * @openapi
@@ -55,16 +55,14 @@
  * ```
  */
 
-import { requireAdmin, successResponse, withErrorHandling } from '@babylon/api';
-import { logger } from '@babylon/shared';
-import { modelStorage } from '@babylon/training';
+import { requireAdmin, successResponse, withErrorHandling } from '@feed/api';
+import { logger } from '@feed/shared';
+import { modelStorage } from '@feed/training';
 import fs from 'fs/promises';
 import type { NextRequest } from 'next/server';
 import { NextResponse } from 'next/server';
 import os from 'os';
 import path from 'path';
-
-export const maxDuration = 300; // 5 minutes for large uploads
 
 export const POST = withErrorHandling(async (request: NextRequest) => {
   await requireAdmin(request);
@@ -83,7 +81,7 @@ export const POST = withErrorHandling(async (request: NextRequest) => {
 
   const metadata = metadataStr ? JSON.parse(metadataStr) : {};
 
-  logger.info('Uploading model to Vercel Blob', {
+  logger.info('Uploading model to object storage', {
     version,
     size: modelFile.size,
   });

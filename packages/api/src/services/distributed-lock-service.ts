@@ -6,8 +6,8 @@
  * Supports automatic stale lock recovery.
  */
 
-import { and, db, eq, generationLocks, lte } from '@babylon/db';
-import { logger } from '@babylon/shared';
+import { and, db, eq, generationLocks, gt, lte, or } from '@feed/db';
+import { logger } from '@feed/shared';
 import { randomBytes } from 'crypto';
 
 export interface LockOptions {
@@ -54,7 +54,13 @@ export class DistributedLockService {
         operation,
       })
       .where(
-        and(eq(generationLocks.id, lockId), lte(generationLocks.expiresAt, now))
+        and(
+          eq(generationLocks.id, lockId),
+          or(
+            lte(generationLocks.expiresAt, now),
+            eq(generationLocks.lockedBy, lockHolder)
+          )
+        )
       )
       .returning({ id: generationLocks.id });
 
@@ -132,6 +138,37 @@ export class DistributedLockService {
       'DistributedLockService'
     );
     return false;
+  }
+
+  /** Extend only a still-valid lease held by this exact owner. Never reacquire. */
+  static async renewLock(
+    lockId: string,
+    processId: string,
+    durationMs: number
+  ): Promise<boolean> {
+    if (
+      !lockId.trim() ||
+      !processId.trim() ||
+      !Number.isSafeInteger(durationMs) ||
+      durationMs <= 0
+    ) {
+      throw new Error(
+        'Lock renewal requires an ID, owner and positive integer duration'
+      );
+    }
+    const now = new Date();
+    const renewed = await db
+      .update(generationLocks)
+      .set({ expiresAt: new Date(now.getTime() + durationMs) })
+      .where(
+        and(
+          eq(generationLocks.id, lockId),
+          eq(generationLocks.lockedBy, processId),
+          gt(generationLocks.expiresAt, now)
+        )
+      )
+      .returning({ id: generationLocks.id });
+    return renewed.length === 1;
   }
 
   /**

@@ -18,9 +18,9 @@ import {
   setDefaultTimeout,
   test,
 } from 'bun:test';
-import { DailyLoginService } from '@babylon/api';
-import { db, eq, sql, users } from '@babylon/db';
-import { generateSnowflakeId, POINTS } from '@babylon/shared';
+import { DailyLoginService } from '@feed/api';
+import { db, eq, sql, users } from '@feed/db';
+import { generateSnowflakeId, POINTS } from '@feed/shared';
 import { waitForEndpointAvailability } from './helpers';
 
 setDefaultTimeout(30000);
@@ -459,6 +459,28 @@ describe('Daily Login - DailyLoginService Integration', () => {
       expect(result.success).toBe(false);
       expect(result.error).toContain('Cannot claim yet');
       expect(result.streak).toBe(5); // Unchanged
+    });
+  });
+
+  describe('claimDailyReward - Concurrency', () => {
+    test('concurrent claims credit exactly once', async () => {
+      if (skipIfNoDb() || !serviceTestUserId) return;
+
+      await setUserStreak(serviceTestUserId, 0, null);
+      const before = await getUserStreak(serviceTestUserId);
+
+      const results = await Promise.all(
+        Array.from({ length: 5 }, () =>
+          DailyLoginService.claimDailyReward(serviceTestUserId!)
+        )
+      );
+      expect(results.filter((r) => r.success)).toHaveLength(1);
+
+      const after = await getUserStreak(serviceTestUserId);
+      expect(after!.totalDailyLogins).toBe(1);
+      expect(Number(after!.virtualBalance)).toBe(
+        Number(before!.virtualBalance) + POINTS.DAILY_LOGIN_DAY_1
+      );
     });
   });
 

@@ -2,7 +2,7 @@
  * Shared server-side Steward configuration and utilities.
  *
  * Centralizes the JWT secret, API URL, and platform key so that
- * farcaster/route.ts, telegram-miniapp/route.ts, and session/route.ts
+ * telegram-miniapp/route.ts, and session/route.ts
  * all use the same values and production-guard logic.
  */
 
@@ -33,7 +33,7 @@ export const STEWARD_PLATFORM_KEY =
 /**
  * Provision a Steward user record by email (idempotent).
  * Falls back to a random UUID if no email or platform key is available
- * (development / Farcaster/Telegram users without email).
+ * (development / Telegram users without email).
  */
 export async function ensureStewardUser(email?: string): Promise<string> {
   if (!email || !STEWARD_PLATFORM_KEY) return crypto.randomUUID();

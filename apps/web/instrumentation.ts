@@ -23,14 +23,8 @@ export async function register() {
   if (process.env.NEXT_RUNTIME === 'nodejs') {
     // Dynamically import Node.js-only modules to avoid Edge Runtime errors
     // Import from main package entry point
-    const {
-      setReputationService,
-      setNotificationService,
-      setDefaultErrorCapture,
-      ReputationService,
-      createNotification,
-      logDevCredentials,
-    } = await import('@babylon/api');
+    const { setDefaultErrorCapture, logDevCredentials, getStorageClient } =
+      await import('@feed/api');
     const { createSentryApiRouteCapture } = await import(
       './src/lib/sentry/api-route-capture'
     );
@@ -47,40 +41,36 @@ export async function register() {
     // Initialize agent service container with required services
     // Uses globalThis to persist across module instances
     const { setServiceContainer, agentRegistry, npcBootstrapService } =
-      await import('@babylon/agents');
+      await import('@feed/agents');
     setServiceContainer({
       agentRegistry,
+    });
+
+    const { setGeneratedImageStorage } = await import('@feed/engine');
+    setGeneratedImageStorage(async (url) => {
+      const response = await fetch(url, {
+        signal: AbortSignal.timeout(30_000),
+      });
+      if (!response.ok) throw new Error('Generated image download failed');
+      const contentType =
+        response.headers.get('content-type')?.split(';')[0] || '';
+      if (!['image/png', 'image/jpeg', 'image/webp'].includes(contentType))
+        throw new Error('Unsupported generated image type');
+      const image = await getStorageClient().uploadImage({
+        file: Buffer.from(await response.arrayBuffer()),
+        filename: `${crypto.randomUUID()}.${contentType.split('/')[1]}`,
+        folder: 'posts',
+        contentType,
+      });
+      return image.url;
     });
 
     // Bootstrap NPC agents so they're registered for agent-tick processing
     // Note: Runs asynchronously and is non-critical; failures do not block server startup
     // Individual NPC failures are handled internally by npcBootstrapService
-    void npcBootstrapService.bootstrapAllNpcs();
-
-    // Initialize shared moderation services with web app implementations
-    setReputationService({
-      awardReputation: async (userId, amount, reason, metadata) => {
-        // Cast metadata from Record<string, unknown> to Record<string, JsonValue>
-        // JsonValue is a subset of unknown, so this cast is safe
-        // JsonValue = string | number | boolean | null | JsonValue[] | { [key: string]: JsonValue }
-        return await ReputationService.awardReputation(
-          userId,
-          amount,
-          reason as never,
-          metadata as Parameters<typeof ReputationService.awardReputation>[3]
-        );
-      },
-    });
-
-    setNotificationService({
-      createNotification: async (params) => {
-        // Cast params to match CreateNotificationParams type
-        // setNotificationService interface uses string for type, but createNotification expects NotificationType
-        return await createNotification(
-          params as Parameters<typeof createNotification>[0]
-        );
-      },
-    });
+    if (process.env.DEPLOYMENT_PLATFORM !== 'cloudflare') {
+      void npcBootstrapService.bootstrapAllNpcs();
+    }
 
     // Initialize API key lastUsedAt write-back cache flusher
     // WHY: Batches Redis updates and flushes to database periodically, reducing DB load by 90%+.
@@ -93,8 +83,11 @@ export async function register() {
     const g = globalThis as typeof globalThis & {
       __lastUsedFlusherStarted?: boolean;
     };
-    if (!g.__lastUsedFlusherStarted) {
-      const { startLastUsedFlusher } = await import('@babylon/api');
+    if (
+      process.env.DEPLOYMENT_PLATFORM !== 'cloudflare' &&
+      !g.__lastUsedFlusherStarted
+    ) {
+      const { startLastUsedFlusher } = await import('@feed/api');
       startLastUsedFlusher();
       g.__lastUsedFlusherStarted = true;
     }

@@ -3,7 +3,11 @@
  */
 
 import { z } from 'zod';
-import { UserIdSchema } from './common';
+import {
+  createQueryBooleanSchema,
+  OptionalQueryBooleanSchema,
+  UserIdSchema,
+} from './common';
 
 /**
  * Game tick cron authentication schema
@@ -58,11 +62,11 @@ export const ImageUploadBodySchema = z.object({
  * Registry query schema
  */
 export const RegistryQuerySchema = z.object({
-  onChainOnly: z.coerce.boolean().optional(),
+  onChainOnly: OptionalQueryBooleanSchema,
   sortBy: z.enum(['username', 'createdAt', 'nftTokenId']).default('createdAt'),
   sortOrder: z.enum(['asc', 'desc']).default('desc'),
-  limit: z.coerce.number().positive().max(100).default(100),
-  offset: z.coerce.number().nonnegative().default(0),
+  limit: z.coerce.number().int().positive().max(100).default(100),
+  offset: z.coerce.number().int().nonnegative().default(0),
 });
 
 /**
@@ -121,14 +125,14 @@ export const TransferTradingBalanceSchema = z.object({
  */
 export const ReferralQuerySchema = z.object({
   userId: UserIdSchema,
-  includeStats: z.coerce.boolean().default(false),
+  includeStats: createQueryBooleanSchema(false),
 });
 
 /**
  * Link social account schema
  */
 export const LinkSocialAccountSchema = z.object({
-  platform: z.enum(['twitter', 'farcaster']),
+  platform: z.enum(['twitter']),
   username: z.string().min(1).max(50),
   verificationToken: z.string().optional(),
 });
@@ -138,7 +142,6 @@ export const LinkSocialAccountSchema = z.object({
  */
 export const UpdateVisibilitySchema = z.object({
   showTwitterPublic: z.boolean().optional(),
-  showFarcasterPublic: z.boolean().optional(),
   showWalletPublic: z.boolean().optional(),
 });
 
@@ -168,7 +171,7 @@ export const UserIdParamSchema = z.object({
  * Breaking news query schema
  */
 export const BreakingNewsQuerySchema = z.object({
-  limit: z.coerce.number().positive().max(20).default(5),
+  limit: z.coerce.number().int().positive().max(20).default(5),
   category: z.string().optional(),
 });
 
@@ -176,7 +179,7 @@ export const BreakingNewsQuerySchema = z.object({
  * Upcoming events query schema
  */
 export const UpcomingEventsQuerySchema = z.object({
-  limit: z.coerce.number().positive().max(50).default(10),
+  limit: z.coerce.number().int().positive().max(50).default(10),
   timeframe: z.enum(['24h', '7d', '30d']).default('7d'),
 });
 
@@ -184,7 +187,7 @@ export const UpcomingEventsQuerySchema = z.object({
  * Trending posts query schema
  */
 export const TrendingPostsQuerySchema = z.object({
-  limit: z.coerce.number().positive().max(50).default(10),
+  limit: z.coerce.number().int().positive().max(50).default(10),
   timeframe: z
     .string()
     .transform((val): '1h' | '6h' | '24h' | '7d' => {
@@ -199,15 +202,15 @@ export const TrendingPostsQuerySchema = z.object({
         : '24h'; // Default to 24h for invalid values
     })
     .default('24h'),
-  minInteractions: z.coerce.number().nonnegative().default(5),
+  minInteractions: z.coerce.number().int().nonnegative().default(5),
 });
 
 /**
  * Stats query schema
  */
 export const StatsQuerySchema = z.object({
-  includeMarkets: z.coerce.boolean().default(true),
-  includeUsers: z.coerce.boolean().default(true),
-  includePools: z.coerce.boolean().default(true),
-  includeVolume: z.coerce.boolean().default(true),
+  includeMarkets: createQueryBooleanSchema(true),
+  includeUsers: createQueryBooleanSchema(true),
+  includePools: createQueryBooleanSchema(true),
+  includeVolume: createQueryBooleanSchema(true),
 });

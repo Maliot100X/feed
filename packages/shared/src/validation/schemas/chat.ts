@@ -62,27 +62,12 @@ export const ChatCreateSchema = z
     name: createTrimmedStringSchema(1, 100).optional(),
     isGroup: z.boolean().optional().default(false),
     participantIds: z.array(SnowflakeIdSchema).optional(),
-    requiredNftContractAddress: z
-      .string()
-      .regex(/^0x[a-fA-F0-9]{40}$/, 'Invalid contract address format')
-      .optional(),
-    requiredNftTokenId: z.number().int().min(0).nullable().optional(),
-    requiredNftChainId: z.number().int().positive().optional(),
   })
+  .strict()
   .refine((data) => !data.isGroup || data.name !== undefined, {
     message: 'Group name is required for group chats',
     path: ['name'],
-  })
-  .refine(
-    (data) =>
-      data.requiredNftTokenId === null ||
-      data.requiredNftTokenId === undefined ||
-      (data.requiredNftTokenId !== null && data.requiredNftContractAddress),
-    {
-      message: 'Contract address is required when specifying a token ID',
-      path: ['requiredNftContractAddress'],
-    }
-  );
+  });
 
 /**
  * DM chat creation schema

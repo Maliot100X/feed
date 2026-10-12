@@ -87,7 +87,7 @@
  * @see {@link /lib/db/context} RLS context
  */
 
-import { optionalAuth, successResponse, withErrorHandling } from '@babylon/api';
+import { optionalAuth, successResponse, withErrorHandling } from '@feed/api';
 import {
   and,
   asUser,
@@ -102,9 +102,10 @@ import {
   posts,
   reactions,
   shares,
-} from '@babylon/db';
-import { logger, PostFeedQuerySchema } from '@babylon/shared';
+} from '@feed/db';
+import { logger, PostFeedQuerySchema } from '@feed/shared';
 import type { NextRequest } from 'next/server';
+import { loadViewerExcludedAuthorIds } from '@/app/api/feed/_lib/viewer-moderation';
 
 /**
  * GET /api/posts/feed/favorites
@@ -133,9 +134,10 @@ export const GET = withErrorHandling(async (request: NextRequest) => {
 
   // Parse and validate query parameters
   const { searchParams } = new URL(request.url);
+  // Absent params must be undefined (not null) so defaults apply.
   const queryParams = {
-    limit: searchParams.get('limit'),
-    page: searchParams.get('page'),
+    limit: searchParams.get('limit') ?? undefined,
+    page: searchParams.get('page') ?? undefined,
   };
   const validatedQuery = PostFeedQuerySchema.partial().parse(queryParams);
   const limit = Math.min(validatedQuery.limit || 20, 100);
@@ -151,7 +153,11 @@ export const GET = withErrorHandling(async (request: NextRequest) => {
       .from(favorites)
       .where(eq(favorites.userId, user.userId));
 
-    const favoritedUserIds = favList.map((f) => f.targetUserId);
+    // Favorites never bypass the viewer's block/mute policy.
+    const excludedAuthorIds = await loadViewerExcludedAuthorIds(user.userId);
+    const favoritedUserIds = favList
+      .map((f) => f.targetUserId)
+      .filter((id) => !excludedAuthorIds.has(id));
 
     // If no favorites, return empty array
     if (favoritedUserIds.length === 0) {
@@ -188,6 +194,7 @@ export const GET = withErrorHandling(async (request: NextRequest) => {
       .where(
         and(
           inArray(posts.authorId, favoritedUserIds),
+          isNull(posts.deletedAt),
           lte(posts.timestamp, now)
         )
       );
@@ -215,7 +222,9 @@ export const GET = withErrorHandling(async (request: NextRequest) => {
             count: count(comments.id),
           })
           .from(comments)
-          .where(inArray(comments.postId, postIds))
+          .where(
+            and(inArray(comments.postId, postIds), isNull(comments.deletedAt))
+          )
           .groupBy(comments.postId),
         dbClient
           .select({
@@ -289,11 +298,15 @@ export const GET = withErrorHandling(async (request: NextRequest) => {
     'GET /api/posts/feed/favorites'
   );
 
-  return successResponse({
-    posts: result.posts,
-    total: result.totalCount,
-    hasMore: result.hasMore,
-    limit,
-    offset,
-  });
+  return successResponse(
+    {
+      posts: result.posts,
+      total: result.totalCount,
+      hasMore: result.hasMore,
+      limit,
+      offset,
+    },
+    200,
+    { 'Cache-Control': 'private, no-store' }
+  );
 });

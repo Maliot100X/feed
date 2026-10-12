@@ -8,7 +8,7 @@ import type {
   JsonRpcResult,
   JsonValue,
   StringRecord,
-} from '@babylon/shared';
+} from '@feed/shared';
 
 // Re-export JSON-RPC types from shared for consistency
 export type { JsonRpcParams, JsonRpcResult, JsonValue };
@@ -962,7 +962,8 @@ export interface GetReferralsResult {
 
 export interface GetReferralStatsResult {
   totalReferrals: number;
-  totalEarnings: number;
+  /** null: referral earnings are not tracked. */
+  totalEarnings: number | null;
   referralCode: string;
 }
 

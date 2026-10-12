@@ -2,9 +2,11 @@ import { describe, expect, it } from 'bun:test';
 import { evaluateEnv } from '../../../scripts/validate-env';
 
 const baseEnv = {
-  DATABASE_URL: 'postgresql://localhost:5432/babylon',
-  NEXT_PUBLIC_PRIVY_APP_ID: 'privy-app-id',
-  PRIVY_APP_SECRET: 'privy-app-secret',
+  DATABASE_URL: 'postgresql://localhost:5432/feed',
+  NEXT_PUBLIC_STEWARD_API_URL: 'https://auth.example.com',
+  STEWARD_API_URL: 'https://auth.example.com',
+  STEWARD_JWT_SECRET: 'test-jwt-secret',
+  STEWARD_TENANT_API_KEY: 'test-tenant-key',
   CRON_SECRET: 'cron-secret',
   GROQ_API_KEY: 'groq-key',
 };
@@ -20,14 +22,12 @@ describe('scripts/validate-env', () => {
     expect(result.missing.length).toBe(0);
   });
 
-  it('accepts Privy app id alias and alternate LLM provider key', () => {
+  it('accepts Surplus as the only inference provider', () => {
     const result = evaluateEnv({
       env: {
-        DATABASE_URL: baseEnv.DATABASE_URL,
-        PRIVY_APP_ID: 'legacy-privy-app-id',
-        PRIVY_APP_SECRET: baseEnv.PRIVY_APP_SECRET,
-        CRON_SECRET: baseEnv.CRON_SECRET,
-        OPENAI_API_KEY: 'openai-key',
+        ...baseEnv,
+        GROQ_API_KEY: '',
+        SURPLUS_API_KEY: 'test-surplus-key',
       },
       profile: 'local',
     });

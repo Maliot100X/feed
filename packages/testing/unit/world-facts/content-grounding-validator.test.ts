@@ -7,12 +7,25 @@
  * layers directly.
  */
 
-import { describe, expect, test } from 'bun:test';
+import { afterAll, beforeAll, describe, expect, test } from 'bun:test';
 import {
   filterIncoherent,
   validateCoherence,
   validateGrounding,
-} from '@babylon/engine';
+} from '@feed/engine';
+
+const embeddingKeys = ['OPENAI_API_KEY', 'ELIZACLOUD_API_KEY'] as const;
+const savedEmbeddingKeys = embeddingKeys.map((key) => process.env[key]);
+beforeAll(() => {
+  for (const key of embeddingKeys) delete process.env[key];
+});
+afterAll(() => {
+  embeddingKeys.forEach((key, i) => {
+    const value = savedEmbeddingKeys[i];
+    if (value === undefined) delete process.env[key];
+    else process.env[key] = value;
+  });
+});
 
 describe('validateGrounding', () => {
   test('grounded parody passes — topically related to source', async () => {

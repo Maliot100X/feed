@@ -1,13 +1,13 @@
 'use client';
 
-import { cn, formatCurrency } from '@babylon/shared';
+import { cn, formatCurrency } from '@feed/shared';
 import { ExternalLink, RefreshCw } from 'lucide-react';
 import { useCallback, useEffect, useState } from 'react';
 import { BuyPointsModal } from '@/components/points/BuyPointsModal';
 import { Skeleton } from '@/components/shared/Skeleton';
 import { useAuth } from '@/hooks/useAuth';
 import { useWalletBalance } from '@/hooks/useWalletBalance';
-import { getExplorerName, getExplorerTxUrl } from '@/lib/chain';
+import { getExplorer, getExplorerTxUrl } from '@/lib/chain';
 import { useAuthStore } from '@/stores/authStore';
 
 /** Number of transactions to show in collapsed view */
@@ -151,7 +151,7 @@ function FundingTransactionRow({ tx }: { tx: FundingTransaction }) {
             className="mt-1 inline-flex items-center gap-1 text-[#0066FF] text-xs hover:underline"
           >
             <ExternalLink className="h-3 w-3" />
-            View on {getExplorerName()}
+            View on {getExplorer()?.name}
           </a>
         )}
       </div>
@@ -276,11 +276,7 @@ export function BillingTab() {
   const [buyFundsOpen, setBuyFundsOpen] = useState(false);
 
   // Use the same hook as markets page to fetch fresh balance from API
-  const {
-    balance,
-    loading: balanceLoading,
-    refresh: refreshBalance,
-  } = useWalletBalance(user?.id);
+  const { balance, loading: balanceLoading } = useWalletBalance(user?.id);
 
   const fetchTransactions = useCallback(async () => {
     if (!user?.id) return;
@@ -342,10 +338,6 @@ export function BillingTab() {
   useEffect(() => {
     fetchTransactions();
   }, [fetchTransactions]);
-
-  const handleBuyPointsSuccess = async () => {
-    await Promise.all([refreshBalance(), fetchTransactions()]);
-  };
 
   return (
     <div className="space-y-6">
@@ -451,7 +443,6 @@ export function BillingTab() {
       <BuyPointsModal
         isOpen={buyFundsOpen}
         onClose={() => setBuyFundsOpen(false)}
-        onSuccess={handleBuyPointsSuccess}
       />
     </div>
   );

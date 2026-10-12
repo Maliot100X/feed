@@ -77,6 +77,8 @@ def render_markdown(reports: list[dict[str, object]]) -> str:
         "| Model | AdamW total | APOLLO total | APOLLO active | QLoRA NF4 | H100 APOLLO | H200 APOLLO |",
         "|---|---:|---:|---:|---:|---|---|",
     ]
+    # Emit every table row first; per-model sections interleaved between rows
+    # would terminate the Markdown table after the first model.
     for report in reports:
         model = report["model"]
         training = report["training_memory"]
@@ -91,6 +93,9 @@ def render_markdown(reports: list[dict[str, object]]) -> str:
             f"{fit.get('h100_apollo_active', fit['h100_apollo_total'])} | "
             f"{fit.get('h200_apollo_active', fit['h200_apollo_total'])} |"
         )
+    for report in reports:
+        model = report["model"]
+        training = report["training_memory"]
         lines.append("")
         lines.append("## " + model["display_name"])
         lines.append("")

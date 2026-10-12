@@ -4,9 +4,9 @@ import {
   publicRateLimit,
   successResponse,
   withErrorHandling,
-} from '@babylon/api';
-import type { NarrativeStory } from '@babylon/shared';
-import { toISO } from '@babylon/shared';
+} from '@feed/api';
+import type { NarrativeStory } from '@feed/shared';
+import { toISO } from '@feed/shared';
 import type { NextRequest } from 'next/server';
 import { decodeCursor, encodeCursor, findCursorIndex } from '../feed-cursor';
 import { buildForYouFeed } from './pipeline';
@@ -39,8 +39,8 @@ export const GET = withErrorHandling(async (request: NextRequest) => {
   // Per-user ranked snapshot. Anonymous users share one snapshot;
   // authenticated users each get their own personalised ranking.
   const cacheKey = userId
-    ? `feed:for-you:ranked:v1:${userId}`
-    : 'feed:for-you:ranked:v1:anon';
+    ? `feed:for-you:ranked:v2:${userId}`
+    : 'feed:for-you:ranked:v2:anon';
 
   const fullResult = await getCacheOrFetch<{
     stories: NarrativeStory[];

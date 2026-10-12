@@ -1,0 +1,41 @@
+{
+  "$schema": "../../node_modules/wrangler/config-schema.json",
+  "name": "feed-cron-staging",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-10-10",
+  "workers_dev": false,
+  "observability": {
+    "enabled": true
+  },
+  "triggers": {
+    "crons": ["* * * * *"]
+  },
+  "services": [
+    {
+      "binding": "APP",
+      "service": "feed-web-staging"
+    }
+  ],
+  "vars": {
+    "APP_ORIGIN": "https://staging.feed.fun",
+    "CRON_ENABLED": "true"
+  },
+  "queues": {
+    "producers": [
+      {
+        "binding": "JOBS",
+        "queue": "feed-cron-staging"
+      }
+    ],
+    "consumers": [
+      {
+        "queue": "feed-cron-staging",
+        "max_batch_size": 1,
+        "max_batch_timeout": 1,
+        "max_concurrency": 3,
+        "max_retries": 2,
+        "dead_letter_queue": "feed-cron-staging-failed"
+      }
+    ]
+  }
+}

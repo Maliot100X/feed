@@ -14,10 +14,10 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-WORKSPACE_ROOT = Path(__file__).resolve().parents[5]
+WORKSPACE_ROOT = Path(__file__).resolve().parents[6]
 AWESOME_README = WORKSPACE_ROOT / "external-sources" / "awesome-prompt-injection" / "README.md"
 LINKED_ROOT = WORKSPACE_ROOT / "external-sources" / "awesome-linked"
-OUTPUT_ROOT = Path(__file__).resolve().parents[4] / "training-data" / "awesome-link-review"
+OUTPUT_ROOT = Path(__file__).resolve().parents[5] / "training-data" / "awesome-link-review"
 
 MARKDOWN_LINK_PATTERN = re.compile(r"\[([^\]]+)\]\((https?://[^)]+)\)")
 SECTION_PATTERN = re.compile(r"^##\s+(.+?)\s*$", re.M)

@@ -18,14 +18,28 @@ def load_script_module(module_name: str, script_path: Path):
     return module
 
 
-_first_script = Path(__file__).resolve().parent.parent / "scripts" / "run_nebius_unified_matrix.py"
-if not _first_script.exists():
-    pytest.skip("script not found: run_nebius_unified_matrix.py", allow_module_level=True)
-
 nebius_script = load_script_module(
     "run_nebius_unified_matrix",
-    PYTHON_ROOT / "scripts" / "run_nebius_unified_matrix.py",
+    PYTHON_ROOT / "scripts" / "tools" / "run_nebius_unified_matrix.py",
 )
+
+
+@pytest.fixture(autouse=True)
+def _forbid_real_nebius_cli(monkeypatch):
+    """Fail fast if a test reaches the real `nebius` CLI.
+
+    Unpatched calls would query (or mutate) the developer's cloud account when
+    the CLI is installed, and raise FileNotFoundError on CI runners without it.
+    Tests that need CLI behaviour patch run_command themselves.
+    """
+    original_run_command = nebius_script.run_command
+
+    def guarded_run_command(command, **kwargs):
+        if command and command[0] == "nebius":
+            raise AssertionError(f"unexpected real nebius CLI call: {command}")
+        return original_run_command(command, **kwargs)
+
+    monkeypatch.setattr(nebius_script, "run_command", guarded_run_command)
 
 
 def test_build_cloud_init_user_data_embeds_username_and_key():
@@ -46,9 +60,9 @@ def test_relative_bundle_paths_cover_training_and_catalog_exports():
 
     paths = nebius_script.relative_bundle_paths(weighted, unweighted, catalog)
 
-    assert Path("babylon/packages/training/python/scripts") in paths
-    assert Path("babylon/packages/training/python/src") in paths
-    assert Path("babylon/packages/training/python/requirements.txt") in paths
+    assert Path("feed/packages/training/python/scripts") in paths
+    assert Path("feed/packages/training/python/src") in paths
+    assert Path("feed/packages/training/python/requirements.txt") in paths
     assert weighted.resolve().relative_to(nebius_script.WORKSPACE_ROOT) in paths
     assert unweighted.resolve().relative_to(nebius_script.WORKSPACE_ROOT) in paths
     assert catalog.resolve().relative_to(nebius_script.WORKSPACE_ROOT) in paths
@@ -76,18 +90,18 @@ def test_remote_workspace_path_uses_staged_location_for_external_inputs(tmp_path
     external_catalog.write_text("{}", encoding="utf-8")
 
     remote_path = nebius_script.remote_workspace_path(
-        "/home/trainer/babylon-workspace",
+        "/home/trainer/feed-workspace",
         external_catalog,
     )
 
-    assert remote_path.startswith("/home/trainer/babylon-workspace/")
-    assert "/babylon/runs/nebius-unified/_inputs/" in remote_path
+    assert remote_path.startswith("/home/trainer/feed-workspace/")
+    assert "/feed/runs/nebius-unified/_inputs/" in remote_path
 
 
 def test_render_remote_script_contains_baseline_lora_and_apollo_steps():
     args = argparse.Namespace(
-        remote_workspace="/home/trainer/babylon-workspace",
-        remote_results_dir="babylon/runs/nebius-unified/latest",
+        remote_workspace="/home/trainer/feed-workspace",
+        remote_results_dir="feed/runs/nebius-unified/latest",
         weighted_export_dir=nebius_script.DEFAULT_WEIGHTED_EXPORT,
         unweighted_export_dir=nebius_script.DEFAULT_UNWEIGHTED_EXPORT,
         scenario_catalog=nebius_script.DEFAULT_SCENARIO_CATALOG,
@@ -157,8 +171,8 @@ def test_score_output_path_uses_decisions_suffix():
 
 def test_build_matrix_filters_to_requested_variants():
     args = argparse.Namespace(
-        remote_workspace="/home/trainer/babylon-workspace",
-        remote_results_dir="babylon/runs/nebius-unified/latest",
+        remote_workspace="/home/trainer/feed-workspace",
+        remote_results_dir="feed/runs/nebius-unified/latest",
         weighted_export_dir=nebius_script.DEFAULT_WEIGHTED_EXPORT,
         unweighted_export_dir=nebius_script.DEFAULT_UNWEIGHTED_EXPORT,
         scenario_catalog=nebius_script.DEFAULT_SCENARIO_CATALOG,
@@ -192,8 +206,8 @@ def test_build_matrix_filters_to_requested_variants():
 
 def test_build_matrix_uses_adapter_only_for_lora_variants():
     args = argparse.Namespace(
-        remote_workspace="/home/trainer/babylon-workspace",
-        remote_results_dir="babylon/runs/nebius-unified/latest",
+        remote_workspace="/home/trainer/feed-workspace",
+        remote_results_dir="feed/runs/nebius-unified/latest",
         weighted_export_dir=nebius_script.DEFAULT_WEIGHTED_EXPORT,
         unweighted_export_dir=nebius_script.DEFAULT_UNWEIGHTED_EXPORT,
         scenario_catalog=nebius_script.DEFAULT_SCENARIO_CATALOG,
@@ -227,8 +241,8 @@ def test_build_matrix_uses_adapter_only_for_lora_variants():
 
 def test_render_remote_script_uses_variant_subset():
     args = argparse.Namespace(
-        remote_workspace="/home/trainer/babylon-workspace",
-        remote_results_dir="babylon/runs/nebius-unified/latest",
+        remote_workspace="/home/trainer/feed-workspace",
+        remote_results_dir="feed/runs/nebius-unified/latest",
         weighted_export_dir=nebius_script.DEFAULT_WEIGHTED_EXPORT,
         unweighted_export_dir=nebius_script.DEFAULT_UNWEIGHTED_EXPORT,
         scenario_catalog=nebius_script.DEFAULT_SCENARIO_CATALOG,
@@ -261,8 +275,8 @@ def test_render_remote_script_uses_variant_subset():
 
 def test_render_remote_script_interpolates_resume_logging_values():
     args = argparse.Namespace(
-        remote_workspace="/home/trainer/babylon-workspace",
-        remote_results_dir="babylon/runs/nebius-unified/latest",
+        remote_workspace="/home/trainer/feed-workspace",
+        remote_results_dir="feed/runs/nebius-unified/latest",
         weighted_export_dir=nebius_script.DEFAULT_WEIGHTED_EXPORT,
         unweighted_export_dir=nebius_script.DEFAULT_UNWEIGHTED_EXPORT,
         scenario_catalog=nebius_script.DEFAULT_SCENARIO_CATALOG,
@@ -297,8 +311,8 @@ def test_render_remote_script_interpolates_resume_logging_values():
 
 def test_build_matrix_sets_nf4_only_for_lora_variants():
     args = argparse.Namespace(
-        remote_workspace="/home/trainer/babylon-workspace",
-        remote_results_dir="babylon/runs/nebius-unified/latest",
+        remote_workspace="/home/trainer/feed-workspace",
+        remote_results_dir="feed/runs/nebius-unified/latest",
         weighted_export_dir=nebius_script.DEFAULT_WEIGHTED_EXPORT,
         unweighted_export_dir=nebius_script.DEFAULT_UNWEIGHTED_EXPORT,
         scenario_catalog=nebius_script.DEFAULT_SCENARIO_CATALOG,
@@ -330,8 +344,8 @@ def test_build_matrix_sets_nf4_only_for_lora_variants():
 
 def test_build_matrix_adds_turboquant_eval_flags_when_requested():
     args = argparse.Namespace(
-        remote_workspace="/home/trainer/babylon-workspace",
-        remote_results_dir="babylon/runs/nebius-unified/latest",
+        remote_workspace="/home/trainer/feed-workspace",
+        remote_results_dir="feed/runs/nebius-unified/latest",
         weighted_export_dir=nebius_script.DEFAULT_WEIGHTED_EXPORT,
         unweighted_export_dir=nebius_script.DEFAULT_UNWEIGHTED_EXPORT,
         scenario_catalog=nebius_script.DEFAULT_SCENARIO_CATALOG,
@@ -368,7 +382,7 @@ def test_run_nebius_matrix_cli_dry_run_outputs_resolved_plan():
     proc = subprocess.run(
         [
             sys.executable,
-            str(PYTHON_ROOT / "scripts" / "run_nebius_unified_matrix.py"),
+            str(PYTHON_ROOT / "scripts" / "tools" / "run_nebius_unified_matrix.py"),
             "--dry-run",
             "--project-id",
             "dry-run-project",
@@ -408,8 +422,8 @@ def test_build_model_download_command_uses_partial_noncompressed_filtered_rsync(
 
 def test_build_matrix_uses_model_slug_for_non_4b_models():
     args = argparse.Namespace(
-        remote_workspace="/home/trainer/babylon-workspace",
-        remote_results_dir="babylon/runs/nebius-unified/latest",
+        remote_workspace="/home/trainer/feed-workspace",
+        remote_results_dir="feed/runs/nebius-unified/latest",
         weighted_export_dir=nebius_script.DEFAULT_WEIGHTED_EXPORT,
         unweighted_export_dir=nebius_script.DEFAULT_UNWEIGHTED_EXPORT,
         scenario_catalog=nebius_script.DEFAULT_SCENARIO_CATALOG,
@@ -544,6 +558,9 @@ def test_main_deletes_boot_disk_after_instance_create_failure(monkeypatch, tmp_p
 
     monkeypatch.setattr(nebius_script, "create_instance", fail_create_instance)
     monkeypatch.setattr(nebius_script, "delete_boot_disk", fake_delete_boot_disk)
+    # The failed create left no partial instance behind.
+    monkeypatch.setattr(nebius_script, "find_instance_id_by_name", lambda **_kwargs: None)
+    monkeypatch.setattr(nebius_script, "wait_for_disk_detach", lambda _disk_id: None)
     monkeypatch.setattr(
         sys,
         "argv",
@@ -558,12 +575,8 @@ def test_main_deletes_boot_disk_after_instance_create_failure(monkeypatch, tmp_p
         ],
     )
 
-    try:
+    with pytest.raises(RuntimeError, match="create instance failed"):
         nebius_script.main()
-    except RuntimeError as exc:
-        assert str(exc) == "create instance failed"
-    else:
-        raise AssertionError("Expected instance creation failure to be propagated")
 
     assert deleted_disk_ids == ["disk-1"]
 

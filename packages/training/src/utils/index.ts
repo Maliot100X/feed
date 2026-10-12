@@ -14,6 +14,12 @@ export { assertHasLLMCalls, validateLLMCalls } from './synthetic-detector';
  * @returns Array of batches
  */
 export function splitIntoBatches<T>(items: T[], batchSize: number): T[][] {
+  // A zero/negative/fractional size would never advance the loop index.
+  if (!Number.isInteger(batchSize) || batchSize < 1) {
+    throw new Error(
+      `batchSize must be a positive integer, received ${batchSize}`
+    );
+  }
   const batches: T[][] = [];
   for (let i = 0; i < items.length; i += batchSize) {
     batches.push(items.slice(i, i + batchSize));

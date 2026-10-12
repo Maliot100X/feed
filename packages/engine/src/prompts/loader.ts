@@ -2,7 +2,7 @@
  * Prompt Loader Utility
  *
  * Simplified TypeScript-based prompt system for rendering prompts with
- * variable substitution. No bundling required - works natively in Vercel
+ * variable substitution. No bundling required - works natively in serverless runtimes
  * serverless environments.
  */
 
@@ -199,8 +199,6 @@ export function renderPrompt(
     ],
   } = options;
 
-  let rendered = prompt.template;
-
   // Inject current date/time variables
   const now = new Date();
   const dateVariables: Record<string, string | number> = {
@@ -212,34 +210,56 @@ export function renderPrompt(
     currentDay: now.getDate(),
   };
 
-  const allVariables = { ...dateVariables, ...variables };
+  const allVariables: Record<string, JsonValue> = {
+    ...dateVariables,
+    ...variables,
+  };
 
-  for (const [key, value] of Object.entries(allVariables)) {
-    const stringValue = String(value ?? '');
-
-    // Validate non-optional variables are not empty
-    if (!allowEmpty && !optionalVars.includes(key)) {
+  // Match the original template once. Replacement values are opaque data:
+  // dollar sequences and template-like text inside context must stay literal.
+  const rendered = prompt.template.replace(
+    /\{\{([a-zA-Z_][a-zA-Z0-9_]*)\}\}/g,
+    (_placeholder, key: string) => {
+      const value = Object.hasOwn(allVariables, key)
+        ? allVariables[key]
+        : undefined;
+      const optional = optionalVars.includes(key);
       if (value === undefined || value === null) {
-        throw new Error(
-          `Required variable "${key}" is undefined/null in prompt "${prompt.id}"`
-        );
+        const requiredContext = new Set([
+          'marketTable',
+          'npcsList',
+          'validNpcIds',
+          'validTickers',
+          'currentPositions',
+          'conversationHistory',
+          'groupMembers',
+          'marketConditions',
+        ]);
+        if (!optional || requiredContext.has(key)) {
+          throw new Error(
+            `Required variable "${key}" is undefined/null in prompt "${prompt.id}"`
+          );
+        }
+        return '';
       }
-      if (typeof value === 'string' && value.trim().length === 0) {
+      if (
+        !allowEmpty &&
+        !optional &&
+        typeof value === 'string' &&
+        !value.trim()
+      ) {
         throw new Error(
           `Required variable "${key}" is empty string in prompt "${prompt.id}"`
         );
       }
+      if (typeof value === 'number' && !Number.isFinite(value)) {
+        throw new Error(
+          `Variable "${key}" is non-finite in prompt "${prompt.id}"`
+        );
+      }
+      return String(value);
     }
-
-    const pattern = new RegExp(`\\{\\{${key}\\}\\}`, 'g');
-    rendered = rendered.replace(pattern, stringValue);
-  }
-
-  // Replace any remaining unpopulated optional vars with empty string
-  for (const optVar of optionalVars) {
-    const pattern = new RegExp(`\\{\\{${optVar}\\}\\}`, 'g');
-    rendered = rendered.replace(pattern, '');
-  }
+  );
 
   return rendered;
 }

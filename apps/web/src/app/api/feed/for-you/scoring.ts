@@ -1,4 +1,4 @@
-import type { NarrativeStory } from '@babylon/shared';
+import type { NarrativeStory } from '@feed/shared';
 
 const AUTHOR_REPEAT_PENALTY = 0.55;
 const CLUSTER_REPEAT_PENALTY = 0.8;
@@ -153,9 +153,11 @@ export function diversifyForYouStories(
 }
 
 /**
- * Guarantee at least one article every ARTICLE_MAX_GAP items.
- * Uses a single forward pass: collect article positions first, then
- * rebuild the array once — O(n) instead of O(n²) splice-in-loop.
+ * Guarantee at least one article in every ARTICLE_MAX_GAP consecutive output
+ * items while articles remain: once ARTICLE_MAX_GAP - 1 non-articles have been
+ * emitted in a row, the next not-yet-emitted article (in original order) is
+ * pulled forward. Otherwise original order is preserved. Single O(n) pass over
+ * output positions (pulled articles are skipped when reached).
  */
 const ARTICLE_MAX_GAP = 40;
 
@@ -166,66 +168,45 @@ function isArticleStory(story: NarrativeStory): boolean {
 export function ensureArticleSpacing(
   stories: NarrativeStory[]
 ): NarrativeStory[] {
-  if (stories.length === 0) return stories;
-
-  // Collect indices of all articles in original order
-  const articleIndices: number[] = [];
+  const articleQueue: number[] = [];
   for (let i = 0; i < stories.length; i++) {
-    if (isArticleStory(stories[i]!)) articleIndices.push(i);
+    if (isArticleStory(stories[i]!)) articleQueue.push(i);
   }
-  if (articleIndices.length === 0) return [...stories];
+  if (articleQueue.length === 0) return [...stories];
 
-  // Determine which articles need to be pulled forward and to where
-  const pulled = new Set<number>(); // original indices consumed early
-  const insertions: Array<{ before: number; fromIndex: number }> = [];
-  let lastArticlePos = -1;
-  let nextArticlePtr = 0; // pointer into articleIndices
+  const emitted = new Set<number>();
+  let queuePtr = 0;
+  const nextPendingArticle = (): number | null => {
+    while (
+      queuePtr < articleQueue.length &&
+      emitted.has(articleQueue[queuePtr]!)
+    )
+      queuePtr++;
+    return queuePtr < articleQueue.length ? articleQueue[queuePtr]! : null;
+  };
 
+  const result: NarrativeStory[] = [];
+  let sinceArticle = 0;
   for (let i = 0; i < stories.length; i++) {
-    if (isArticleStory(stories[i]!)) {
-      lastArticlePos = i;
-      // advance pointer past any articles at or before i
-      while (
-        nextArticlePtr < articleIndices.length &&
-        articleIndices[nextArticlePtr]! <= i
-      ) {
-        nextArticlePtr++;
-      }
+    if (emitted.has(i)) continue; // already pulled forward
+    const story = stories[i]!;
+    if (isArticleStory(story)) {
+      emitted.add(i);
+      result.push(story);
+      sinceArticle = 0;
       continue;
     }
-
-    if (i - lastArticlePos >= ARTICLE_MAX_GAP) {
-      // Find next unpulled article after current position
-      while (
-        nextArticlePtr < articleIndices.length &&
-        pulled.has(articleIndices[nextArticlePtr]!)
-      ) {
-        nextArticlePtr++;
-      }
-      if (nextArticlePtr < articleIndices.length) {
-        const srcIdx = articleIndices[nextArticlePtr]!;
-        pulled.add(srcIdx);
-        insertions.push({ before: i, fromIndex: srcIdx });
-        lastArticlePos = i; // this position will hold the article
-        nextArticlePtr++;
+    if (sinceArticle >= ARTICLE_MAX_GAP - 1) {
+      const pulled = nextPendingArticle();
+      if (pulled !== null) {
+        emitted.add(pulled);
+        result.push(stories[pulled]!);
+        sinceArticle = 0;
       }
     }
-  }
-
-  if (insertions.length === 0) return [...stories];
-
-  // Build result: walk original array, inserting pulled articles at their targets
-  const result: NarrativeStory[] = [];
-  let insPtr = 0;
-  for (let i = 0; i < stories.length; i++) {
-    // Insert any articles scheduled before this index
-    while (insPtr < insertions.length && insertions[insPtr]!.before === i) {
-      result.push(stories[insertions[insPtr]!.fromIndex]!);
-      insPtr++;
-    }
-    // Skip items that were pulled forward
-    if (pulled.has(i)) continue;
-    result.push(stories[i]!);
+    emitted.add(i);
+    result.push(story);
+    sinceArticle++;
   }
   return result;
 }

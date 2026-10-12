@@ -2,16 +2,17 @@ import {
   and,
   db,
   eq,
+  inArray,
   type JsonValue,
   lt,
   or,
   realtimeOutboxes,
   sql,
-} from '@babylon/db';
-import { logger } from '@babylon/shared';
+} from '@feed/db';
+import { logger } from '@feed/shared';
 import { randomUUID } from 'crypto';
 import { streamAdd } from '../redis';
-import type { RealtimeChannel, RealtimeEventEnvelope } from './index';
+import type { RealtimeEventEnvelope } from './index';
 import { toStreamKey } from './index';
 
 const MAX_ATTEMPTS = 5;
@@ -41,64 +42,114 @@ export async function enqueueOutbox(
   });
 }
 
+/** A claimed row is invisible to other drains for this long. */
+const CLAIM_LEASE_SECONDS = 60;
+
+function parseEnvelope(payload: JsonValue): RealtimeEventEnvelope | null {
+  if (!payload || typeof payload !== 'object' || Array.isArray(payload)) {
+    return null;
+  }
+  const { channel, type, version, data, timestamp } = payload;
+  if (typeof channel !== 'string' || typeof type !== 'string') return null;
+  if (data === undefined) return null;
+  const ts = typeof timestamp === 'number' ? timestamp : Number(timestamp);
+  if (!Number.isFinite(ts)) return null;
+  return {
+    channel,
+    type,
+    version: typeof version === 'string' ? version : undefined,
+    data,
+    timestamp: ts,
+  };
+}
+
+async function markRow(
+  id: string,
+  update: {
+    status: 'sent' | 'failed';
+    lastError: string | null;
+    attempts?: number;
+  }
+): Promise<void> {
+  await db
+    .update(realtimeOutboxes)
+    .set({
+      status: update.status,
+      lastError: update.lastError,
+      updatedAt: new Date(),
+      ...(update.attempts !== undefined && { attempts: update.attempts }),
+    })
+    .where(eq(realtimeOutboxes.id, id));
+}
+
 /**
  * Drain a batch of pending/failed events and publish to Streams.
+ *
+ * Rows are claimed atomically (FOR UPDATE SKIP LOCKED + attempt increment +
+ * lease) so overlapping drains never publish the same row twice; a crashed
+ * drain's claims become eligible again after the lease expires. Every row
+ * ends the batch as sent or failed with its error recorded; malformed rows
+ * are failed permanently.
  */
 export async function drainOutboxBatch(limit: number = BATCH_SIZE): Promise<{
   processed: number;
   sent: number;
   failed: number;
 }> {
-  const rows = await db
-    .select()
+  const claimable = db
+    .select({ id: realtimeOutboxes.id })
     .from(realtimeOutboxes)
     .where(
-      or(
-        eq(realtimeOutboxes.status, 'pending'),
-        and(
-          eq(realtimeOutboxes.status, 'failed'),
-          lt(realtimeOutboxes.attempts, MAX_ATTEMPTS)
+      and(
+        or(
+          eq(realtimeOutboxes.status, 'pending'),
+          and(
+            eq(realtimeOutboxes.status, 'failed'),
+            lt(realtimeOutboxes.attempts, MAX_ATTEMPTS)
+          )
+        ),
+        or(
+          eq(realtimeOutboxes.attempts, 0),
+          lt(
+            realtimeOutboxes.updatedAt,
+            sql`now() - make_interval(secs => ${CLAIM_LEASE_SECONDS})`
+          )
         )
       )
     )
     .orderBy(realtimeOutboxes.createdAt)
-    .limit(limit);
+    .limit(limit)
+    .for('update', { skipLocked: true });
+
+  const rows = await db
+    .update(realtimeOutboxes)
+    .set({
+      attempts: sql`${realtimeOutboxes.attempts} + 1`,
+      updatedAt: new Date(),
+    })
+    .where(inArray(realtimeOutboxes.id, claimable))
+    .returning();
 
   let sent = 0;
   let failed = 0;
 
   for (const row of rows) {
-    // Validate and parse payload from database
-    const payload = row.payload;
-    if (
-      !payload ||
-      typeof payload !== 'object' ||
-      !('channel' in payload) ||
-      !('type' in payload) ||
-      !('data' in payload) ||
-      !('timestamp' in payload)
-    ) {
+    const envelope = parseEnvelope(row.payload);
+    if (!envelope) {
       logger.error(
         'Invalid payload structure in outbox',
         { rowId: row.id },
         'RealtimeOutbox'
       );
+      await markRow(row.id, {
+        status: 'failed',
+        lastError: 'Invalid payload structure',
+        attempts: MAX_ATTEMPTS,
+      });
       failed++;
       continue;
     }
 
-    const envelope: RealtimeEventEnvelope = {
-      channel: payload.channel as RealtimeChannel,
-      type: payload.type as string,
-      version: 'version' in payload ? (payload.version as string) : undefined,
-      data: payload.data as JsonValue,
-      timestamp:
-        typeof payload.timestamp === 'number'
-          ? payload.timestamp
-          : Number(payload.timestamp),
-    };
-
-    // Convert envelope to Record<string, JsonValue> for streamAdd
     const envelopeRecord: Record<string, JsonValue> = {
       channel: envelope.channel,
       type: envelope.type,
@@ -106,17 +157,35 @@ export async function drainOutboxBatch(limit: number = BATCH_SIZE): Promise<{
       data: envelope.data,
       timestamp: envelope.timestamp,
     };
-    await streamAdd(toStreamKey(envelope.channel), envelopeRecord, {
-      maxlen: 10_000,
-    });
-    await db
-      .update(realtimeOutboxes)
-      .set({
-        status: 'sent',
-        attempts: sql`${realtimeOutboxes.attempts} + 1`,
-        lastError: null,
-      })
-      .where(eq(realtimeOutboxes.id, row.id));
+
+    let streamId: string | null;
+    try {
+      streamId = await streamAdd(
+        toStreamKey(envelope.channel),
+        envelopeRecord,
+        {
+          maxlen: 10_000,
+        }
+      );
+    } catch (error) {
+      await markRow(row.id, {
+        status: 'failed',
+        lastError: error instanceof Error ? error.message : String(error),
+      });
+      failed++;
+      continue;
+    }
+
+    if (!streamId) {
+      await markRow(row.id, {
+        status: 'failed',
+        lastError: 'Redis stream unavailable',
+      });
+      failed++;
+      continue;
+    }
+
+    await markRow(row.id, { status: 'sent', lastError: null });
     sent++;
   }
 

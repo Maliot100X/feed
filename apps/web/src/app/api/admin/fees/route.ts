@@ -80,8 +80,8 @@ import {
   successResponse,
   validateDateRange,
   withErrorHandling,
-} from '@babylon/api';
-import type { WhereInput } from '@babylon/db';
+} from '@feed/api';
+import type { WhereInput } from '@feed/db';
 import {
   and,
   count,
@@ -95,9 +95,9 @@ import {
   sum,
   tradingFees,
   users,
-} from '@babylon/db';
-import { FeeService, StaticDataRegistry } from '@babylon/engine';
-import { toISO, toISOOrNull } from '@babylon/shared';
+} from '@feed/db';
+import { FeeService, StaticDataRegistry } from '@feed/engine';
+import { toISO, toISOOrNull } from '@feed/shared';
 import type { NextRequest } from 'next/server';
 
 // Infer the TradingFee type from the schema
@@ -112,7 +112,7 @@ export const GET = withErrorHandling(async (request: NextRequest) => {
   const admin = await requireAdmin(request);
 
   // Apply rate limiting to prevent abuse of expensive stats queries
-  const rateLimitResult = applyRateLimit(
+  const rateLimitResult = await applyRateLimit(
     admin.userId,
     RATE_LIMIT_CONFIGS.ADMIN_STATS
   );

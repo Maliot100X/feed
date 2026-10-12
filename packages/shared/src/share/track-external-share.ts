@@ -1,7 +1,7 @@
 /**
  * External Share Tracking
  *
- * @description Client-side utility for tracking external shares (Twitter, Farcaster, etc.)
+ * @description Client-side utility for tracking external shares (Twitter, etc.)
  * and awarding reputation to users. Makes API calls to record share actions.
  */
 
@@ -9,7 +9,6 @@ import { logger } from '../utils/logger';
 
 export type SharePlatform =
   | 'twitter'
-  | 'farcaster'
   | 'link'
   | 'native'
   | 'download'
@@ -57,7 +56,7 @@ const DEFAULT_RESULT: TrackExternalShareResult = {
  *   platform: 'twitter',
  *   contentType: 'post',
  *   contentId: '123',
- *   url: 'https://babylon.market/post/123',
+ *   url: 'https://feed.fun/post/123',
  *   userId: 'user-123'
  * });
  * ```

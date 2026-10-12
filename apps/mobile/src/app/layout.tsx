@@ -20,8 +20,7 @@ import { initNativeFeatures, updateTheme } from '@/mobile/lib/native-init';
  * Differences from the web layout:
  * - No headers() / host detection (not relevant in native app)
  * - No waitlist host check
- * - No NftAccessGate server-side check
- * - No Vercel Analytics / SpeedInsights
+ * - No web analytics / RUM scripts
  * - All rendering is client-side (required for static export)
  */
 export default function MobileRootLayout({

@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import Any
 
 LOGGER = logging.getLogger(__name__)
-DEFAULT_RELEASE_ROOT = Path(__file__).resolve().parents[4] / "releases" / "scam-defense-managed"
+DEFAULT_RELEASE_ROOT = Path(__file__).resolve().parents[5] / "releases" / "scam-defense-managed"
 
 
 def load_json(path: Path) -> dict[str, Any]:

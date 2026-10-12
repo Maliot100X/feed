@@ -3,7 +3,8 @@ import {
   type BuildSystemStatusInput,
   buildSystemStatusSnapshot,
   formatSystemStatusDiscordMessage,
-} from '@babylon/api';
+  getAlertFingerprint,
+} from '@feed/api';
 
 function createBaseInput(): BuildSystemStatusInput {
   return {
@@ -105,8 +106,8 @@ function createBaseInput(): BuildSystemStatusInput {
     },
     environment: {
       nodeEnv: 'test',
-      vercelEnv: 'preview',
-      region: 'cdg1',
+      deploymentEnv: 'staging',
+      platform: 'cloudflare',
     },
   };
 }
@@ -169,13 +170,32 @@ describe('system-status-service', () => {
     );
   });
 
+  test('omits the memory subsystem where per-process metrics do not exist', () => {
+    const snapshot = buildSystemStatusSnapshot({
+      ...createBaseInput(),
+      performance: {
+        ...createBaseInput().performance,
+        memory: null,
+        server: {
+          ...createBaseInput().performance.server,
+          uptimeSeconds: null,
+          uptimeFormatted: null,
+        },
+      },
+    });
+
+    expect(snapshot.subsystems.map((s) => s.key)).not.toContain('memory');
+  });
+
   test('formats discord alerts with environment and issue context', () => {
+    const baseMemory = createBaseInput().performance.memory;
+    if (!baseMemory) throw new Error('base input must include memory metrics');
     const snapshot = buildSystemStatusSnapshot({
       ...createBaseInput(),
       performance: {
         ...createBaseInput().performance,
         memory: {
-          ...createBaseInput().performance.memory,
+          ...baseMemory,
           usagePercent: 96,
           status: 'critical',
         },
@@ -184,8 +204,35 @@ describe('system-status-service', () => {
 
     const message = formatSystemStatusDiscordMessage(snapshot);
 
-    expect(message).toContain('Babylon CRITICAL system alert');
-    expect(message).toContain('Environment: preview');
+    expect(message).toContain('Feed CRITICAL system alert');
+    expect(message).toContain('Environment: staging');
     expect(message).toContain('Server Memory: 96% heap used');
+  });
+
+  test('alert fingerprint is stable while the same incident ages', () => {
+    const staleAt = (iso: string) =>
+      buildSystemStatusSnapshot({
+        ...createBaseInput(),
+        game: { ...createBaseInput().game!, lastTickAt: new Date(iso) },
+      });
+    const first = staleAt('2026-03-07T11:47:00.000Z');
+    const later = staleAt('2026-03-07T11:30:00.000Z');
+    expect(first.status).toBe('critical');
+    expect(getAlertFingerprint(first)).toBe(getAlertFingerprint(later));
+
+    const healthy = buildSystemStatusSnapshot(createBaseInput());
+    expect(getAlertFingerprint(healthy)).not.toBe(getAlertFingerprint(first));
+  });
+
+  test('does not claim zero LLM errors when errors are not tracked', () => {
+    const snapshot = buildSystemStatusSnapshot({
+      ...createBaseInput(),
+      llm: { ...createBaseInput().llm, errorsLastHour: null },
+    });
+    const llm = snapshot.subsystems.find(
+      (subsystem) => subsystem.key === 'llm'
+    );
+    expect(llm?.summary).toBe('LLM error counts are not tracked');
+    expect(llm?.metric?.value).toBe('n/a');
   });
 });

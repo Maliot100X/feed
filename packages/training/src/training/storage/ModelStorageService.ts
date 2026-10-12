@@ -1,16 +1,16 @@
 /**
- * Model Storage Service (Vercel Blob)
+ * Model Storage Service (Cloudflare R2)
  *
- * Handles model versioning and storage using Vercel Blob.
+ * Handles model versioning and storage using Cloudflare R2.
  * Stores trained models with metadata for easy deployment.
  */
 
-import { db, eq, trainedModels } from '@babylon/db';
-import type { JsonValue } from '@babylon/shared';
-import { del, list, put } from '@vercel/blob';
+import { db, eq, trainedModels } from '@feed/db';
+import type { JsonValue } from '@feed/shared';
 import fs from 'fs/promises';
 import path from 'path';
 import { logger } from '../../utils/logger';
+import { del, list, put, readArtifact } from './r2-object-store';
 
 export interface ModelMetadata {
   trainingBatch?: string;
@@ -32,14 +32,14 @@ export class ModelStorageService {
   private readonly blobPrefix = 'models/';
 
   /**
-   * Upload trained model to Vercel Blob
+   * Upload trained model to Cloudflare R2
    */
   async uploadModel(options: {
     version: string;
     modelPath: string;
     metadata?: ModelVersion['metadata'];
   }): Promise<ModelVersion> {
-    logger.info('Uploading model to Vercel Blob', {
+    logger.info('Uploading model to Cloudflare R2', {
       version: options.version,
       path: options.modelPath,
     });
@@ -48,27 +48,19 @@ export class ModelStorageService {
     const modelData = await fs.readFile(options.modelPath);
     const fileName = path.basename(options.modelPath);
 
-    // Upload to Vercel Blob
+    // Upload to Cloudflare R2
     const blob = await put(
       `${this.blobPrefix}${options.version}/${fileName}`,
-      modelData,
-      {
-        access: 'public', // Models can be publicly downloaded
-        addRandomSuffix: false,
-      }
+      modelData
     );
 
     // Upload metadata
     await put(
       `${this.blobPrefix}${options.version}/metadata.json`,
-      JSON.stringify(options.metadata || {}, null, 2),
-      {
-        access: 'public',
-        addRandomSuffix: false,
-      }
+      JSON.stringify(options.metadata || {}, null, 2)
     );
 
-    logger.info('Model uploaded to Vercel Blob', {
+    logger.info('Model uploaded to Cloudflare R2', {
       version: options.version,
       url: blob.url,
       size: (blob as { size?: number }).size || 0,
@@ -77,7 +69,7 @@ export class ModelStorageService {
     // Save to database using native Drizzle
     await db.insert(trainedModels).values({
       id: `model-${Date.now()}`,
-      modelId: `babylon-agent-${options.version}`,
+      modelId: `feed-agent-${options.version}`,
       version: options.version,
       baseModel:
         (options.metadata?.baseModel as string) || 'unsloth/Qwen3-4B-128K',
@@ -101,7 +93,7 @@ export class ModelStorageService {
   }
 
   /**
-   * Download model from Vercel Blob
+   * Download model from Cloudflare R2
    */
   async downloadModel(version: string): Promise<{
     modelData: Buffer;
@@ -120,12 +112,12 @@ export class ModelStorageService {
     }
 
     // Download model file
-    const modelResponse = await fetch(model.storagePath);
+    const modelResponse = await readArtifact(model.storagePath);
     const modelData = Buffer.from(await modelResponse.arrayBuffer());
 
     // Download metadata
     const metadataUrl = model.storagePath.replace(/\/[^/]+$/, '/metadata.json');
-    const metadataResponse = await fetch(metadataUrl);
+    const metadataResponse = await readArtifact(metadataUrl);
     const metadata =
       (await metadataResponse.json()) as ModelVersion['metadata'];
 
@@ -197,7 +189,7 @@ export class ModelStorageService {
             b.pathname.endsWith('metadata.json')
           );
           if (metadataBlob) {
-            const response = await fetch(metadataBlob.url);
+            const response = await readArtifact(metadataBlob.url);
             metadata = (await response.json()) as ModelVersion['metadata'];
           }
         } catch {
@@ -244,7 +236,7 @@ export class ModelStorageService {
       })
       .where(eq(trainedModels.version, version));
 
-    logger.info('Model deleted from Vercel Blob', { version });
+    logger.info('Model deleted from Cloudflare R2', { version });
   }
 
   /**

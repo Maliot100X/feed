@@ -5,7 +5,7 @@
  * @access Authenticated
  *
  * @description
- * Links a social account (Farcaster, Twitter) to user profile.
+ * Links a social account (Twitter) to user profile.
  * Awards points if this is the first time linking this platform.
  *
  * @openapi
@@ -35,7 +35,7 @@
  *             properties:
  *               platform:
  *                 type: string
- *                 enum: [farcaster, twitter]
+ *                 enum: [twitter]
  *               username:
  *                 type: string
  *                 description: Username for social platform
@@ -57,7 +57,7 @@
  *   method: 'POST',
  *   headers: { 'Authorization': `Bearer ${token}` },
  *   body: JSON.stringify({
- *     platform: 'farcaster',
+ *     platform: 'twitter',
  *     username: 'username'
  *   })
  * });
@@ -73,15 +73,15 @@ import {
   requireUserByIdentifier,
   successResponse,
   withErrorHandling,
-} from '@babylon/api';
-import { and, db, eq, ne, users } from '@babylon/db';
-import { logger, UserIdParamSchema } from '@babylon/shared';
+} from '@feed/api';
+import { and, db, eq, ne, users } from '@feed/db';
+import { logger, UserIdParamSchema } from '@feed/shared';
 import type { NextRequest } from 'next/server';
 import { z } from 'zod';
 import { trackServerEvent } from '@/lib/posthog/server';
 
 const LinkSocialRequestSchema = z.object({
-  platform: z.enum(['farcaster', 'twitter']),
+  platform: z.enum(['twitter']),
   username: z.string().optional(),
 });
 
@@ -122,9 +122,7 @@ export const POST = withErrorHandling(
     // Get current user state
     const [user] = await db
       .select({
-        hasFarcaster: users.hasFarcaster,
         hasTwitter: users.hasTwitter,
-        farcasterFid: users.farcasterFid,
         twitterId: users.twitterId,
       })
       .from(users)
@@ -138,28 +136,6 @@ export const POST = withErrorHandling(
     // Check if already linked
     let alreadyLinked = false;
     switch (platform) {
-      case 'farcaster':
-        alreadyLinked = user.hasFarcaster;
-        // Check if Farcaster username is already linked to another user
-        if (username && !alreadyLinked) {
-          const [existingFarcasterUser] = await db
-            .select({ id: users.id })
-            .from(users)
-            .where(
-              and(
-                eq(users.farcasterUsername, username),
-                ne(users.id, canonicalUserId)
-              )
-            )
-            .limit(1);
-          if (existingFarcasterUser) {
-            throw new ConflictError(
-              'Farcaster account already linked to another user',
-              'User.farcasterUsername'
-            );
-          }
-        }
-        break;
       case 'twitter':
         alreadyLinked = user.hasTwitter;
         // Check if Twitter account is already linked to another user
@@ -187,10 +163,6 @@ export const POST = withErrorHandling(
     // Update user with social connection
     const updateData: Partial<typeof users.$inferInsert> = {};
     switch (platform) {
-      case 'farcaster':
-        updateData.hasFarcaster = true;
-        if (username) updateData.farcasterUsername = username;
-        break;
       case 'twitter':
         updateData.hasTwitter = true;
         if (username) updateData.twitterUsername = username;
@@ -203,12 +175,6 @@ export const POST = withErrorHandling(
     let pointsResult;
     if (!alreadyLinked) {
       switch (platform) {
-        case 'farcaster':
-          pointsResult = await ReputationService.awardFarcasterLink(
-            canonicalUserId,
-            username
-          );
-          break;
         case 'twitter':
           pointsResult = await ReputationService.awardTwitterLink(
             canonicalUserId,

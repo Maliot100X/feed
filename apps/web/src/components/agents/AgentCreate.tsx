@@ -12,7 +12,7 @@ import {
   getAgentDefaultProfileImageUrl,
   parseAgentPresetProfileIndex,
   TOTAL_AGENT_DEFAULT_PROFILE_PICTURES,
-} from '@babylon/shared';
+} from '@feed/shared';
 import { Check, Loader2, Wallet, X as XIcon } from 'lucide-react';
 import { useCallback, useState } from 'react';
 import { toast } from 'sonner';
@@ -27,10 +27,12 @@ import { useAgentForm } from '@/components/agents/create/hooks';
 import { Skeleton } from '@/components/shared/Skeleton';
 import { useAuth } from '@/hooks/useAuth';
 import { useWalletBalance } from '@/hooks/useWalletBalance';
-import { apiUrl } from '@/utils/api-url';
+import { readApiErrorMessage } from '@/utils/api-error';
+import { apiFetch } from '@/utils/api-fetch';
 
 const TOTAL_BANNERS = 100;
 const DEFAULT_MAX_DEPOSIT = 10000;
+const MIN_DEPOSIT = 10;
 
 enum Step {
   Profile = 1,
@@ -68,7 +70,7 @@ export function AgentCreate({
   onSuccess,
   compact = false,
 }: AgentCreateProps) {
-  const { authenticated, getAccessToken, user: authUser } = useAuth();
+  const { authenticated, user: authUser } = useAuth();
 
   // Fetch balance fresh from API
   const { balance, loading: balanceLoading } = useWalletBalance(authUser?.id, {
@@ -132,11 +134,9 @@ export function AgentCreate({
     setCurrentStep(Step.Settings);
   }, [agentData.system]);
 
-  // User balance for max deposit
-  const maxDeposit = Math.max(
-    100,
-    Math.min(balance || DEFAULT_MAX_DEPOSIT, DEFAULT_MAX_DEPOSIT)
-  );
+  // The deposit can never exceed the user's actual balance (0 is a real
+  // balance, not "unknown"); DEFAULT_MAX_DEPOSIT is the product cap.
+  const maxDeposit = Math.max(0, Math.min(balance, DEFAULT_MAX_DEPOSIT));
 
   // Cycle through pre-made images
   const cycleImage = useCallback(
@@ -196,78 +196,93 @@ export function AgentCreate({
       toast.error('System prompt is required');
       return;
     }
+    if (balanceLoading) {
+      toast.error('Still loading your balance. Please try again.');
+      return;
+    }
+    const deposit = agentData.initialDeposit;
+    if (
+      !Number.isInteger(deposit) ||
+      deposit < MIN_DEPOSIT ||
+      deposit > maxDeposit
+    ) {
+      toast.error(
+        maxDeposit < MIN_DEPOSIT
+          ? `You need at least ${MIN_DEPOSIT} points to fund an agent.`
+          : `Initial deposit must be between ${MIN_DEPOSIT} and ${maxDeposit.toLocaleString()} points.`
+      );
+      return;
+    }
 
     setIsCreating(true);
+    try {
+      // Split personality by newlines for bio array
+      const bioArray = agentData.personality
+        .split('\n')
+        .filter((b) => b.trim());
 
-    const token = await getAccessToken();
-    if (!token) {
-      toast.error('Please sign in to create an agent');
-      setIsCreating(false);
-      return;
-    }
+      // Append trading strategy to system prompt
+      const systemPrompt = agentData.tradingStrategy.trim()
+        ? `${agentData.system}\n\nTrading Strategy: ${agentData.tradingStrategy}`
+        : agentData.system;
 
-    // Split personality by newlines for bio array
-    const bioArray = agentData.personality.split('\n').filter((b) => b.trim());
+      // Step 1: Create the agent
+      const response = await apiFetch('/api/agents', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          name: profileData.displayName,
+          username: profileData.username,
+          description: profileData.bio,
+          profileImageUrl: profileData.profileImageUrl,
+          coverImageUrl: profileData.coverImageUrl,
+          system: systemPrompt,
+          bio: bioArray,
+          personality: agentData.personality,
+          tradingStrategy: agentData.tradingStrategy,
+          initialDeposit: agentData.initialDeposit,
+          modelTier: settingsData.modelTier,
+          autonomousEnabled: settingsData.autonomousEnabled,
+          autonomousPosting: settingsData.autonomousPosting,
+          autonomousCommenting: settingsData.autonomousCommenting,
+          autonomousDMs: settingsData.autonomousDMs,
+          autonomousGroupChats: settingsData.autonomousGroupChats,
+          a2aEnabled: settingsData.a2aEnabled,
+        }),
+      });
 
-    // Append trading strategy to system prompt
-    const systemPrompt = agentData.tradingStrategy.trim()
-      ? `${agentData.system}\n\nTrading Strategy: ${agentData.tradingStrategy}`
-      : agentData.system;
+      if (!response.ok) {
+        toast.error(
+          await readApiErrorMessage(response, 'Failed to create agent')
+        );
+        return;
+      }
 
-    // Step 1: Create the agent
-    const response = await fetch(apiUrl('/api/agents'), {
-      method: 'POST',
-      headers: {
-        Authorization: `Bearer ${token}`,
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify({
-        name: profileData.displayName,
+      const result = (await response.json()) as { agent: { id: string } };
+      const agentId = result.agent.id;
+
+      clearDraft();
+
+      // Call success callback with agent info including all relevant fields
+      onSuccess?.({
+        id: agentId,
         username: profileData.username,
-        description: profileData.bio,
-        profileImageUrl: profileData.profileImageUrl,
-        coverImageUrl: profileData.coverImageUrl,
-        system: systemPrompt,
-        bio: bioArray,
-        personality: agentData.personality,
-        tradingStrategy: agentData.tradingStrategy,
-        initialDeposit: agentData.initialDeposit,
+        displayName: profileData.displayName || null,
+        profileImageUrl: profileData.profileImageUrl || null,
         modelTier: settingsData.modelTier,
-        autonomousEnabled: settingsData.autonomousEnabled,
-        autonomousPosting: settingsData.autonomousPosting,
-        autonomousCommenting: settingsData.autonomousCommenting,
-        autonomousDMs: settingsData.autonomousDMs,
-        autonomousGroupChats: settingsData.autonomousGroupChats,
-        a2aEnabled: settingsData.a2aEnabled,
-      }),
-    });
-
-    if (!response.ok) {
-      const errorData = await response.json().catch(() => ({}));
-      toast.error(errorData.error || 'Failed to create agent');
+        virtualBalance: agentData.initialDeposit,
+      });
+    } catch {
+      toast.error('Network error while creating agent. Please try again.');
+    } finally {
       setIsCreating(false);
-      return;
     }
-
-    const result = await response.json();
-    const agentId = result.agent.id;
-
-    clearDraft();
-
-    // Call success callback with agent info including all relevant fields
-    onSuccess?.({
-      id: agentId,
-      username: profileData.username,
-      displayName: profileData.displayName || null,
-      profileImageUrl: profileData.profileImageUrl || null,
-      modelTier: settingsData.modelTier,
-      virtualBalance: agentData.initialDeposit,
-    });
   }, [
     profileData,
     agentData,
     settingsData,
-    getAccessToken,
+    balanceLoading,
+    maxDeposit,
     clearDraft,
     onSuccess,
   ]);

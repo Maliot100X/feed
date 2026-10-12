@@ -1,6 +1,6 @@
 'use client';
 
-import { cn } from '@babylon/shared';
+import { cn } from '@feed/shared';
 import {
   AnimatePresence,
   animate,
@@ -11,6 +11,7 @@ import {
 import { ChevronRight, TrendingDown, Trophy, X } from 'lucide-react';
 import { useRouter } from 'next/navigation';
 import { useCallback, useEffect, useRef, useState } from 'react';
+import { safeReturnTo } from '@/lib/auth/safe-return-to';
 
 const AUTO_DISMISS_MS = 10000;
 const PARTICLES_PER_WAVE = 400;
@@ -382,11 +383,7 @@ export function OutcomeNotificationPopup({
     if (!notification) return;
     clearTimer();
     onDismiss();
-    // Guard against open redirects — deep links must be relative paths
-    const safeLink = notification.deepLink.startsWith('/')
-      ? notification.deepLink
-      : '/';
-    router.push(safeLink);
+    router.push(safeReturnTo(notification.deepLink));
   }, [notification, onDismiss, clearTimer, router]);
 
   const isWin = notification?.outcome === 'win';

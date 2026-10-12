@@ -21,13 +21,9 @@ def load_script_module(module_name: str, script_path: Path):
     return module
 
 
-_first_script = Path(__file__).resolve().parent.parent / "scripts" / "deduplicate_training_data.py"
-if not _first_script.exists():
-    pytest.skip("script not found: deduplicate_training_data.py", allow_module_level=True)
-
 dedup = load_script_module(
     "deduplicate_training_data",
-    PYTHON_ROOT / "scripts" / "deduplicate_training_data.py",
+    PYTHON_ROOT / "scripts" / "data-prep" / "deduplicate_training_data.py",
 )
 
 
@@ -94,7 +90,7 @@ def test_deduplicate_cli_logs_missing_input(tmp_path: Path):
     proc = subprocess.run(
         [
             sys.executable,
-            str(PYTHON_ROOT / "scripts" / "deduplicate_training_data.py"),
+            str(PYTHON_ROOT / "scripts" / "data-prep" / "deduplicate_training_data.py"),
             "--input",
             str(tmp_path / "missing.jsonl"),
         ],

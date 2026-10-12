@@ -7,8 +7,8 @@
  * the AdminAuditLog database table (for persistence and reporting).
  */
 
-import { adminAuditLogs, db } from '@babylon/db';
-import { generateSnowflakeId, logger } from '@babylon/shared';
+import { adminAuditLogs, db } from '@feed/db';
+import { generateSnowflakeId, logger } from '@feed/shared';
 import type { JsonValue } from './types';
 
 export interface AdminAuditContext {
@@ -54,23 +54,24 @@ export async function logAdminAction(
     'AdminAudit'
   );
 
-  // Persist to database asynchronously (don't block on this)
-  void persistAuditLog(action, context);
+  // Await persistence so the record is written before the response
+  // completes (request-scoped runtimes may drop work after the response).
+  await persistAuditLog(action, context);
 }
 
 /**
- * Persist audit log to database
- * Silently fails if the AdminAuditLog table doesn't exist (migration not yet applied)
+ * Persist audit log to database.
+ *
+ * A persistence failure is logged and does not fail the admin operation
+ * (which has already been applied); the console log above remains.
  */
 async function persistAuditLog(
   action: string,
   context: AdminAuditContext
 ): Promise<void> {
-  const id = await generateSnowflakeId();
-
-  await db
-    .insert(adminAuditLogs)
-    .values({
+  try {
+    const id = await generateSnowflakeId();
+    await db.insert(adminAuditLogs).values({
       id,
       adminId: context.adminId,
       action,
@@ -81,15 +82,20 @@ async function persistAuditLog(
       ipAddress: context.ipAddress ?? null,
       userAgent: context.userAgent ?? null,
       metadata: context.metadata ?? null,
-    })
-    .catch((err: Error) => {
-      // Log but don't throw - table might not exist yet (migration not applied)
-      logger.warn(
-        `Failed to persist audit log: ${err.message}`,
-        { action, resourceType: context.resourceType },
-        'AdminAudit'
-      );
     });
+  } catch (error) {
+    logger.error(
+      'Failed to persist admin audit log',
+      {
+        action,
+        adminId: context.adminId,
+        resourceType: context.resourceType,
+        resourceId: context.resourceId,
+        error: error instanceof Error ? error.message : String(error),
+      },
+      'AdminAudit'
+    );
+  }
 }
 
 /**

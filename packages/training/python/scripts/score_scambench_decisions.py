@@ -36,13 +36,24 @@ def main() -> int:
 
     catalog = json.loads(Path(args.catalog).read_text(encoding="utf-8"))
     decisions = json.loads(Path(args.decisions).read_text(encoding="utf-8"))
-    scenarios = catalog.get("scenarios", [])
+    scenarios = catalog.get("scenarios") if isinstance(catalog, dict) else catalog
+    if not isinstance(scenarios, list) or not scenarios:
+        # An empty/malformed catalog used to yield a "successful" 0-score report.
+        print(f"No scenarios found in catalog: {args.catalog}", file=sys.stderr)
+        return 1
 
     decisions_by_scenario: dict[str, dict[str, dict[str, Any]]] = {}
     for entry in decisions:
         scenario_id = str(entry.get("scenarioId"))
         stage_id = str(entry.get("stageId"))
-        decisions_by_scenario.setdefault(scenario_id, {})[stage_id] = entry
+        stage_decisions = decisions_by_scenario.setdefault(scenario_id, {})
+        if stage_id in stage_decisions:
+            print(
+                f"Duplicate decision for scenario {scenario_id} stage {stage_id}",
+                file=sys.stderr,
+            )
+            return 1
+        stage_decisions[stage_id] = entry
 
     results: list[dict[str, Any]] = []
     for scenario in scenarios:

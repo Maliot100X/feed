@@ -14,8 +14,8 @@ import {
   llmCallLogs,
   rewardJudgments,
   trajectories,
-} from '@babylon/db'; // keep this at db not engine to avoid circular dep
-import type { JsonValue } from '@babylon/shared';
+} from '@feed/db'; // keep this at db not engine to avoid circular dep
+import type { JsonValue } from '@feed/shared';
 import { logger } from '../utils/logger';
 import { generateSnowflakeId } from '../utils/snowflake';
 import { computeDeterministicRewardJudgment } from './reward-judgments';
@@ -82,6 +82,8 @@ export interface StartTrajectoryOptions {
  * Options for ending a trajectory.
  */
 export interface EndTrajectoryOptions {
+  /** Terminal execution failure, including errors before any action completed. */
+  failure?: string;
   /** Final account balance */
   finalBalance?: number;
   /** Final profit/loss */
@@ -219,6 +221,12 @@ export class TrajectoryRecorder {
     const traj = this.activeTrajectories.get(trajectoryId);
     if (!traj) {
       throw new Error(`Trajectory not found: ${trajectoryId}`);
+    }
+
+    if (traj.currentStep) {
+      throw new Error(
+        `Cannot replace unfinished trajectory step: ${trajectoryId}`
+      );
     }
 
     const stepId = `${trajectoryId}-step-${traj.steps.length}`;
@@ -366,6 +374,23 @@ export class TrajectoryRecorder {
       throw new Error(`Trajectory not found: ${trajectoryId}`);
     }
 
+    // Never discard model calls in a step that did not reach action completion.
+    if (traj.currentStep) {
+      this.completeStep(
+        trajectoryId,
+        {
+          actionType: 'INCOMPLETE',
+          actionName: 'INCOMPLETE',
+          parameters: {},
+          success: false,
+          error:
+            options.failure ||
+            'Trajectory ended before the current step completed',
+        },
+        0
+      );
+    }
+
     const endTime = Date.now();
     const durationMs = endTime - traj.startTime;
     const totalReward = traj.steps.reduce((sum, step) => sum + step.reward, 0);
@@ -382,7 +407,10 @@ export class TrajectoryRecorder {
       s.action.actionType.includes('POST')
     ).length;
 
-    const errorCount = traj.steps.filter((s) => !s.action.success).length;
+    const errorCount = Math.max(
+      traj.steps.filter((s) => !s.action.success).length,
+      options.failure ? 1 : 0
+    );
     const finalStatus = errorCount > 0 ? 'completed_with_errors' : 'completed';
     const deterministicRewardJudgment = computeDeterministicRewardJudgment({
       steps: traj.steps,
@@ -401,6 +429,7 @@ export class TrajectoryRecorder {
 
     const mergedMetadata: Record<string, JsonValue> = {
       ...(traj.metadata || {}),
+      ...(options.failure ? { executionError: options.failure } : {}),
       isTrainingData:
         (traj.metadata?.isTrainingData as boolean | undefined) ?? true,
       scenarioProfile:

@@ -1,5 +1,6 @@
 'use client';
 
+import { logger } from '@feed/shared';
 import {
   createContext,
   type ReactNode,
@@ -7,6 +8,7 @@ import {
   useEffect,
   useState,
 } from 'react';
+import { startEmbedAuthSession } from '@/lib/embed/embed-auth-session';
 
 interface EmbedContextValue {
   /** True when the app is loaded inside an iframe with ?embedded=true. */
@@ -31,14 +33,12 @@ export function useEmbedMode(): EmbedContextValue {
 }
 
 /**
- * Detects embed mode from URL params and listens for BABYLON_AUTH
+ * Detects embed mode from URL params and listens for FEED_AUTH
  * postMessage from the embedding host (Milady desktop/web).
  *
- * Flow:
- * 1. Detect ?embedded=true in URL → set isEmbedded
- * 2. Send { type: "BABYLON_READY" } to parent window
- * 3. Listen for { type: "BABYLON_AUTH", authToken, agentId } response
- * 4. Store credentials in context for use by API layer
+ * Detects ?embedded=true (or being framed) and runs the parent-only auth
+ * handshake from `startEmbedAuthSession`, storing the resulting credentials
+ * in context (and on window for the API layer).
  */
 export function EmbedModeProvider({ children }: { children: ReactNode }) {
   const [isEmbedded, setIsEmbedded] = useState(false);
@@ -48,7 +48,6 @@ export function EmbedModeProvider({ children }: { children: ReactNode }) {
   );
   const [agentId, setAgentId] = useState<string | null>(null);
 
-  // Detect embed mode from URL params
   useEffect(() => {
     if (typeof window === 'undefined') return;
 
@@ -60,80 +59,42 @@ export function EmbedModeProvider({ children }: { children: ReactNode }) {
 
     setIsEmbedded(true);
 
-    // Notify parent that we're ready for auth
-    if (window.parent && window.parent !== window) {
-      try {
-        window.parent.postMessage({ type: 'BABYLON_READY' }, '*');
-      } catch {
-        // Cross-origin restriction — parent will still post to us
+    const parent = window.parent;
+    if (!parent || parent === window) return;
+
+    const embedWindow = window as Window & {
+      __feedEmbedAgentId?: string;
+      __feedEmbedToken?: string;
+    };
+
+    return startEmbedAuthSession(
+      {
+        parent,
+        addEventListener: (type, listener) =>
+          window.addEventListener(type, listener),
+        removeEventListener: (type, listener) =>
+          window.removeEventListener(type, listener),
+      },
+      {
+        onOrigin: setParentOrigin,
+        onAgentId: (id) => {
+          setAgentId(id);
+          embedWindow.__feedEmbedAgentId = id;
+        },
+        onSessionToken: (token) => {
+          setAgentSessionToken(token);
+          embedWindow.__feedEmbedToken = token;
+        },
+        onExchangeError: (error) => {
+          logger.warn(
+            'Agent credential exchange failed',
+            { error: String(error) },
+            'EmbedModeProvider'
+          );
+        },
       }
-    }
+    );
   }, []);
-
-  // Listen for BABYLON_AUTH from parent
-  useEffect(() => {
-    if (!isEmbedded) return;
-
-    async function authenticateWithCredentials(
-      agentIdValue: string,
-      agentSecretValue: string
-    ): Promise<string | null> {
-      try {
-        const res = await fetch('/api/agents/auth', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            agentId: agentIdValue,
-            agentSecret: agentSecretValue,
-          }),
-        });
-        if (!res.ok) return null;
-        const json = (await res.json()) as {
-          token?: string;
-          sessionToken?: string;
-        };
-        return json.token ?? json.sessionToken ?? null;
-      } catch {
-        return null;
-      }
-    }
-
-    function handleMessage(event: MessageEvent) {
-      const data = event.data;
-      if (!data || typeof data !== 'object') return;
-      if (data.type !== 'BABYLON_AUTH') return;
-
-      const secret =
-        typeof data.authToken === 'string' ? data.authToken.trim() : null;
-      const id = typeof data.agentId === 'string' ? data.agentId.trim() : null;
-
-      if (id) {
-        setAgentId(id);
-        (window as unknown as Record<string, unknown>).__babylonEmbedAgentId =
-          id;
-      }
-      setParentOrigin(event.origin);
-
-      // If we received agent credentials, authenticate to get a session token
-      if (id && secret) {
-        void authenticateWithCredentials(id, secret).then((sessionToken) => {
-          if (sessionToken) {
-            setAgentSessionToken(sessionToken);
-            (window as unknown as Record<string, unknown>).__babylonEmbedToken =
-              sessionToken;
-          }
-        });
-      } else if (secret) {
-        // Fallback: use the token directly (pre-authenticated session token)
-        setAgentSessionToken(secret);
-        (window as unknown as Record<string, unknown>).__babylonEmbedToken =
-          secret;
-      }
-    }
-
-    window.addEventListener('message', handleMessage);
-    return () => window.removeEventListener('message', handleMessage);
-  }, [isEmbedded]);
 
   return (
     <EmbedContext.Provider

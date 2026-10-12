@@ -5,7 +5,6 @@
  * Shows the parent chain (walking UP) and direct replies (children).
  */
 
-import { and, comments, db, eq, isNull, posts, users } from '@babylon/db';
 import type {
   Action,
   ActionResult,
@@ -14,6 +13,7 @@ import type {
   Memory,
   State,
 } from '@elizaos/core';
+import { and, comments, db, eq, isNull, posts, users } from '@feed/db';
 import { logger } from '../../../../shared/logger';
 
 const MAX_THREAD_DEPTH = 10;

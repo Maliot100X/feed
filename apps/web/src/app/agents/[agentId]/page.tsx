@@ -1,11 +1,15 @@
 /**
  * Agent Detail Page - Redirects to Team Chat
  *
- * @description This page now redirects to the team chat page.
- * All agent management is done through the team chat interface.
+ * All agent management is done through the team chat interface, so this
+ * route redirects to `/agents/team?selectAgent=<agentId>`.
+ *
+ * Kept as a client component on purpose: the Capacitor mobile app reuses
+ * this page (`apps/mobile/src/app/agents/[agentId]/client.tsx`) inside a
+ * static export, where it is rendered without route props and a server
+ * `redirect()` is not available.
  *
  * @page /agents/[agentId]
- * @redirect /agents/team?selectAgent=[agentId]
  */
 
 'use client';
@@ -15,21 +19,14 @@ export const dynamic = 'force-dynamic';
 import { useParams, useRouter } from 'next/navigation';
 import { useEffect } from 'react';
 
-/**
- * Agent Detail Page Component
- *
- * Redirects to team chat page with the agent selected.
- */
 export default function AgentDetailPage() {
-  const params = useParams();
+  const params = useParams<{ agentId: string }>();
   const router = useRouter();
-  const agentId = params.agentId as string;
+  const agentId = params.agentId;
 
   useEffect(() => {
-    // Redirect to team chat with the agent selected
     router.replace(`/agents/team?selectAgent=${encodeURIComponent(agentId)}`);
   }, [agentId, router]);
 
-  // Show nothing while redirecting
   return null;
 }

@@ -38,11 +38,9 @@ export const OnboardingProfileSchema = z.object({
     .optional()
     .or(z.literal('').transform(() => undefined)),
   // Social account import data
-  importedFrom: z.enum(['twitter', 'farcaster']).optional().nullable(),
+  importedFrom: z.enum(['twitter']).optional().nullable(),
   twitterId: z.string().optional().nullable(),
   twitterUsername: z.string().optional().nullable(),
-  farcasterFid: z.string().optional().nullable(),
-  farcasterUsername: z.string().optional().nullable(),
   // Legal acceptance (required for GDPR compliance)
   tosAccepted: z.boolean().optional(),
   privacyPolicyAccepted: z.boolean().optional(),

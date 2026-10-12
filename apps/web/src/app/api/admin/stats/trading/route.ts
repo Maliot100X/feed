@@ -12,10 +12,10 @@ import {
   validateDateRange,
   validateEnum,
   withErrorHandling,
-} from '@babylon/api';
-import { db } from '@babylon/db';
-import { FEE_CONFIG } from '@babylon/engine';
-import { logger, toISO, toISOOrNull } from '@babylon/shared';
+} from '@feed/api';
+import { db } from '@feed/db';
+import { FEE_CONFIG } from '@feed/engine';
+import { logger, toISO, toISOOrNull } from '@feed/shared';
 import type { NextRequest } from 'next/server';
 
 /** Valid market types for filtering - whitelist to prevent injection */
@@ -30,7 +30,7 @@ export const GET = withErrorHandling(async (request: NextRequest) => {
   const admin = await requirePermission(request, 'view_trading');
 
   // Apply rate limiting to prevent abuse of expensive stats queries
-  const rateLimitResult = applyRateLimit(
+  const rateLimitResult = await applyRateLimit(
     admin.userId,
     RATE_LIMIT_CONFIGS.ADMIN_STATS
   );

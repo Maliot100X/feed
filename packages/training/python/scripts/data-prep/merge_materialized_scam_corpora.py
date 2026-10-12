@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Merge multiple materialized scam/prompt-injection corpora into a single Babylon-
+Merge multiple materialized scam/prompt-injection corpora into a single Feed-
 shaped training/scenario bundle.
 """
 
@@ -163,7 +163,7 @@ def main() -> int:
             raise FileNotFoundError(f"Materialized corpus directories not found: {missing_text}")
         timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H-%M-%SZ")
         default_output = (
-            Path(__file__).resolve().parents[4]
+            Path(__file__).resolve().parents[5]
             / "training-data"
             / "merged-threat-materialized"
             / timestamp

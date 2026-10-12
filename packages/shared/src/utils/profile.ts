@@ -5,6 +5,8 @@
  * usernames vs user IDs. Handles username preference and identifier parsing.
  */
 
+import { resolveUserIdentifierKind } from './user-identifier';
+
 /**
  * Generate a profile URL for a user
  *
@@ -69,50 +71,40 @@ export function getOrganizationProfileUrl(orgId: string): string {
 }
 
 /**
+ * Longest identifier treated as a username. Wider than UsernameSchema (30)
+ * because legacy handles can be wallet addresses (42 chars).
+ */
+const MAX_USERNAME_LENGTH = 42;
+
+/**
  * Check if a profile identifier is a username (not a user ID)
  *
- * @description Determines if an identifier string is a username rather than
- * a user ID. User IDs are typically DIDs (did:privy:...), UUIDs, or contain
- * dashes. Usernames are shorter strings without special patterns.
- *
- * @param {string} identifier - The identifier to check
- * @returns {boolean} True if the identifier appears to be a username
+ * @description Uses the same classifier as server-side user lookup
+ * ({@link resolveUserIdentifierKind}) so the client and server agree. An
+ * explicit `@` prefix always means username; any DID, UUID or snowflake ID is
+ * an ID; values longer than the maximum username length are IDs.
  *
  * @example
  * ```typescript
- * isUsername('alice') // Returns true
- * isUsername('did:privy:abc123') // Returns false
- * isUsername('@alice') // Returns true
- * isUsername('550e8400-e29b-41d4-a716-446655440000') // Returns false (UUID)
+ * isUsername('alice') // true
+ * isUsername('@alice') // true
+ * isUsername('my-handle') // true (hyphens are valid in usernames)
+ * isUsername('did:privy:abc123') // false
+ * isUsername('550e8400-e29b-41d4-a716-446655440000') // false (UUID)
+ * isUsername('263849173829304320') // false (snowflake ID)
  * ```
  */
 export function isUsername(identifier: string): boolean {
-  // If it starts with @, it's definitely a username
   if (identifier.startsWith('@')) {
     return true;
   }
-
-  // If it contains "privy" anywhere, it's definitely a user ID, not a username
-  if (identifier.toLowerCase().includes('privy')) {
-    return false;
-  }
-
-  // If it starts with "did:", it's a DID (user ID)
   if (identifier.startsWith('did:')) {
     return false;
   }
-
-  // If it's a UUID format (contains dashes in UUID pattern), it's a user ID
-  // UUID format: xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx
-  const uuidPattern =
-    /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
-  if (uuidPattern.test(identifier)) {
+  if (identifier.length > MAX_USERNAME_LENGTH) {
     return false;
   }
-
-  // If it's a short string without dashes and not a DID, it's likely a username
-  // User IDs are typically: "did:privy:..." (long) or UUIDs (contain dashes)
-  return identifier.length <= 42 && !identifier.includes('-');
+  return resolveUserIdentifierKind(identifier) === 'username';
 }
 
 /**

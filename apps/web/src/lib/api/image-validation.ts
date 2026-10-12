@@ -1,3 +1,5 @@
+import type { Buffer } from 'node:buffer';
+
 const IMAGE_MAGIC_BYTES: Record<string, number[][]> = {
   'image/jpeg': [
     [0xff, 0xd8, 0xff], // JPEG/JFIF

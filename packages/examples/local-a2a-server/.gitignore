@@ -12,3 +12,8 @@ venv/
 .DS_Store
 
 benchmark-results/
+
+# Local SQLite runtime database (created by src/server.ts)
+data/*.db
+data/*.db-wal
+data/*.db-shm

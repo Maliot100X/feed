@@ -9,17 +9,18 @@
  */
 'use client';
 
-import { cn, formatNumber } from '@babylon/shared';
+import { cn, formatNumber } from '@feed/shared';
 import { Calendar, Clock, RefreshCw } from 'lucide-react';
 import {
   useCallback,
   useEffect,
   useMemo,
+  useRef,
   useState,
   useTransition,
 } from 'react';
 import { Skeleton } from '@/components/shared/Skeleton';
-import { apiUrl } from '@/utils/api-url';
+import { apiFetch } from '@/utils/api-fetch';
 
 type HeatmapType = 'hourly' | 'calendar';
 type ActivityType = 'all' | 'trades' | 'posts' | 'messages';
@@ -122,16 +123,18 @@ export function ActivityHeatmap() {
   const [heatmapType, setHeatmapType] = useState<HeatmapType>('hourly');
   const [activityType, setActivityType] = useState<ActivityType>('all');
   const [isRefreshing, startRefresh] = useTransition();
+  // Only the latest request (current type + activity) may commit results.
+  const requestSeqRef = useRef(0);
 
   const fetchData = useCallback(
     (showRefreshing = false) => {
+      const seq = ++requestSeqRef.current;
       const fetchLogic = async () => {
         setError(null);
-        const response = await fetch(
-          apiUrl(
-            `/api/admin/stats/heatmap?type=${heatmapType}&activityType=${activityType}`
-          )
+        const response = await apiFetch(
+          `/api/admin/stats/heatmap?type=${heatmapType}&activityType=${activityType}`
         );
+        if (seq !== requestSeqRef.current) return;
         if (!response.ok) {
           setData(null);
           setError('Failed to load heatmap data');
@@ -139,18 +142,22 @@ export function ActivityHeatmap() {
           return;
         }
         const result = await response.json();
+        if (seq !== requestSeqRef.current) return;
         setData(result);
         setLoading(false);
       };
 
-      if (showRefreshing) {
-        startRefresh(fetchLogic);
-      } else {
-        void fetchLogic().catch(() => {
+      const run = () =>
+        fetchLogic().catch(() => {
+          if (seq !== requestSeqRef.current) return;
           setData(null);
           setError('Failed to load heatmap data');
           setLoading(false);
         });
+      if (showRefreshing) {
+        startRefresh(run);
+      } else {
+        void run();
       }
     },
     [heatmapType, activityType]
@@ -159,6 +166,23 @@ export function ActivityHeatmap() {
   useEffect(() => {
     fetchData();
   }, [fetchData]);
+
+  // Hooks must run before any early return (loading/error states below).
+  const hourlyPointMap = useMemo(() => {
+    if (data?.type !== 'hourly') return new Map<string, HourlyDataPoint>();
+    return new Map(
+      (data.data as HourlyDataPoint[]).map((p) => [
+        `${p.dayOfWeek}-${p.hour}`,
+        p,
+      ])
+    );
+  }, [data]);
+
+  const selectHeatmapType = (next: HeatmapType) => {
+    if (next === heatmapType) return; // no refetch → would never clear loading
+    setHeatmapType(next);
+    setLoading(true);
+  };
 
   if (loading) {
     return (
@@ -191,13 +215,7 @@ export function ActivityHeatmap() {
   }
 
   const isHourly = data.type === 'hourly';
-  const hourlyData = isHourly ? (data.data as HourlyDataPoint[]) : [];
   const calendarData = !isHourly ? (data.data as CalendarDataPoint[]) : [];
-
-  const hourlyPointMap = useMemo(() => {
-    if (!isHourly) return new Map<string, HourlyDataPoint>();
-    return new Map(hourlyData.map((p) => [`${p.dayOfWeek}-${p.hour}`, p]));
-  }, [hourlyData, isHourly]);
 
   return (
     <div className="rounded-xl border border-border bg-card p-6">
@@ -216,10 +234,9 @@ export function ActivityHeatmap() {
           {/* Heatmap Type Toggle */}
           <div className="flex rounded-lg border border-border bg-background">
             <button
-              onClick={() => {
-                setHeatmapType('hourly');
-                setLoading(true);
-              }}
+              type="button"
+              aria-pressed={heatmapType === 'hourly'}
+              onClick={() => selectHeatmapType('hourly')}
               className={cn(
                 'flex items-center gap-1.5 rounded-l-lg px-3 py-1.5 font-medium text-xs transition-colors',
                 heatmapType === 'hourly'
@@ -231,10 +248,9 @@ export function ActivityHeatmap() {
               Hourly
             </button>
             <button
-              onClick={() => {
-                setHeatmapType('calendar');
-                setLoading(true);
-              }}
+              type="button"
+              aria-pressed={heatmapType === 'calendar'}
+              onClick={() => selectHeatmapType('calendar')}
               className={cn(
                 'flex items-center gap-1.5 rounded-r-lg px-3 py-1.5 font-medium text-xs transition-colors',
                 heatmapType === 'calendar'
@@ -250,8 +266,11 @@ export function ActivityHeatmap() {
           {/* Activity Type Selector */}
           <select
             value={activityType}
+            aria-label="Activity type"
             onChange={(e) => {
-              setActivityType(e.target.value as ActivityType);
+              const next = e.target.value as ActivityType;
+              if (next === activityType) return;
+              setActivityType(next);
               setLoading(true);
             }}
             className="rounded-lg border border-border bg-background px-3 py-1.5 font-medium text-xs"

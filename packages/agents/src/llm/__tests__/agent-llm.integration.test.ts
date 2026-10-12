@@ -171,7 +171,7 @@ describe('Agent LLM Provider', () => {
           return new Response(
             JSON.stringify({
               models: [
-                { name: 'babylon-trader:latest', size: 1000000 },
+                { name: 'feed-trader:latest', size: 1000000 },
                 { name: 'qwen2.5:7b-instruct', size: 2000000 },
               ],
             }),
@@ -181,7 +181,7 @@ describe('Agent LLM Provider', () => {
 
         if (url.includes('/api/chat')) {
           const body = JSON.parse(options.body as string);
-          expect(body.model).toBe('babylon-trader:latest');
+          expect(body.model).toBe('feed-trader:latest');
           return new Response(
             JSON.stringify({
               message: { content: 'Trader response' },
@@ -202,7 +202,7 @@ describe('Agent LLM Provider', () => {
       expect(result).toBe('Trader response');
     });
 
-    it('falls back to base model if archetype model not found', async () => {
+    it('fails when the required archetype model is unavailable', async () => {
       process.env.AGENT_LLM_PROVIDER = 'ollama';
       process.env.OLLAMA_BASE_URL = 'http://localhost:11434';
 
@@ -234,12 +234,9 @@ describe('Agent LLM Provider', () => {
       });
 
       const { callAgentLLM } = await import('../agent-llm');
-      const result = await callAgentLLM({
-        prompt: 'Trade decision',
-        archetype: 'trader',
-      });
-
-      expect(result).toBe('Fallback response');
+      await expect(
+        callAgentLLM({ prompt: 'Trade decision', archetype: 'trader' })
+      ).rejects.toThrow('Required Ollama model is unavailable');
     });
   });
 
@@ -291,7 +288,7 @@ describe('Agent LLM Provider', () => {
         expect(url).toBe('https://my-model.hf.space/v1/chat/completions');
 
         const body = JSON.parse(options.body as string);
-        expect(body.model).toBe('babylon-trader');
+        expect(body.model).toBe('feed-trader');
         expect(body.messages).toHaveLength(2);
         expect(body.temperature).toBe(0.7);
         expect(body.max_tokens).toBe(1000);
@@ -389,7 +386,7 @@ describe('Agent LLM Provider', () => {
         expect(options.method).toBe('POST');
 
         const body = JSON.parse(options.body as string);
-        expect(body.model).toBe('babylon-trader');
+        expect(body.model).toBe('feed-trader');
         expect(body.messages).toHaveLength(2);
         expect(body.temperature).toBe(0.8);
 

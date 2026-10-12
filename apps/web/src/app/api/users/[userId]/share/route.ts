@@ -8,7 +8,7 @@
  * @description
  * GET: Retrieves verified and earned shares for a user by content type
  * POST: Tracks a share action and awards points. Supports multiple platforms
- * (Twitter, Farcaster, Link, Telegram, Discord) and content types.
+ * (Twitter, Link, Telegram, Discord) and content types.
  *
  * @openapi
  * /api/users/{userId}/share:
@@ -60,7 +60,7 @@
  *             properties:
  *               platform:
  *                 type: string
- *                 enum: [twitter, farcaster, link, telegram, discord]
+ *                 enum: [twitter, link, telegram, discord]
  *               contentType:
  *                 type: string
  *                 enum: [post, profile, market, referral, leaderboard]
@@ -107,18 +107,14 @@ import {
   requireUserByIdentifier,
   successResponse,
   withErrorHandling,
-} from '@babylon/api';
-import { and, db, desc, eq, shareActions } from '@babylon/db';
-import {
-  generateSnowflakeId,
-  logger,
-  UserIdParamSchema,
-} from '@babylon/shared';
+} from '@feed/api';
+import { and, db, desc, eq, shareActions } from '@feed/db';
+import { generateSnowflakeId, logger, UserIdParamSchema } from '@feed/shared';
 import type { NextRequest } from 'next/server';
 import { z } from 'zod';
 
 const ShareRequestSchema = z.object({
-  platform: z.enum(['twitter', 'farcaster', 'link', 'telegram', 'discord']),
+  platform: z.enum(['twitter', 'link', 'telegram', 'discord']),
   contentType: z.enum(['post', 'profile', 'market', 'referral', 'leaderboard']),
   contentId: z.string().optional(), // Allow any string (user IDs can be Privy DIDs or Snowflake IDs)
   url: z.string().url().optional(),

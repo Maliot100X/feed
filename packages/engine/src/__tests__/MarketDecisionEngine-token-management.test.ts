@@ -111,7 +111,7 @@ const mockDb = {
 const mockTable = {};
 const mockOperator = () => ({});
 
-mock.module('@babylon/db', () => ({
+mock.module('@feed/db', () => ({
   db: mockDb,
   // Schema tables
   markets: mockTable,
@@ -176,7 +176,7 @@ mock.module('../prompts/world-context', () => ({
   checkRealityGrounding: () => ({ isGrounded: true }),
 }));
 
-import type { BabylonLLMClient } from '../llm/openai-client';
+import type { FeedLLMClient } from '../llm/openai-client';
 import { MarketDecisionEngine } from '../MarketDecisionEngine';
 import { MarketContextService } from '../services/market-context-service';
 import type { NPCMarketContext, NPCPosition } from '../types/market-context';
@@ -212,7 +212,7 @@ class MockLLMClient {
   private callCount = 0;
 
   constructor() {
-    // No super() call - this is a standalone mock that doesn't extend BabylonLLMClient
+    // No super() call - this is a standalone mock that doesn't extend FeedLLMClient
   }
 
   getProvider(): string {
@@ -244,27 +244,27 @@ class MockLLMClient {
 }
 
 /**
- * Partial interface for MockLLMClient that matches BabylonLLMClient's required methods
+ * Partial interface for MockLLMClient that matches FeedLLMClient's required methods
  */
 interface MockLLMClientInterface
-  extends Pick<BabylonLLMClient, 'getProvider' | 'generateJSON'> {
+  extends Pick<FeedLLMClient, 'getProvider' | 'generateJSON'> {
   setMockResponse<T extends MockResponse>(response: T): void;
   getCallCount(): number;
   resetCallCount(): void;
 }
 
-// Type assertion to make MockLLMClient compatible with BabylonLLMClient interface
+// Type assertion to make MockLLMClient compatible with FeedLLMClient interface
 // Returns both the mock instance (for test methods) and the LLM client (for engine)
 const createMockLLMClient = (): {
   mock: MockLLMClient;
-  client: BabylonLLMClient;
+  client: FeedLLMClient;
 } => {
   const mockInstance = new MockLLMClient();
   // Cast via the partial interface to ensure type safety
   const mockAsInterface: MockLLMClientInterface = mockInstance;
   return {
     mock: mockInstance,
-    client: mockAsInterface as BabylonLLMClient,
+    client: mockAsInterface as FeedLLMClient,
   };
 };
 
@@ -340,7 +340,7 @@ function createMockNPC(id: string, name: string): NPCMarketContext {
 }
 
 describe('MarketDecisionEngine - Token Management', () => {
-  let mockLLM: BabylonLLMClient;
+  let mockLLM: FeedLLMClient;
   let mockLLMInstance: MockLLMClient;
   let mockContext: MockContextService;
   let originalMathRandom: typeof Math.random;
@@ -552,7 +552,7 @@ describe('MarketDecisionEngine - Token Management', () => {
       expect(decisions[0]?.action).toBe('hold');
     });
 
-    test('should return empty array for invalid response format', async () => {
+    test('should reject invalid response format', async () => {
       const npcs = [createMockNPC('npc1', 'NPC 1')];
       mockContext.setMockNPCs(npcs);
 
@@ -560,9 +560,7 @@ describe('MarketDecisionEngine - Token Management', () => {
       mockLLMInstance.setMockResponse(mockResponse);
 
       const engine = new MarketDecisionEngine(mockLLM, mockContext);
-      const decisions = await engine.generateBatchDecisions();
-
-      expect(decisions.length).toBe(0);
+      await expect(engine.generateBatchDecisions()).rejects.toThrow();
     });
   });
 
@@ -684,8 +682,7 @@ describe('MarketDecisionEngine - Token Management', () => {
 
       // In test mode, exceeding balance skips the decision (no throw)
       // In dev mode, it would throw - but tests skip fail-fast behavior
-      const decisions = await engine.generateBatchDecisions();
-      expect(decisions.length).toBe(0); // Decision rejected due to exceeding balance
+      await expect(engine.generateBatchDecisions()).rejects.toThrow();
     });
 
     test('should accept valid trade decisions', async () => {
@@ -735,9 +732,7 @@ describe('MarketDecisionEngine - Token Management', () => {
       ]);
 
       const engine = new MarketDecisionEngine(mockLLM, mockContext);
-      const decisions = await engine.generateBatchDecisions();
-
-      expect(decisions.length).toBe(0);
+      await expect(engine.generateBatchDecisions()).rejects.toThrow();
     });
 
     test('should map prediction sells to the held position id', async () => {
@@ -790,7 +785,7 @@ describe('MarketDecisionEngine - Token Management', () => {
       expect(decisions.length).toBe(0);
     });
 
-    test('should handle batch failure with individual retry', async () => {
+    test('should propagate batch failure without manufacturing holds', async () => {
       const npcs = [
         createMockNPC('npc1', 'NPC 1'),
         createMockNPC('npc2', 'NPC 2'),
@@ -825,9 +820,7 @@ describe('MarketDecisionEngine - Token Management', () => {
 
       const engine = new MarketDecisionEngine(mockLLM, mockContext);
 
-      const decisions = await engine.generateBatchDecisions();
-
-      expect(decisions).toBeDefined();
+      await expect(engine.generateBatchDecisions()).rejects.toThrow();
     });
   });
 

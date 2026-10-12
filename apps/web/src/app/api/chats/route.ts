@@ -171,12 +171,7 @@ import {
   ReputationService,
   successResponse,
   withErrorHandling,
-} from '@babylon/api';
-import {
-  canAccessNftChatGate,
-  getNftChatGatingConfig,
-  reconcileNftChatMembershipForUser,
-} from '@babylon/api/services/nft-chat-gating-service';
+} from '@feed/api';
 // Import from new Drizzle client
 import {
   and,
@@ -192,15 +187,13 @@ import {
   inArray,
   messages,
   users,
-} from '@babylon/db';
+} from '@feed/db';
 import {
   ChatCreateSchema,
   ChatQuerySchema,
   generateSnowflakeId,
-  getChainName,
-  getCurrentChainId,
   logger,
-} from '@babylon/shared';
+} from '@feed/shared';
 import type { NextRequest } from 'next/server';
 
 /**
@@ -310,29 +303,6 @@ export const GET = withErrorHandling(async (request: NextRequest) => {
 
   const user = await authenticate(request);
 
-  // Best-effort reconciliation: grant/revoke gated chat membership based on the
-  // latest access check (on-chain when available; falls back when degraded).
-  if (user.dbUserId) {
-    try {
-      await reconcileNftChatMembershipForUser({
-        dbUserId: user.dbUserId,
-        isAgent: user.isAgent,
-      });
-    } catch (error) {
-      logger.warn(
-        'NFT chat reconciliation failed',
-        { error, userId: user.userId, dbUserId: user.dbUserId },
-        'GET /api/chats'
-      );
-    }
-  }
-  const nftChatGatingConfig = getNftChatGatingConfig();
-  const gatedChatId = nftChatGatingConfig.chatId;
-  const canAccessNftGatedChat =
-    !nftChatGatingConfig.enabled ||
-    !gatedChatId ||
-    (await canAccessNftChatGate(user.dbUserId ?? user.userId, gatedChatId));
-
   logger.info(
     'Fetching chats for user',
     {
@@ -367,23 +337,8 @@ export const GET = withErrorHandling(async (request: NextRequest) => {
       )
       .orderBy(desc(groupMembers.lastMessageAt));
 
-    const gatedChatGroupId =
-      gatedChatId && canAccessNftGatedChat === false
-        ? (
-            await dbClient
-              .select({ groupId: chats.groupId })
-              .from(chats)
-              .where(eq(chats.id, gatedChatId))
-              .limit(1)
-          )[0]?.groupId
-        : undefined;
-    const filteredMemberships =
-      gatedChatGroupId && canAccessNftGatedChat === false
-        ? memberships.filter((m) => m.groupId !== gatedChatGroupId)
-        : memberships;
-
     // Get chat IDs via Chat.groupId relationship
-    const groupIds = filteredMemberships.map((m) => m.groupId);
+    const groupIds = memberships.map((m) => m.groupId);
     const groupChatsWithGroupId =
       groupIds.length > 0
         ? await dbClient
@@ -399,19 +354,13 @@ export const GET = withErrorHandling(async (request: NextRequest) => {
             (c) => !c.groupId || !teamGroupIds.has(c.groupId)
           )
         : groupChatsWithGroupId;
-    const filteredGroupChatsForAccess =
-      gatedChatId && canAccessNftGatedChat === false
-        ? filteredGroupChats.filter((c) => c.id !== gatedChatId)
-        : filteredGroupChats;
-    const groupChatIds = filteredGroupChatsForAccess.map((c) => c.id);
+    const groupChatIds = filteredGroupChats.map((c) => c.id);
     // Map groupId -> chatId for lookup
     const groupIdToChatId = new Map(
-      filteredGroupChatsForAccess.map((c) => [c.groupId, c.id])
+      filteredGroupChats.map((c) => [c.groupId, c.id])
     );
     // Map chatId -> chat details
-    const chatDetailsMap = new Map(
-      filteredGroupChatsForAccess.map((c) => [c.id, c])
-    );
+    const chatDetailsMap = new Map(filteredGroupChats.map((c) => [c.id, c]));
 
     // Get last messages for group chats
     const groupChatMessages = await Promise.all(
@@ -486,7 +435,7 @@ export const GET = withErrorHandling(async (request: NextRequest) => {
     });
 
     // Format group chats - use groupId -> chatId mapping
-    const formattedGroupChats = filteredMemberships
+    const formattedGroupChats = memberships
       .map((membership) => {
         // Get the chatId from groupId
         const chatId = groupIdToChatId.get(membership.groupId);
@@ -503,12 +452,6 @@ export const GET = withErrorHandling(async (request: NextRequest) => {
           qualityScore: number | null;
           lastMessageAt: Date | null;
           updatedAt: Date;
-          nftRequirement?: {
-            contractAddress: string;
-            tokenId: number | null;
-            chainId: number;
-            chainName: string;
-          };
         } = {
           id: chatId,
           name: chat.name || 'Unnamed Group',
@@ -519,16 +462,6 @@ export const GET = withErrorHandling(async (request: NextRequest) => {
           lastMessageAt: membership.lastMessageAt,
           updatedAt: chat.updatedAt,
         };
-
-        if (chat.nftGated && chat.requiredNftContractAddress) {
-          const chainId = chat.requiredNftChainId ?? getCurrentChainId();
-          result.nftRequirement = {
-            contractAddress: chat.requiredNftContractAddress,
-            tokenId: chat.requiredNftTokenId,
-            chainId,
-            chainName: getChainName(chainId),
-          };
-        }
 
         return result;
       })
@@ -634,20 +567,12 @@ export const POST = withErrorHandling(async (request: NextRequest) => {
 
   // Validate request body
   const body = await request.json();
-  const {
-    name,
-    isGroup,
-    participantIds,
-    requiredNftContractAddress,
-    requiredNftTokenId,
-    requiredNftChainId,
-  } = ChatCreateSchema.parse(body);
+  const { name, isGroup, participantIds } = ChatCreateSchema.parse(body);
 
   // Create the chat with RLS
   const chat = await asUser(user, async (dbClient) => {
     // Create the chat
     const now = new Date();
-    const nftGated = !!requiredNftContractAddress;
     const [newChat] = await dbClient
       .insert(chats)
       .values({
@@ -656,10 +581,6 @@ export const POST = withErrorHandling(async (request: NextRequest) => {
         isGroup: isGroup || false,
         createdAt: now,
         updatedAt: now,
-        requiredNftContractAddress: requiredNftContractAddress || null,
-        requiredNftTokenId: requiredNftTokenId ?? null,
-        requiredNftChainId: requiredNftChainId ?? null,
-        nftGated,
       })
       .returning();
 

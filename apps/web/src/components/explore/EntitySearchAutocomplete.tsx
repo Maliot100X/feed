@@ -1,6 +1,6 @@
 'use client';
 
-import { cn } from '@babylon/shared';
+import { cn } from '@feed/shared';
 import { ArrowRight, Search, X } from 'lucide-react';
 import { useRouter } from 'next/navigation';
 import { useCallback, useEffect, useRef, useState } from 'react';
@@ -78,7 +78,8 @@ interface EntitySearchAutocompleteProps {
   className?: string;
   compact?: boolean;
   onNavigate?: () => void;
-  searchType?: 'all' | 'users' | 'actors' | 'agents' | 'apps';
+  /** Entity kinds this component can render (users and actors). */
+  searchType?: 'all' | 'users' | 'actors';
 }
 
 export function EntitySearchAutocomplete({
@@ -99,11 +100,15 @@ export function EntitySearchAutocomplete({
   const inputRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
+    // Each query owns its request: a newer query (or clearing the input)
+    // aborts the old one so stale results can never reopen the list.
+    const controller = new AbortController();
     const fetchSuggestions = async () => {
       if (!value.trim()) {
         setSuggestions([]);
         setIsOpen(false);
         setSelectedIndex(-1);
+        setLoading(false);
         return;
       }
 
@@ -112,9 +117,21 @@ export function EntitySearchAutocomplete({
         search: value,
         type: searchType,
       });
-      const response = await fetch(
-        apiUrl(`/api/registry/all?${params.toString()}`)
-      );
+      let response: Response;
+      try {
+        response = await fetch(
+          apiUrl(`/api/registry/all?${params.toString()}`),
+          { signal: controller.signal }
+        );
+      } catch {
+        if (!controller.signal.aborted) {
+          setSuggestions([]);
+          setIsOpen(false);
+          setLoading(false);
+        }
+        return;
+      }
+      if (controller.signal.aborted) return;
       if (response.ok) {
         const data = await response.json();
         // Filter out NPC users (isActor: true) - they appear in the actors array
@@ -138,6 +155,7 @@ export function EntitySearchAutocomplete({
             type: 'actor' as const,
           })
         );
+        if (controller.signal.aborted) return;
         const allEntities = [...users, ...actors];
         setSuggestions(allEntities.slice(0, 10));
         setIsOpen(true);
@@ -150,8 +168,15 @@ export function EntitySearchAutocomplete({
       setLoading(false);
     };
 
-    const timer = setTimeout(fetchSuggestions, 250);
-    return () => clearTimeout(timer);
+    const timer = setTimeout(() => {
+      void fetchSuggestions().catch(() => {
+        if (!controller.signal.aborted) setLoading(false);
+      });
+    }, 250);
+    return () => {
+      clearTimeout(timer);
+      controller.abort();
+    };
   }, [value, searchType]);
 
   useEffect(() => {

@@ -1,15 +1,15 @@
 /**
- * Training Data Archiver (Vercel Blob)
+ * Training Data Archiver (Cloudflare R2)
  *
- * Archives training data (exported trajectories, RULER scores) to Vercel Blob
+ * Archives training data (exported trajectories, RULER scores) to Cloudflare R2
  * for long-term storage and reproducibility.
  */
 
-import type { JsonValue } from '@babylon/shared';
-import { del, list, put } from '@vercel/blob';
+import type { JsonValue } from '@feed/shared';
 import fs from 'fs/promises';
 import path from 'path';
 import { logger } from '../../utils/logger';
+import { del, list, put, readArtifact } from './r2-object-store';
 
 export interface ArchivedWindow {
   windowId: string;
@@ -54,20 +54,14 @@ export class TrainingDataArchiver {
 
     // Upload trajectories
     const trajData = await fs.readFile(options.trajectoriesPath);
-    const trajBlob = await put(`${prefix}trajectories.jsonl`, trajData, {
-      access: 'public',
-      addRandomSuffix: false,
-    });
+    const trajBlob = await put(`${prefix}trajectories.jsonl`, trajData);
     urls.trajectories = trajBlob.url;
     totalSize += trajData.length;
 
     // Upload groups if provided
     if (options.groupsPath) {
       const groupsData = await fs.readFile(options.groupsPath);
-      const groupsBlob = await put(`${prefix}groups.jsonl`, groupsData, {
-        access: 'public',
-        addRandomSuffix: false,
-      });
+      const groupsBlob = await put(`${prefix}groups.jsonl`, groupsData);
       urls.groups = groupsBlob.url;
       totalSize += groupsData.length;
     }
@@ -75,20 +69,14 @@ export class TrainingDataArchiver {
     // Upload RULER scores if provided
     if (options.rulerScoresPath) {
       const scoresData = await fs.readFile(options.rulerScoresPath);
-      const scoresBlob = await put(`${prefix}ruler_scores.json`, scoresData, {
-        access: 'public',
-        addRandomSuffix: false,
-      });
+      const scoresBlob = await put(`${prefix}ruler_scores.json`, scoresData);
       urls.rulerScores = scoresBlob.url;
       totalSize += scoresData.length;
     }
 
     // Upload metadata
     const metadataJson = JSON.stringify(options.metadata || {}, null, 2);
-    const metadataBlob = await put(`${prefix}metadata.json`, metadataJson, {
-      access: 'public',
-      addRandomSuffix: false,
-    });
+    const metadataBlob = await put(`${prefix}metadata.json`, metadataJson);
     urls.metadata = metadataBlob.url;
     totalSize += Buffer.byteLength(metadataJson, 'utf8');
 
@@ -131,7 +119,7 @@ export class TrainingDataArchiver {
     const result: WindowDataResult = {};
 
     for (const blob of blobs) {
-      const response = await fetch(blob.url);
+      const response = await readArtifact(blob.url);
       const filename = path.basename(blob.pathname);
 
       if (filename === 'trajectories.jsonl') {

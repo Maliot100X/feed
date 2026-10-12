@@ -58,7 +58,7 @@ describe('API Endpoints - Complete Coverage', () => {
       expect(res.status).toBe(200);
       const spec = await res.json();
       expect(spec.openapi).toBe('3.0.0');
-      expect(spec.info.title).toBe('Babylon API');
+      expect(spec.info.title).toBe('Feed API');
     });
 
     test('GET /api/stats', async () => {
@@ -109,6 +109,14 @@ describe('API Endpoints - Complete Coverage', () => {
       const data = await res.json();
       expect(Array.isArray(data.posts)).toBe(true);
       expect(data.total).toBe(0);
+    });
+
+    test('GET /api/posts/:id - unknown ID is 404 and never created on read', async () => {
+      const unknownId = `game-unknown-${Date.now()}-2024-01-01T00:00:00.000Z`;
+      const first = await get(`/api/posts/${encodeURIComponent(unknownId)}`);
+      expect(first.status).toBe(404);
+      const second = await get(`/api/posts/${encodeURIComponent(unknownId)}`);
+      expect(second.status).toBe(404);
     });
 
     test('POST /api/posts - requires auth', async () => {
@@ -453,12 +461,12 @@ describe('API Endpoints - Complete Coverage', () => {
   });
 
   // ============================================
-  // NFT ENDPOINTS
+  // RETIRED ENDPOINTS
   // ============================================
-  describe('NFT', () => {
-    test('GET /api/nft/gallery', async () => {
+  describe('retired NFT gallery', () => {
+    test('GET /api/nft/gallery returns 404', async () => {
       const res = await get('/api/nft/gallery');
-      expect(res.status).toBe(200);
+      expect(res.status).toBe(404);
     });
   });
 

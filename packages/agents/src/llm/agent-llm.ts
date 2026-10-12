@@ -1,3 +1,4 @@
+import { getSurplusConfig } from '@feed/shared';
 /**
  * Agent LLM Provider
  *
@@ -9,7 +10,7 @@
  *
  * @remarks
  * This provider is exclusively for autonomous agents. Core game systems
- * (MarketDecisionEngine, etc.) use BabylonLLMClient with Groq/Claude/OpenAI.
+ * (MarketDecisionEngine, etc.) use FeedLLMClient with Groq/Claude/OpenAI.
  *
  * @example
  * ```typescript
@@ -25,6 +26,7 @@
  */
 
 import type { IAgentRuntime } from '@elizaos/core';
+import { getAgentLLMBridge } from '@feed/shared';
 import {
   ensureTrajectoryStep,
   getTrajectoryContext,
@@ -38,7 +40,12 @@ import { buildReasoningTraceMetadata } from './reasoning-trace';
 /**
  * Supported LLM provider types for agent inference
  */
-export type AgentLLMProvider = 'huggingface' | 'phala' | 'ollama' | 'groq';
+export type AgentLLMProvider =
+  | 'surplus'
+  | 'huggingface'
+  | 'phala'
+  | 'ollama'
+  | 'groq';
 
 /**
  * Determines the configured LLM provider from environment variables
@@ -47,11 +54,13 @@ export type AgentLLMProvider = 'huggingface' | 'phala' | 'ollama' | 'groq';
  * @internal
  */
 function getConfiguredProvider(): AgentLLMProvider {
+  if (getSurplusConfig()) return 'surplus';
   const provider = process.env.AGENT_LLM_PROVIDER?.toLowerCase();
   if (provider === 'huggingface' || provider === 'hf') return 'huggingface';
   if (provider === 'phala') return 'phala';
   if (provider === 'ollama' || provider === 'local') return 'ollama';
-  return 'groq';
+  if (!provider || provider === 'groq') return 'groq';
+  throw new Error(`Unsupported AGENT_LLM_PROVIDER: ${provider}`);
 }
 
 /**
@@ -95,6 +104,8 @@ async function callHuggingFace(params: AgentLLMParams): Promise<string> {
   const apiKey = process.env.HUGGINGFACE_API_KEY;
   const endpoint = process.env.HUGGINGFACE_MODEL_ENDPOINT;
   const apiFormat = process.env.HUGGINGFACE_API_FORMAT || 'inference';
+  if (apiFormat !== 'inference' && apiFormat !== 'openai')
+    throw new Error(`Unsupported HUGGINGFACE_API_FORMAT: ${apiFormat}`);
 
   if (!apiKey) {
     throw new Error('HUGGINGFACE_API_KEY not set');
@@ -116,17 +127,25 @@ async function callHuggingFace(params: AgentLLMParams): Promise<string> {
 
   if (apiFormat === 'openai') {
     requestBody = JSON.stringify({
-      model: process.env.HUGGINGFACE_MODEL_NAME || 'default',
+      model:
+        process.env.HUGGINGFACE_MODEL_NAME ||
+        (params.archetype ? `feed-${params.archetype}` : 'default'),
       messages,
       temperature: params.temperature ?? 0.7,
       max_tokens: params.maxTokens ?? 2048,
     });
     if (!endpoint.includes('/chat/completions')) {
-      requestUrl = endpoint.replace(/\/$/, '') + '/v1/chat/completions';
+      const base = endpoint.replace(/\/$/, '');
+      requestUrl = base.endsWith('/v1')
+        ? `${base}/chat/completions`
+        : `${base}/v1/chat/completions`;
     }
   } else {
     requestBody = JSON.stringify({
-      inputs: messages,
+      inputs:
+        messages
+          .map((message) => `${message.role}: ${message.content}`)
+          .join('\n\n') + '\n\nassistant:',
       parameters: {
         temperature: params.temperature ?? 0.7,
         max_new_tokens: params.maxTokens ?? 2048,
@@ -135,67 +154,19 @@ async function callHuggingFace(params: AgentLLMParams): Promise<string> {
     });
   }
 
-  // Retry with backoff for vLLM reload windows (connection refused / 503)
-  const maxRetries = 3;
-  const retryDelays = [5000, 10000, 15000]; // 5s, 10s, 15s
-  let response: Response | undefined;
-  let lastError: Error | undefined;
-
-  for (let attempt = 0; attempt <= maxRetries; attempt++) {
-    try {
-      response = await fetch(requestUrl, {
-        method: 'POST',
-        headers: {
-          Authorization: `Bearer ${apiKey}`,
-          'Content-Type': 'application/json',
-        },
-        body: requestBody,
-        signal: AbortSignal.timeout(120000),
-      });
-
-      if (response.ok) break;
-
-      // Retry on 503 (vLLM reloading) or 502 (reverse proxy during reload)
-      if (
-        (response.status === 503 || response.status === 502) &&
-        attempt < maxRetries
-      ) {
-        const delay = retryDelays[attempt] ?? 15000;
-        logger.warn(
-          `HuggingFace/vLLM returned ${response.status}, retrying in ${delay}ms (attempt ${attempt + 1}/${maxRetries})`
-        );
-        await new Promise((resolve) => setTimeout(resolve, delay));
-        continue;
-      }
-
-      const errorText = await response.text();
-      throw new Error(
-        `HuggingFace API error: ${response.status} - ${errorText}`
-      );
-    } catch (error) {
-      lastError = error as Error;
-      const isRetryable =
-        error instanceof TypeError || // fetch network error (connection refused)
-        (error as { code?: string }).code === 'ECONNREFUSED' ||
-        (error as { cause?: { code?: string } }).cause?.code === 'ECONNREFUSED';
-
-      if (isRetryable && attempt < maxRetries) {
-        const delay = retryDelays[attempt] ?? 15000;
-        logger.warn(
-          `HuggingFace/vLLM connection failed, retrying in ${delay}ms (attempt ${attempt + 1}/${maxRetries}): ${(error as Error).message}`
-        );
-        await new Promise((resolve) => setTimeout(resolve, delay));
-        continue;
-      }
-      throw error;
-    }
-  }
-
-  if (!response || !response.ok) {
-    throw (
-      lastError || new Error('HuggingFace API request failed after retries')
+  const response = await fetch(requestUrl, {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${apiKey}`,
+      'Content-Type': 'application/json',
+    },
+    body: requestBody,
+    signal: AbortSignal.timeout(120000),
+  });
+  if (!response.ok)
+    throw new Error(
+      `HuggingFace API error: ${response.status} - ${await response.text()}`
     );
-  }
 
   const data = (await response.json()) as
     | Array<{ generated_text: string }>
@@ -214,7 +185,15 @@ async function callHuggingFace(params: AgentLLMParams): Promise<string> {
     responseText = '';
   }
 
-  await logToTrajectory(params, 'huggingface', responseText, latencyMs);
+  if (!responseText.trim())
+    throw new Error('HuggingFace returned empty content');
+  await logToTrajectory(
+    params,
+    process.env.HUGGINGFACE_MODEL_NAME ||
+      (params.archetype ? `feed-${params.archetype}` : 'default'),
+    responseText,
+    latencyMs
+  );
 
   return responseText;
 }
@@ -242,9 +221,7 @@ async function callPhala(params: AgentLLMParams): Promise<string> {
       'Content-Type': 'application/json',
     },
     body: JSON.stringify({
-      model: params.archetype
-        ? `babylon-${params.archetype}`
-        : 'babylon-default',
+      model: params.archetype ? `feed-${params.archetype}` : 'feed-default',
       messages: [
         ...(params.system ? [{ role: 'system', content: params.system }] : []),
         { role: 'user', content: params.prompt },
@@ -269,7 +246,13 @@ async function callPhala(params: AgentLLMParams): Promise<string> {
   const responseText =
     data.choices?.[0]?.message?.content || data.response || '';
 
-  await logToTrajectory(params, 'phala', responseText, latencyMs);
+  if (!responseText.trim()) throw new Error('Phala returned empty content');
+  await logToTrajectory(
+    params,
+    params.archetype ? `feed-${params.archetype}` : 'feed-default',
+    responseText,
+    latencyMs
+  );
 
   return responseText;
 }
@@ -313,7 +296,8 @@ async function logToTrajectory(
   model: string,
   response: string,
   latencyMs: number,
-  tokenCounts?: { promptTokens?: number; completionTokens?: number }
+  tokenCounts?: { promptTokens?: number; completionTokens?: number },
+  error?: string
 ): Promise<void> {
   let trajectoryLogger = params.trajectoryLogger;
   let trajectoryId = params.trajectoryId;
@@ -353,16 +337,16 @@ async function logToTrajectory(
       promptTokens: tokenCounts?.promptTokens,
       completionTokens: tokenCounts?.completionTokens,
       ...reasoningMetadata,
+      ...(error ? { metadata: { success: false, error } } : {}),
     });
   }
 
   // Forward to DAG trace bridge if active (game-tick observability)
-  try {
-    const { getAgentLLMBridge } = require('@babylon/shared');
+  {
     const bridge = getAgentLLMBridge();
     if (bridge) {
       bridge({
-        provider: model.includes('/') ? model.split('/')[0] : 'agent',
+        provider: getConfiguredProvider(),
         model,
         promptType: params.actionType || params.purpose || 'agent-llm',
         format: 'text',
@@ -378,11 +362,10 @@ async function logToTrajectory(
           (tokenCounts?.promptTokens ?? 0) +
           (tokenCounts?.completionTokens ?? 0),
         durationMs: latencyMs,
-        success: true,
+        success: !error,
+        ...(error ? { error } : {}),
       });
     }
-  } catch {
-    // Bridge not available
   }
 }
 
@@ -407,6 +390,9 @@ async function logToTrajectory(
  * ```
  */
 export async function callAgentLLM(params: AgentLLMParams): Promise<string> {
+  if (typeof params.prompt !== 'string' || !params.prompt.trim()) {
+    throw new Error('Agent LLM prompt is required');
+  }
   const provider = getConfiguredProvider();
 
   logger.debug(
@@ -421,14 +407,34 @@ export async function callAgentLLM(params: AgentLLMParams): Promise<string> {
 
   switch (provider) {
     case 'huggingface':
-      return callHuggingFace(params);
-
-    case 'phala':
-      return callPhala(params);
+    case 'phala': {
+      const started = Date.now();
+      try {
+        return await (provider === 'huggingface'
+          ? callHuggingFace(params)
+          : callPhala(params));
+      } catch (error) {
+        await logToTrajectory(
+          params,
+          provider === 'huggingface'
+            ? process.env.HUGGINGFACE_MODEL_NAME ||
+                (params.archetype ? `feed-${params.archetype}` : 'default')
+            : params.archetype
+              ? `feed-${params.archetype}`
+              : 'feed-default',
+          '',
+          Date.now() - started,
+          undefined,
+          error instanceof Error ? error.message : String(error)
+        );
+        throw error;
+      }
+    }
 
     case 'ollama':
       return callOllamaLocal(params);
 
+    case 'surplus':
     case 'groq':
     default:
       return callGroqDirect({
@@ -469,6 +475,17 @@ export async function getAgentLLMStatus(): Promise<{
 }> {
   const provider = getConfiguredProvider();
   const details: Record<string, string | boolean> = {};
+
+  const surplus = getSurplusConfig();
+  if (provider === 'surplus' && surplus) {
+    return {
+      provider,
+      configured: true,
+      available: true,
+      model: surplus.model,
+      details: { hasApiKey: true, endpoint: surplus.baseURL },
+    };
+  }
 
   let configured = false;
   let available = false;

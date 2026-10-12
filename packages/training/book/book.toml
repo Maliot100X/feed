@@ -1,12 +1,13 @@
 [book]
-title = "Babylon RL Training Pipeline"
+title = "Feed RL Training Pipeline"
 authors = ["revlentless"]
 language = "en"
 src = "src"
 
 [build]
 build-dir = "book"
-create-missing = true
+# Fail the build on broken SUMMARY links instead of generating empty pages.
+create-missing = false
 
 [preprocessor.mermaid]
 command = "mdbook-mermaid"
@@ -14,8 +15,8 @@ command = "mdbook-mermaid"
 [output.html]
 default-theme = "navy"
 preferred-dark-theme = "navy"
-git-repository-url = "https://github.com/BabylonSocial/babylon"
-edit-url-template = "https://github.com/BabylonSocial/babylon/edit/staging/packages/training/book/{path}"
+git-repository-url = "https://github.com/feedforagents/feed"
+edit-url-template = "https://github.com/feedforagents/feed/edit/staging/packages/training/book/src/{path}"
 site-url = "/"
 cname = ""
 no-section-label = false

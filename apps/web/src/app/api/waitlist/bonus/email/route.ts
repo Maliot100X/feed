@@ -65,8 +65,8 @@ import {
   successResponse,
   WaitlistService,
   withErrorHandling,
-} from '@babylon/api';
-import { logger, POINTS } from '@babylon/shared';
+} from '@feed/api';
+import { logger, POINTS } from '@feed/shared';
 import type { NextRequest } from 'next/server';
 import { z } from 'zod';
 
@@ -98,6 +98,6 @@ export const POST = withErrorHandling(async (request: NextRequest) => {
     bonusAmount: awarded ? POINTS.EMAIL_SUBMIT : 0,
     message: awarded
       ? 'Email bonus awarded'
-      : 'Email bonus already awarded or user not found',
+      : 'Email bonus already awarded, or the email is not the verified email on your account',
   });
 });

@@ -5,7 +5,6 @@
  * Use CHECK_POST_DETAIL or CHECK_COMMENT_DETAIL first to get IDs.
  */
 
-import { and, comments, db, eq, isNull, posts } from '@babylon/db';
 import type {
   Action,
   ActionResult,
@@ -14,6 +13,7 @@ import type {
   Memory,
   State,
 } from '@elizaos/core';
+import { and, comments, db, eq, isNull, posts } from '@feed/db';
 import { logger } from '../../../../shared/logger';
 import { generateSnowflakeId } from '../../../../shared/snowflake';
 

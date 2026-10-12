@@ -1,16 +1,10 @@
 'use client';
 
-import {
-  cn,
-  extractErrorMessage,
-  getReferralUrl,
-  logger,
-} from '@babylon/shared';
+import { cn, extractErrorMessage, getReferralUrl, logger } from '@feed/shared';
 import {
   Bell,
   Bot,
   Check,
-  ChevronsRight,
   Copy,
   LogOut,
   MessageCircle,
@@ -25,10 +19,9 @@ import { usePathname } from 'next/navigation';
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { LoginButton } from '@/components/auth/LoginButton';
 import { UserMenu } from '@/components/auth/UserMenu';
-import { GameFeedbackModal } from '@/components/feedback/GameFeedbackModal';
 import { Avatar } from '@/components/shared/Avatar';
-import { BabylonIcon } from '@/components/shared/icons/BabylonIcon';
-import { BabylonFullLogo } from '@/components/shared/icons/BabylonLogo';
+import { FeedIcon } from '@/components/shared/icons/FeedIcon';
+import { FeedFullLogo } from '@/components/shared/icons/FeedLogo';
 import { HouseIcon } from '@/components/shared/icons/HouseIcon';
 import { useEmbedMode } from '@/contexts/EmbedContext';
 import { useAuth } from '@/hooks/useAuth';
@@ -47,10 +40,8 @@ import { getUserDisplayName } from '@/lib/user-display';
  * @returns Sidebar content element
  */
 function SidebarContent() {
-  const [collapsed, setCollapsed] = useState(false);
   const [showMdMenu, setShowMdMenu] = useState(false);
   const [copiedReferral, setCopiedReferral] = useState(false);
-  const [feedbackModalOpen, setFeedbackModalOpen] = useState(false);
   const asideRef = useRef<HTMLElement>(null);
   const mdMenuRef = useRef<HTMLDivElement>(null);
   const pathname = usePathname();
@@ -251,42 +242,25 @@ function SidebarContent() {
           'transition-all duration-300',
           'md:w-20',
           'mx-2',
-          !collapsed && 'lg:w-48'
+          'lg:w-48'
         )}
       >
         {/* Header - Logo & Collapse Toggle */}
         <div
           className={cn(
             'flex items-center justify-center p-6',
-            !collapsed && 'lg:justify-start lg:px-4'
+            'lg:justify-start lg:px-4'
           )}
         >
-          <Link href="/feed" aria-label="Babylon home">
-            {/* Icon-only logo for md (tablet) or collapsed */}
-            <BabylonIcon
-              className={cn(
-                'h-8 w-8 text-sidebar-primary',
-                !collapsed && 'lg:hidden'
-              )}
+          <Link href="/feed" aria-label="Feed home">
+            {/* Icon-only logo for md (tablet) */}
+            <FeedIcon
+              className={cn('h-8 w-8 text-sidebar-primary', 'lg:hidden')}
             />
-            {/* Full logo with text for lg+ (desktop) when expanded */}
-            {!collapsed && (
-              <BabylonFullLogo className="hidden h-8 w-auto text-sidebar-primary lg:block" />
-            )}
+            {/* Full logo with text for lg+ (desktop) */}
+            <FeedFullLogo className="hidden h-8 w-auto text-sidebar-primary lg:block" />
           </Link>
         </div>
-        {/* Expand toggle - only visible on lg+ when collapsed, styled like nav items */}
-        {collapsed && (
-          <button
-            type="button"
-            onClick={() => setCollapsed(false)}
-            className="hidden w-full items-center justify-center px-4 py-3 text-sidebar-foreground transition-colors hover:bg-sidebar-accent hover:text-black lg:flex dark:hover:text-white"
-            aria-label="Expand sidebar"
-          >
-            <ChevronsRight className="h-6 w-6" />
-          </button>
-        )}
-
         {/* Navigation - scrollable when screen is short */}
         <nav className="pointer-events-auto relative z-20 flex-1 overflow-y-auto">
           {navItems.map((item) => {
@@ -298,7 +272,7 @@ function SidebarContent() {
             const navContent = (
               <>
                 {/* Icon with notification indicator */}
-                <div className={cn('relative', !collapsed && 'lg:mr-3')}>
+                <div className={cn('relative', 'lg:mr-3')}>
                   <Icon
                     className={cn(
                       'h-6 w-6 flex-shrink-0',
@@ -316,7 +290,7 @@ function SidebarContent() {
                 <span
                   className={cn(
                     'hidden',
-                    !collapsed && 'lg:block',
+                    'lg:block',
                     'text-lg transition-colors duration-300',
                     item.active
                       ? 'font-semibold text-black dark:text-white'
@@ -332,7 +306,7 @@ function SidebarContent() {
               'group pointer-events-auto relative z-10 flex items-center px-4 py-3',
               'transition-colors duration-200',
               'md:justify-center',
-              !collapsed && 'lg:justify-start',
+              'lg:justify-start',
               'bg-transparent hover:bg-sidebar-accent'
             );
 
@@ -372,7 +346,7 @@ function SidebarContent() {
         </nav>
 
         {/* Bottom Section - Authentication (Desktop lg+) */}
-        <div className={cn('hidden', !collapsed && 'lg:block')}>
+        <div className={cn('hidden', 'lg:block')}>
           {!ready ? (
             // Skeleton loader while authentication is initializing
             <div className="flex animate-pulse items-center gap-3 p-3">
@@ -416,10 +390,7 @@ function SidebarContent() {
 
         {/* Bottom Section - User Icon (Tablet md) */}
         {authenticated && user && (
-          <div
-            className={cn('relative md:block', !collapsed && 'lg:hidden')}
-            ref={mdMenuRef}
-          >
+          <div className={cn('relative md:block', 'lg:hidden')} ref={mdMenuRef}>
             {/* User avatar button - styled like nav items */}
             <button
               onClick={() => setShowMdMenu(!showMdMenu)}
@@ -473,11 +444,6 @@ function SidebarContent() {
             )}
           </div>
         )}
-
-        <GameFeedbackModal
-          isOpen={feedbackModalOpen}
-          onClose={() => setFeedbackModalOpen(false)}
-        />
       </aside>
     </>
   );

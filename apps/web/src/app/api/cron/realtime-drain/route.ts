@@ -1,10 +1,11 @@
 import {
   drainOutboxBatch,
+  flushLastUsedUpdates,
   requireCronAuth,
   successResponse,
   withErrorHandling,
-} from '@babylon/api';
-import { logger } from '@babylon/shared';
+} from '@feed/api';
+import { logger } from '@feed/shared';
 import type { NextRequest } from 'next/server';
 
 export const dynamic = 'force-dynamic';
@@ -14,6 +15,9 @@ export const GET = withErrorHandling(async (request: NextRequest) => {
   // Security: Verify cron authorization
   requireCronAuth(request, { jobName: 'RealtimeDrain' });
 
+  if (process.env.DEPLOYMENT_PLATFORM === 'cloudflare') {
+    await flushLastUsedUpdates();
+  }
   const result = await drainOutboxBatch();
   logger.info('Realtime outbox drain completed', result, 'Realtime');
   return successResponse({

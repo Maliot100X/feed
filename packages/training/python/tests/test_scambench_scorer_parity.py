@@ -15,6 +15,13 @@ WORKSPACE_ROOT = PYTHON_ROOT.parents[3]
 SCAMBENCH_ROOT = WORKSPACE_ROOT / "scambench"
 TS_SCORER_PATH = SCAMBENCH_ROOT / "src" / "scorer.ts"
 
+# Cross-repo parity check against the TypeScript scorer in a sibling ScamBench
+# checkout. Skips explicitly (with reason) when that external checkout is absent.
+pytestmark = pytest.mark.skipif(
+    not TS_SCORER_PATH.exists(),
+    reason=f"requires sibling ScamBench checkout with {TS_SCORER_PATH}",
+)
+
 
 def _base_scenario(
     *, scenario_id: str, category: str, intent: str, stages: list[dict[str, object]]

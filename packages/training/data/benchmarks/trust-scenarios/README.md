@@ -1,7 +1,7 @@
-# Babylon Trust Scenarios
+# Feed Trust Scenarios
 
 These fixtures are deterministic, small trust/scam benchmark scenarios for the
-Babylon training package.
+Feed training package.
 
 Each scenario JSON should contain:
 
@@ -12,5 +12,5 @@ Each scenario JSON should contain:
   disclosure risks, relationship opportunities, and information-sale events
 
 These scenarios are intentionally compact so they can be used in tests and CI.
-Larger 100-agent / 150-NPC Babylon worlds should be generated separately and can
+Larger 100-agent / 150-NPC Feed worlds should be generated separately and can
 reuse the same `trustGroundTruth` schema.

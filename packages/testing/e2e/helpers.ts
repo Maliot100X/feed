@@ -154,6 +154,7 @@ export async function authenticateWithPrivy(page: Page) {
 
       return (hasUserMenu || hasProfileButton) && hasPrivyToken;
     },
+    undefined,
     { timeout: 30000 }
   );
 

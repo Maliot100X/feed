@@ -36,7 +36,7 @@ import {
   relayCronToStaging,
   verifyCronAuth,
   withErrorHandling,
-} from '@babylon/api';
+} from '@feed/api';
 import {
   db,
   desc,
@@ -45,15 +45,15 @@ import {
   generateSnowflakeId,
   inArray,
   posts,
-} from '@babylon/db';
+} from '@feed/db';
 import {
-  BabylonLLMClient,
+  FeedLLMClient,
   getActiveEventsForPosting,
   StaticDataRegistry,
   secureRandom,
   worldFactsService,
-} from '@babylon/engine';
-import { logger } from '@babylon/shared';
+} from '@feed/engine';
+import { logger } from '@feed/shared';
 import type { NextRequest } from 'next/server';
 import { NextResponse } from 'next/server';
 import { z } from 'zod';
@@ -100,8 +100,6 @@ interface GameState {
   currentDay: number | null;
 }
 
-// Vercel function configuration
-export const maxDuration = 300; // 5 minutes max
 export const dynamic = 'force-dynamic';
 
 /**
@@ -181,10 +179,10 @@ export const POST = withErrorHandling(async function POST(_req: NextRequest) {
   }
 
   // Acquire global lock to prevent overlapping cron invocations
-  // Duration matches maxDuration (300s) to prevent overlap when ticks take longer than cron interval
+  // 300s lock duration prevents overlap when ticks take longer than cron interval
   const globalLockAcquired = await DistributedLockService.acquireLock({
     lockId: 'organization-tick-global',
-    durationMs: 300 * 1000, // 300 seconds (5 minutes) - matches maxDuration
+    durationMs: 300 * 1000, // 300 seconds (5 minutes)
     operation: 'organization-tick-global',
     processId,
   });
@@ -382,7 +380,7 @@ export const POST = withErrorHandling(async function POST(_req: NextRequest) {
     let abortedDueToCircuitBreaker = false;
 
     // Create LLM client for organization posts
-    const llmClient = BabylonLLMClient.forGameTick();
+    const llmClient = FeedLLMClient.forGameTick();
 
     for (const org of orgsThisTick) {
       // Circuit breaker: abort if too many consecutive errors

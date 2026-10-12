@@ -103,22 +103,24 @@ async def main_async(args):
     logger.info(f"Attack templates: {len(HARD_ATTACK_TEMPLATES)} hard attacks")
     logger.info("=" * 70)
 
-    # Check API keys for non-local targets
+    # Check API keys for non-local targets. Build a new list: removing from
+    # `targets` while iterating it skipped the element after each removal.
+    required_keys = {
+        "sonnet": "ANTHROPIC_API_KEY",
+        "gpt": "OPENAI_API_KEY",
+        "groq": "GROQ_API_KEY",
+    }
+    available_targets = []
     for t in targets:
-        if t == "local":
+        key = required_keys.get(t)
+        if key and not os.environ.get(key):
+            logger.error(f"{key} not set — cannot attack {t}")
             continue
-        elif t == "sonnet":
-            if not os.environ.get("ANTHROPIC_API_KEY"):
-                logger.error("ANTHROPIC_API_KEY not set — cannot attack sonnet")
-                targets.remove(t)
-        elif t == "gpt":
-            if not os.environ.get("OPENAI_API_KEY"):
-                logger.error("OPENAI_API_KEY not set — cannot attack gpt")
-                targets.remove(t)
-        elif t == "groq":
-            if not os.environ.get("GROQ_API_KEY"):
-                logger.error("GROQ_API_KEY not set — cannot attack groq")
-                targets.remove(t)
+        available_targets.append(t)
+    targets = available_targets
+    if not targets:
+        logger.error("No attack targets available")
+        sys.exit(1)
 
     # Load attacker model
     model, tok = load_model(args.model, device)

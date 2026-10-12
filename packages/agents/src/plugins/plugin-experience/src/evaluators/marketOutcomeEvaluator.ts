@@ -9,7 +9,6 @@
  * Runs automatically when markets resolve.
  */
 
-import { db } from '@babylon/db';
 import {
   type Evaluator,
   type IAgentRuntime,
@@ -17,6 +16,7 @@ import {
   type Memory,
   type State,
 } from '@elizaos/core';
+import { db } from '@feed/db';
 
 interface NPCTrustScore {
   accuracy: number; // 0-1, percentage of correct predictions

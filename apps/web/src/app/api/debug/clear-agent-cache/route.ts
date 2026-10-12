@@ -62,9 +62,9 @@
  * @see {@link /lib/agents/runtime/AgentRuntimeManager} Runtime manager implementation
  */
 
-import { requireAdmin, successResponse, withErrorHandling } from '@babylon/api';
-import { agentRuntimeManager } from '@babylon/agents/runtime';
-import { logger } from '@babylon/shared';
+import { requireAdmin, successResponse, withErrorHandling } from '@feed/api';
+import { agentRuntimeManager } from '@feed/agents/runtime';
+import { logger } from '@feed/shared';
 import type { NextRequest } from 'next/server';
 
 export const POST = withErrorHandling(async (request: NextRequest) => {

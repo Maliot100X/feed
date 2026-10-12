@@ -1,3 +1,4 @@
+import { getSurplusConfig } from '@feed/shared';
 /**
  * Multi-Agent Runtime Manager
  *
@@ -13,6 +14,14 @@
  */
 
 import {
+  AgentRuntime,
+  type Character,
+  type Plugin,
+  type UUID,
+} from '@elizaos/core';
+import anthropicPlugin from '@elizaos/plugin-anthropic';
+import openaiPlugin from '@elizaos/plugin-openai';
+import {
   actorState,
   agentLogs,
   agentTrades,
@@ -22,28 +31,20 @@ import {
   eq,
   gte,
   users,
-} from '@babylon/db';
+} from '@feed/db';
 import {
   type ActorData,
   loadActorById,
   StaticDataRegistry,
-} from '@babylon/engine';
+} from '@feed/engine';
 import {
   COORDINATOR_RUNTIME_ID as COORDINATOR_RUNTIME_ID_STRING,
   COORDINATOR_SYSTEM_PROMPT,
   GROQ_MODELS,
   type PackActor,
-} from '@babylon/shared';
-import {
-  AgentRuntime,
-  type Character,
-  type Plugin,
-  type UUID,
-} from '@elizaos/core';
-import anthropicPlugin from '@elizaos/plugin-anthropic';
-import openaiPlugin from '@elizaos/plugin-openai';
-import { babylonPlugin } from '../plugins/babylon';
-import { enhanceRuntimeWithBabylon } from '../plugins/babylon/integration';
+} from '@feed/shared';
+import { feedPlugin } from '../plugins/feed';
+import { enhanceRuntimeWithFeed } from '../plugins/feed/integration';
 import { groqPlugin } from '../plugins/groq';
 import { agentCorePlugin } from '../plugins/plugin-agent-core/src';
 // TODO: experiencePlugin disabled due to missing plugin implementation
@@ -62,9 +63,11 @@ import { logger } from '../shared/logger';
 import { generateSnowflakeId } from '../shared/snowflake';
 import { type AgentRegistration, AgentType } from '../types/agent-registry';
 import type { JsonValue } from '../types/common';
+import { FeedRuntimeAdapter } from './FeedRuntimeAdapter';
+import { installRuntimeProviders } from './runtime-providers';
 
 /**
- * Extended AgentRuntime with Babylon-specific properties
+ * Extended AgentRuntime with Feed-specific properties
  * @internal
  */
 interface ExtendedAgentRuntime extends AgentRuntime {
@@ -104,580 +107,6 @@ const pendingRuntimePromises = new Map<string, Promise<AgentRuntime>>();
 
 /** Coordinator runtime ID cast to UUID type for ElizaOS */
 const COORDINATOR_RUNTIME_ID = COORDINATOR_RUNTIME_ID_STRING as UUID;
-
-/**
- * Creates adapter stub methods for ElizaOS runtime.
- * Babylon doesn't use ElizaOS's memory/DB system, so we stub these out.
- */
-function createAdapterStubs(existingAdapter: unknown): unknown {
-  const adapterAgents = new Map<string, Record<string, unknown>>();
-  const adapterEntities = new Map<string, Record<string, unknown>>();
-  const adapterRooms = new Map<string, Record<string, unknown>>();
-  const roomParticipants = new Map<string, Set<string>>();
-  type AdapterLogRecord = {
-    id: string;
-    createdAt: Date;
-    entityId: string;
-    roomId: string;
-    type: string;
-    body: Record<string, unknown>;
-  };
-  const adapterLogs = new Map<string, AdapterLogRecord>();
-  const readAgentId = (value: unknown): string | null => {
-    if (typeof value === 'string' && value) {
-      return value;
-    }
-    if (
-      value &&
-      typeof value === 'object' &&
-      'id' in value &&
-      typeof (value as { id?: unknown }).id === 'string'
-    ) {
-      return (value as { id: string }).id;
-    }
-    return null;
-  };
-  const readIds = (values: unknown): string[] => {
-    if (Array.isArray(values)) {
-      return values
-        .map((value) => readAgentId(value))
-        .filter((value): value is string => Boolean(value));
-    }
-    if (
-      values &&
-      typeof values === 'object' &&
-      'participantId' in values &&
-      typeof (values as { participantId?: unknown }).participantId === 'string'
-    ) {
-      return [(values as { participantId: string }).participantId];
-    }
-    const single = readAgentId(values);
-    return single ? [single] : [];
-  };
-  const ensureRoom = (roomId: string): void => {
-    if (!adapterRooms.has(roomId)) {
-      adapterRooms.set(roomId, { id: roomId });
-    }
-    if (!roomParticipants.has(roomId)) {
-      roomParticipants.set(roomId, new Set<string>());
-    }
-  };
-  const addParticipantsToRoomState = (
-    roomIdValue: unknown,
-    participantIdsValue: unknown
-  ): Array<Record<string, unknown>> => {
-    const roomId = readAgentId(roomIdValue);
-    const participantIds = readIds(participantIdsValue);
-    if (!roomId || participantIds.length === 0) {
-      return [];
-    }
-    ensureRoom(roomId);
-    const members = roomParticipants.get(roomId)!;
-    for (const participantId of participantIds) {
-      members.add(participantId);
-    }
-    return participantIds.map((participantId) => ({
-      id: `${roomId}:${participantId}`,
-      roomId,
-      participantId,
-      entityId: participantId,
-    }));
-  };
-  const getParticipantsForRoomState = (roomIdValue: unknown) => {
-    const roomId = readAgentId(roomIdValue);
-    if (!roomId) {
-      return [];
-    }
-    ensureRoom(roomId);
-    return [...(roomParticipants.get(roomId) ?? new Set<string>())].map(
-      (participantId) => ({
-        id: `${roomId}:${participantId}`,
-        roomId,
-        participantId,
-        entityId: participantId,
-      })
-    );
-  };
-  const getRoomsForParticipantState = (participantIdValue: unknown) => {
-    const participantId = readAgentId(participantIdValue);
-    if (!participantId) {
-      return [];
-    }
-    return [...adapterRooms.entries()]
-      .filter(([roomId]) => roomParticipants.get(roomId)?.has(participantId))
-      .map(([, room]) => ({ ...room }));
-  };
-  const isRoomParticipantState = (
-    roomIdValue: unknown,
-    participantIdValue: unknown
-  ): boolean => {
-    const roomId = readAgentId(roomIdValue);
-    const participantId = readAgentId(participantIdValue);
-    if (roomId && participantId) {
-      return (
-        roomParticipants.get(roomId)?.has(participantId) ??
-        roomParticipants.get(participantId)?.has(roomId) ??
-        false
-      );
-    }
-    return false;
-  };
-  const createAdapterLogId = (): string =>
-    typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function'
-      ? crypto.randomUUID()
-      : `${Date.now()}-${Math.random().toString(16).slice(2)}`;
-  const normalizeLogRecord = (
-    entry: Record<string, unknown>
-  ): AdapterLogRecord | null => {
-    const entityId = readAgentId(entry.entityId);
-    const roomId = readAgentId(entry.roomId);
-    const type = entry.type;
-    if (!entityId || !roomId || typeof type !== 'string') {
-      return null;
-    }
-    return {
-      id:
-        typeof entry.id === 'string' && entry.id
-          ? entry.id
-          : createAdapterLogId(),
-      createdAt: entry.createdAt instanceof Date ? entry.createdAt : new Date(),
-      entityId,
-      roomId,
-      type,
-      body:
-        entry.body && typeof entry.body === 'object'
-          ? (entry.body as Record<string, unknown>)
-          : {},
-    };
-  };
-  const upsertAgentRecords = (agents: unknown[]): Record<string, unknown>[] => {
-    const records: Record<string, unknown>[] = [];
-    for (const agent of agents) {
-      if (!agent || typeof agent !== 'object') {
-        continue;
-      }
-      const agentRecord = agent as Record<string, unknown>;
-      const agentId = readAgentId(agentRecord);
-      if (!agentId) {
-        continue;
-      }
-      adapterAgents.set(agentId, { ...agentRecord });
-      adapterEntities.set(agentId, { ...agentRecord });
-      records.push({ ...agentRecord });
-    }
-    return records;
-  };
-  const upsertEntityRecords = (
-    entities: unknown[]
-  ): Record<string, unknown>[] => {
-    const records: Record<string, unknown>[] = [];
-    for (const entity of entities) {
-      if (!entity || typeof entity !== 'object') {
-        continue;
-      }
-      const entityRecord = entity as Record<string, unknown>;
-      const entityId = readAgentId(entityRecord);
-      if (!entityId) {
-        continue;
-      }
-      adapterEntities.set(entityId, { ...entityRecord });
-      records.push({ ...entityRecord });
-    }
-    return records;
-  };
-  const ensureRoomExistsState = (
-    roomValue: unknown
-  ): Record<string, unknown> | null => {
-    if (!roomValue || typeof roomValue !== 'object') {
-      const roomId = readAgentId(roomValue);
-      if (!roomId) {
-        return null;
-      }
-      ensureRoom(roomId);
-      return adapterRooms.get(roomId) ?? null;
-    }
-
-    const roomRecord = roomValue as Record<string, unknown>;
-    const roomId = readAgentId(roomRecord);
-    if (!roomId) {
-      return null;
-    }
-    adapterRooms.set(roomId, { ...roomRecord });
-    ensureRoom(roomId);
-    return adapterRooms.get(roomId) ?? null;
-  };
-  const ensureParticipantInRoomState = (
-    participantIdValue: unknown,
-    roomIdValue: unknown
-  ): Record<string, unknown> | null => {
-    const records = addParticipantsToRoomState(roomIdValue, participantIdValue);
-    return records[0] ?? null;
-  };
-
-  return {
-    ...(existingAdapter as object),
-    // Lifecycle
-    init: async () => {},
-    close: async () => {},
-    isReady: async () => true,
-    // Agent methods
-    getAgent: async (agentId: unknown) => {
-      const normalized = readAgentId(agentId);
-      return normalized ? (adapterAgents.get(normalized) ?? null) : null;
-    },
-    getAgents: async () => [...adapterAgents.values()],
-    getAgentsByIds: async (agentIds: unknown[]) =>
-      Array.isArray(agentIds)
-        ? agentIds
-            .map((agentId) => {
-              const normalized = readAgentId(agentId);
-              return normalized
-                ? (adapterAgents.get(normalized) ?? null)
-                : null;
-            })
-            .filter((agent): agent is Record<string, unknown> => Boolean(agent))
-        : [],
-    upsertAgents: async (agents: unknown[]) => upsertAgentRecords(agents),
-    createAgent: async (agent: unknown) => {
-      upsertAgentRecords([agent]);
-      return true;
-    },
-    updateAgent: async (agent: unknown) => {
-      upsertAgentRecords([agent]);
-      return true;
-    },
-    deleteAgent: async (agentId: unknown) => {
-      const normalized = readAgentId(agentId);
-      if (normalized) {
-        adapterAgents.delete(normalized);
-      }
-      return true;
-    },
-    // Entity methods
-    getEntity: async (entityId: unknown) => {
-      const normalized = readAgentId(entityId);
-      return normalized ? (adapterEntities.get(normalized) ?? null) : null;
-    },
-    getEntitiesByIds: async (entityIds: unknown[]) =>
-      Array.isArray(entityIds)
-        ? entityIds
-            .map((entityId) => {
-              const normalized = readAgentId(entityId);
-              return normalized
-                ? (adapterEntities.get(normalized) ?? null)
-                : null;
-            })
-            .filter((entity): entity is Record<string, unknown> =>
-              Boolean(entity)
-            )
-        : [],
-    createEntities: async (entities: unknown[]) =>
-      upsertEntityRecords(entities),
-    upsertEntities: async (entities: unknown[]) =>
-      upsertEntityRecords(entities),
-    updateEntity: async (entity: unknown) => {
-      upsertEntityRecords([entity]);
-    },
-    getEntitiesForRoom: async () => [],
-    getEntitiesForRooms: async (roomIds: unknown[]) =>
-      Array.isArray(roomIds)
-        ? roomIds.map((roomId) => ({
-            roomId: typeof roomId === 'string' ? roomId : String(roomId),
-            entities: [],
-          }))
-        : [],
-    // Room/Participant methods
-    getParticipantsForRoom: async (roomId: unknown) =>
-      getParticipantsForRoomState(roomId),
-    getParticipantsForRooms: async (roomIds: unknown[]) =>
-      Array.isArray(roomIds)
-        ? roomIds.flatMap((roomId) => getParticipantsForRoomState(roomId))
-        : [],
-    getParticipantsForEntity: async () => [],
-    addParticipantsRoom: async (participantIds: unknown, roomId: unknown) =>
-      addParticipantsToRoomState(roomId, participantIds),
-    addParticipantsToRoom: async (participantIds: unknown, roomId: unknown) =>
-      addParticipantsToRoomState(roomId, participantIds),
-    createRoomParticipants: async (participantIds: unknown, roomId: unknown) =>
-      addParticipantsToRoomState(roomId, participantIds),
-    createParticipants: async () => true,
-    removeParticipant: async (participantId: unknown, roomId?: unknown) => {
-      const normalizedParticipantId = readAgentId(participantId);
-      if (!normalizedParticipantId) {
-        return true;
-      }
-      if (roomId) {
-        const normalizedRoomId = readAgentId(roomId);
-        if (normalizedRoomId) {
-          roomParticipants
-            .get(normalizedRoomId)
-            ?.delete(normalizedParticipantId);
-        }
-        return true;
-      }
-      for (const members of roomParticipants.values()) {
-        members.delete(normalizedParticipantId);
-      }
-      return true;
-    },
-    isRoomParticipant: async (roomId: unknown, participantId: unknown) =>
-      isRoomParticipantState(roomId, participantId),
-    getParticipantUserState: async () => null,
-    setParticipantUserState: async () => {},
-    getRoomsByIds: async (roomIds: unknown[]) =>
-      Array.isArray(roomIds)
-        ? roomIds
-            .map((roomId) => {
-              const normalized = readAgentId(roomId);
-              return normalized ? (adapterRooms.get(normalized) ?? null) : null;
-            })
-            .filter((room): room is Record<string, unknown> => Boolean(room))
-        : [],
-    getRoomsByWorld: async () => [],
-    getRoomsForParticipant: async (participantId: unknown) =>
-      getRoomsForParticipantState(participantId),
-    getRoomsForParticipants: async (participantIds: unknown[]) =>
-      Array.isArray(participantIds)
-        ? participantIds.flatMap((participantId) =>
-            getRoomsForParticipantState(participantId)
-          )
-        : [],
-    createRooms: async (rooms: unknown[]) => {
-      const roomRecords = Array.isArray(rooms)
-        ? rooms.filter(
-            (room): room is Record<string, unknown> =>
-              Boolean(room) && typeof room === 'object'
-          )
-        : [];
-      for (const room of roomRecords) {
-        const roomId = readAgentId(room);
-        if (!roomId) {
-          continue;
-        }
-        adapterRooms.set(roomId, { ...room });
-        ensureRoom(roomId);
-      }
-      return roomRecords;
-    },
-    deleteRoom: async () => {},
-    deleteRoomsByWorldId: async () => {},
-    updateRoom: async () => {},
-    // World methods
-    createWorld: async () => crypto.randomUUID() as UUID,
-    getWorld: async () => null,
-    getAllWorlds: async () => [],
-    updateWorld: async () => {},
-    removeWorld: async () => {},
-    // Memory methods
-    createMemory: async (memory: { id?: string } | null) =>
-      (memory?.id || crypto.randomUUID()) as UUID,
-    getMemories: async () => [],
-    getMemoryById: async () => null,
-    getMemoriesByIds: async () => [],
-    getMemoriesByRoomIds: async () => [],
-    getMemoriesByWorldId: async () => [],
-    searchMemories: async () => [],
-    updateMemory: async () => true,
-    deleteMemory: async () => {},
-    deleteManyMemories: async () => {},
-    deleteAllMemories: async () => {},
-    countMemories: async () => 0,
-    // Logging
-    log: async (entry: unknown) => {
-      if (!entry || typeof entry !== 'object') {
-        return;
-      }
-      const logRecord = normalizeLogRecord(entry as Record<string, unknown>);
-      if (logRecord) {
-        adapterLogs.set(logRecord.id, logRecord);
-      }
-    },
-    getLogs: async (params: unknown) => {
-      const filters =
-        params && typeof params === 'object'
-          ? (params as {
-              entityId?: unknown;
-              roomId?: unknown;
-              type?: unknown;
-              count?: number;
-              limit?: number;
-              offset?: number;
-            })
-          : {};
-      const entityId = readAgentId(filters.entityId);
-      const roomId = readAgentId(filters.roomId);
-      const type = typeof filters.type === 'string' ? filters.type : undefined;
-      const effectiveLimit = filters.limit ?? filters.count ?? Infinity;
-      const offset = filters.offset ?? 0;
-
-      const logs = [...adapterLogs.values()]
-        .filter((log) => {
-          if (entityId && log.entityId !== entityId) return false;
-          if (roomId && log.roomId !== roomId) return false;
-          if (type && log.type !== type) return false;
-          return true;
-        })
-        .sort((a, b) => b.createdAt.getTime() - a.createdAt.getTime());
-
-      return logs.slice(offset, offset + effectiveLimit);
-    },
-    getLogsByIds: async (logIds: unknown[]) =>
-      Array.isArray(logIds)
-        ? logIds
-            .map((logId) =>
-              typeof logId === 'string'
-                ? (adapterLogs.get(logId) ?? null)
-                : null
-            )
-            .filter((log): log is AdapterLogRecord => Boolean(log))
-        : [],
-    createLogs: async (entries: unknown[]) => {
-      if (!Array.isArray(entries)) {
-        return;
-      }
-      for (const entry of entries) {
-        if (!entry || typeof entry !== 'object') {
-          continue;
-        }
-        const logRecord = normalizeLogRecord(entry as Record<string, unknown>);
-        if (logRecord) {
-          adapterLogs.set(logRecord.id, logRecord);
-        }
-      }
-    },
-    updateLogs: async (logs: unknown[]) => {
-      if (!Array.isArray(logs)) {
-        return;
-      }
-      for (const entry of logs) {
-        if (!entry || typeof entry !== 'object') {
-          continue;
-        }
-        const update = entry as {
-          id?: unknown;
-          updates?: Record<string, unknown>;
-        };
-        const id =
-          typeof update.id === 'string' && update.id ? update.id : null;
-        const existing = id ? adapterLogs.get(id) : null;
-        if (!id || !existing || !update.updates) {
-          continue;
-        }
-        adapterLogs.set(id, {
-          ...existing,
-          id,
-          createdAt:
-            update.updates.createdAt instanceof Date
-              ? update.updates.createdAt
-              : existing.createdAt,
-          entityId:
-            typeof update.updates.entityId === 'string' &&
-            update.updates.entityId
-              ? update.updates.entityId
-              : existing.entityId,
-          roomId:
-            typeof update.updates.roomId === 'string' && update.updates.roomId
-              ? update.updates.roomId
-              : existing.roomId,
-          type:
-            typeof update.updates.type === 'string' && update.updates.type
-              ? update.updates.type
-              : existing.type,
-          body:
-            update.updates.body && typeof update.updates.body === 'object'
-              ? (update.updates.body as Record<string, unknown>)
-              : existing.body,
-        });
-      }
-    },
-    deleteLogs: async (logIds: unknown[]) => {
-      if (!Array.isArray(logIds)) {
-        return;
-      }
-      for (const logId of logIds) {
-        if (typeof logId === 'string' && logId) {
-          adapterLogs.delete(logId);
-        }
-      }
-    },
-    deleteLog: async (logId: unknown) => {
-      if (typeof logId === 'string' && logId) {
-        adapterLogs.delete(logId);
-      }
-    },
-    // Cache
-    getCache: async () => undefined,
-    setCache: async () => true,
-    deleteCache: async () => true,
-    // Embeddings
-    getCachedEmbeddings: async () => [],
-    ensureEmbeddingDimension: async () => {},
-    // Relationships
-    createRelationship: async () => true,
-    getRelationship: async () => null,
-    getRelationships: async () => [],
-    updateRelationship: async () => {},
-    // Tasks (singular)
-    createTask: async () => crypto.randomUUID() as UUID,
-    getTask: async () => null,
-    getTasks: async () => [],
-    getTasksByName: async () => [],
-    updateTask: async () => {},
-    deleteTask: async () => {},
-    // Tasks (batch — required by EmbeddingGenerationService.ensureDrainTask)
-    createTasks: async (tasks: Array<{ id?: string }>) =>
-      tasks.map(() => crypto.randomUUID() as UUID),
-    getTasksByIds: async () => [],
-    updateTasks: async () => {},
-    deleteTasks: async () => {},
-    // Components
-    getComponent: async () => null,
-    getComponents: async () => [],
-    createComponent: async () => true,
-    updateComponent: async () => {},
-    deleteComponent: async () => {},
-    // Misc
-    getConnection: async () => null,
-    runMigrations: async () => {},
-    runPluginMigrations: async () => {},
-    db: null,
-    ensureRoomExists: async (room: unknown) => ensureRoomExistsState(room),
-    addParticipant: async (participantId: unknown, roomId: unknown) =>
-      ensureParticipantInRoomState(participantId, roomId),
-    ensureParticipantInRoom: async (participantId: unknown, roomId: unknown) =>
-      ensureParticipantInRoomState(participantId, roomId),
-  };
-}
-
-function applyRuntimeCompatibilityShims(runtime: AgentRuntime): void {
-  const adapterRecord = runtime.adapter as unknown as Record<
-    string,
-    unknown
-  > | null;
-  if (!adapterRecord) {
-    return;
-  }
-
-  const runtimeRecord = runtime as unknown as Record<string, unknown>;
-  const bindAdapterMethod = (
-    runtimeName: string,
-    adapterName: string
-  ): void => {
-    const adapterMethod = adapterRecord[adapterName];
-    if (typeof adapterMethod !== 'function') {
-      return;
-    }
-    runtimeRecord[runtimeName] = (...args: unknown[]) =>
-      (adapterMethod as (...innerArgs: unknown[]) => unknown).apply(
-        runtime.adapter,
-        args
-      );
-  };
-
-  bindAdapterMethod('ensureRoomExists', 'ensureRoomExists');
-  bindAdapterMethod('addParticipant', 'addParticipant');
-  bindAdapterMethod('ensureParticipantInRoom', 'ensureParticipantInRoom');
-}
 
 export class AgentRuntimeManager {
   private static instance: AgentRuntimeManager;
@@ -930,18 +359,7 @@ export class AgentRuntimeManager {
         'AgentRuntimeManager'
       );
 
-      try {
-        await this.persistContextRefreshSummary(agentUserId, lifecycle);
-      } catch (error) {
-        logger.warn(
-          'Failed to persist context refresh summary before runtime reset',
-          {
-            agentId: agentUserId,
-            error: error instanceof Error ? error.message : String(error),
-          },
-          'AgentRuntimeManager'
-        );
-      }
+      await this.persistContextRefreshSummary(agentUserId, lifecycle);
 
       await this.clearRuntime(agentUserId);
     }
@@ -1044,14 +462,20 @@ export class AgentRuntimeManager {
       'Agent using Groq models',
       {
         agentId: agentUserId,
-        modelSmall: GROQ_MODELS.FREE.modelId,
-        modelLarge: GROQ_MODELS.PRO.modelId,
+        modelSmall:
+          process.env.GROQ_SMALL_MODEL ||
+          process.env.GROQ_PRIMARY_MODEL ||
+          GROQ_MODELS.FREE.modelId,
+        modelLarge:
+          process.env.GROQ_LARGE_MODEL ||
+          process.env.GROQ_PRIMARY_MODEL ||
+          GROQ_MODELS.PRO.modelId,
       },
       'AgentRuntimeManager'
     );
 
     // Build character from agent user config
-    // Use type assertion — Babylon stores style as plain JSON objects,
+    // Use type assertion — Feed stores style as plain JSON objects,
     // but alpha elizaos Character expects protobuf StyleGuides.
     const character = {
       name: agentUser.displayName || agentUser.username || 'Agent',
@@ -1066,8 +490,18 @@ export class AgentRuntimeManager {
         ELIZACLOUD_API_URL: process.env.ELIZACLOUD_API_URL || '',
         // GROQ configuration (used when ELIZACLOUD_API_KEY is not set)
         GROQ_API_KEY: process.env.GROQ_API_KEY || '',
-        GROQ_LARGE_MODEL: GROQ_MODELS.PRO.modelId,
-        GROQ_SMALL_MODEL: GROQ_MODELS.FREE.modelId,
+        GROQ_LARGE_MODEL:
+          process.env.GROQ_LARGE_MODEL ||
+          process.env.GROQ_PRIMARY_MODEL ||
+          GROQ_MODELS.PRO.modelId,
+        GROQ_PRIMARY_MODEL:
+          process.env.GROQ_PRIMARY_MODEL ||
+          process.env.GROQ_LARGE_MODEL ||
+          GROQ_MODELS.PRO.modelId,
+        GROQ_SMALL_MODEL:
+          process.env.GROQ_SMALL_MODEL ||
+          process.env.GROQ_PRIMARY_MODEL ||
+          GROQ_MODELS.FREE.modelId,
         ANTHROPIC_API_KEY: process.env.ANTHROPIC_API_KEY || '',
       },
     } as Character;
@@ -1077,7 +511,7 @@ export class AgentRuntimeManager {
     const postgresUrl =
       process.env.DATABASE_URL ||
       process.env.POSTGRES_URL ||
-      `postgres://postgres:password@localhost:${dbPort}/babylon`;
+      `postgres://postgres:password@localhost:${dbPort}/feed`;
 
     logger.info(
       `Creating runtime for agent user ${agentUserId}`,
@@ -1086,7 +520,9 @@ export class AgentRuntimeManager {
     );
 
     const hasGroqAccess = !!(
-      process.env.GROQ_API_KEY || process.env.ELIZACLOUD_API_KEY
+      process.env.SURPLUS_API_KEY ||
+      process.env.GROQ_API_KEY ||
+      process.env.ELIZACLOUD_API_KEY
     );
     const hasOpenAIAccess = !!(
       process.env.OPENAI_API_KEY || process.env.ELIZACLOUD_API_KEY
@@ -1100,8 +536,12 @@ export class AgentRuntimeManager {
       trajectoryLoggerPlugin as Plugin,
       // Conditionally add LLM plugins based on available API keys
       ...(hasGroqAccess ? [groqPlugin as Plugin] : []),
-      ...(process.env.ANTHROPIC_API_KEY ? [anthropicPlugin as Plugin] : []),
-      ...(hasOpenAIAccess ? [openaiPlugin as Plugin] : []),
+      ...(!getSurplusConfig() && process.env.ANTHROPIC_API_KEY
+        ? [anthropicPlugin as Plugin]
+        : []),
+      ...(!getSurplusConfig() && hasOpenAIAccess
+        ? [openaiPlugin as Plugin]
+        : []),
     ];
 
     const runtimeConfig = {
@@ -1118,11 +558,8 @@ export class AgentRuntimeManager {
 
     runtime.currentModel = 'groq';
 
-    // Stub adapter methods - Babylon uses its own DB, not ElizaOS's
-    runtime.adapter = createAdapterStubs(
-      runtime.adapter
-    ) as typeof runtime.adapter;
-    applyRuntimeCompatibilityShims(runtime);
+    // Feed persists domain state in PostgreSQL; runtime metadata is process-local.
+    runtime.registerDatabaseAdapter(new FeedRuntimeAdapter());
 
     // Configure logger
     if (!runtime.logger || !runtime.logger.log) {
@@ -1158,11 +595,12 @@ export class AgentRuntimeManager {
 
     // Initialize runtime to signal services that runtime is ready
     // This prevents 30s timeout errors in services waiting for runtime initialization
-    // Skip ElizaOS plugin-sql migrations — Babylon manages its own schema via Drizzle.
+    // Skip ElizaOS plugin-sql migrations — Feed manages its own schema via Drizzle.
     // ElizaOS tables are included in packages/db/src/schema/eliza.ts and migrated with
     // `bun run db:generate && bun run db:migrate`. The framework's runtime migrator is
     // not designed for serverless and adds ~2 min cold-start overhead per agent.
     await runtime.initialize({ skipMigrations: true });
+    installRuntimeProviders(runtime, plugins);
 
     // Register plugins
     const pluginRegistrationPromises: Promise<void>[] = [];
@@ -1180,24 +618,24 @@ export class AgentRuntimeManager {
       agentUserId
     );
 
-    // Wrap Babylon plugin BEFORE registering (so wrapped version is used)
+    // Wrap Feed plugin BEFORE registering (so wrapped version is used)
     // This ensures all actions and provider accesses are logged when executed
-    let wrappedBabylonPlugin = babylonPlugin;
-    if (babylonPlugin.actions) {
-      wrappedBabylonPlugin = wrapPluginActions(
-        wrappedBabylonPlugin,
+    let wrappedFeedPlugin = feedPlugin;
+    if (feedPlugin.actions) {
+      wrappedFeedPlugin = wrapPluginActions(
+        wrappedFeedPlugin,
         trajectoryLogger
       );
     }
-    if (babylonPlugin.providers) {
-      wrappedBabylonPlugin = wrapPluginProviders(
-        wrappedBabylonPlugin,
+    if (feedPlugin.providers) {
+      wrappedFeedPlugin = wrapPluginProviders(
+        wrappedFeedPlugin,
         trajectoryLogger
       );
     }
 
-    // Enhance with wrapped Babylon plugin (so wrapped version is registered)
-    await enhanceRuntimeWithBabylon(runtime, agentUserId, wrappedBabylonPlugin);
+    // Enhance with wrapped Feed plugin (so wrapped version is registered)
+    await enhanceRuntimeWithFeed(runtime, agentUserId, wrappedFeedPlugin);
 
     // Store trajectory logger reference on runtime for easy access
     // This allows actions/providers to access the logger
@@ -1277,7 +715,7 @@ export class AgentRuntimeManager {
     };
 
     // Build Character configuration
-    // Use type assertion for style — Babylon stores style as plain JSON,
+    // Use type assertion for style — Feed stores style as plain JSON,
     // but the alpha elizaos Character type expects a protobuf StyleGuides message.
     // The runtime normalizes this at init time.
     const character = {
@@ -1291,7 +729,7 @@ export class AgentRuntimeManager {
     } as Character;
 
     // Create runtime with standard plugins
-    // Pass userId for Babylon integration (User table lookup)
+    // Pass userId for Feed integration (User table lookup)
     return this.createRuntimeWithPlugins(
       registration.agentId,
       character,
@@ -1324,7 +762,7 @@ export class AgentRuntimeManager {
 
     if (packActor) {
       // Build full Character from PackActor with ALL Eliza fields
-      // Babylon stores style/messageExamples as plain JSON objects;
+      // Feed stores style/messageExamples as plain JSON objects;
       // ElizaOS Character type expects protobuf wrappers ($typeName, etc.).
       // The runtime normalizes these at init time — cast through unknown.
       character = {
@@ -1344,9 +782,8 @@ export class AgentRuntimeManager {
         },
       } as unknown as Character;
 
-      // Attach babylon metadata so MultiStepExecutor can access autonomy flags
-      (character as unknown as Record<string, unknown>).babylon =
-        packActor.babylon;
+      // Attach feed metadata so MultiStepExecutor can access autonomy flags
+      (character as unknown as Record<string, unknown>).feed = packActor.feed;
     } else {
       // Fallback: build minimal Character from ActorData (backward compat)
       const actorData: ActorData | null = loadActorById(actor.id);
@@ -1413,7 +850,7 @@ export class AgentRuntimeManager {
    *
    * @param agentId - The agent's unique identifier (used for Eliza runtime)
    * @param character - Character configuration
-   * @param userId - Optional User table ID for USER_CONTROLLED agents (used for Babylon integration)
+   * @param userId - Optional User table ID for USER_CONTROLLED agents (used for Feed integration)
    * @param isNpc - Whether this is an NPC agent (skips OpenAI plugin to avoid validation spam)
    */
   private async createRuntimeWithPlugins(
@@ -1427,12 +864,14 @@ export class AgentRuntimeManager {
     const postgresUrl =
       process.env.DATABASE_URL ||
       process.env.POSTGRES_URL ||
-      `postgres://postgres:password@localhost:${dbPort}/babylon`;
+      `postgres://postgres:password@localhost:${dbPort}/feed`;
 
     // Create runtime with standard plugins
     // NPCs use GROQ only - skip OpenAI/Anthropic to avoid API validation spam during bootstrap
     const hasGroqAccess = !!(
-      process.env.GROQ_API_KEY || process.env.ELIZACLOUD_API_KEY
+      process.env.SURPLUS_API_KEY ||
+      process.env.GROQ_API_KEY ||
+      process.env.ELIZACLOUD_API_KEY
     );
     const hasOpenAIAccess = !!(
       process.env.OPENAI_API_KEY || process.env.ELIZACLOUD_API_KEY
@@ -1443,10 +882,14 @@ export class AgentRuntimeManager {
       // GROQ (or ElizaCloud) is always available for NPCs
       ...(hasGroqAccess ? [groqPlugin as Plugin] : []),
       // Only load Anthropic/OpenAI for non-NPC agents to avoid validation spam
-      ...(!isNpc && process.env.ANTHROPIC_API_KEY
+      ...(!process.env.SURPLUS_API_KEY &&
+      !isNpc &&
+      process.env.ANTHROPIC_API_KEY
         ? [anthropicPlugin as Plugin]
         : []),
-      ...(!isNpc && hasOpenAIAccess ? [openaiPlugin as Plugin] : []),
+      ...(!process.env.SURPLUS_API_KEY && !isNpc && hasOpenAIAccess
+        ? [openaiPlugin as Plugin]
+        : []),
     ];
 
     const runtimeConfig = {
@@ -1467,11 +910,8 @@ export class AgentRuntimeManager {
     }
     runtime.currentModel = 'groq';
 
-    // Stub adapter methods - Babylon uses its own DB, not ElizaOS's
-    runtime.adapter = createAdapterStubs(
-      runtime.adapter
-    ) as typeof runtime.adapter;
-    applyRuntimeCompatibilityShims(runtime);
+    // Feed persists domain state in PostgreSQL; runtime metadata is process-local.
+    runtime.registerDatabaseAdapter(new FeedRuntimeAdapter());
 
     // Configure logger
     this.configureLogger(runtime, character.name ?? 'agent');
@@ -1491,16 +931,17 @@ export class AgentRuntimeManager {
     // This prevents 30s timeout errors in services waiting for runtime initialization
     // Skip migrations — see comment in createNPCAgentRuntime for rationale.
     await runtime.initialize({ skipMigrations: true });
+    installRuntimeProviders(runtime, plugins);
 
     const trajectoryLogger = await this.getRuntimeTrajectoryLogger(
       runtime,
       agentId
     );
 
-    // Wrap and enhance with Babylon plugin
+    // Wrap and enhance with Feed plugin
     // Use userId for USER_CONTROLLED agents (User table lookup), agentId for NPCs
-    const babylonAgentId = userId || agentId;
-    await this.enhanceWithBabylon(runtime, babylonAgentId, trajectoryLogger);
+    const feedAgentId = userId || agentId;
+    await this.enhanceWithFeed(runtime, feedAgentId, trajectoryLogger);
 
     // Store trajectory logger reference on runtime
     runtime.trajectoryLogger = trajectoryLogger;
@@ -1521,8 +962,18 @@ export class AgentRuntimeManager {
       // Keys must match what groq.ts plugin looks up via runtime.getSetting()
       GROQ_API_KEY: process.env.GROQ_API_KEY || '',
       GROQ_BASE_URL: process.env.GROQ_BASE_URL || '',
-      GROQ_LARGE_MODEL: GROQ_MODELS.PRO.modelId,
-      GROQ_SMALL_MODEL: GROQ_MODELS.FREE.modelId,
+      GROQ_LARGE_MODEL:
+        process.env.GROQ_LARGE_MODEL ||
+        process.env.GROQ_PRIMARY_MODEL ||
+        GROQ_MODELS.PRO.modelId,
+      GROQ_PRIMARY_MODEL:
+        process.env.GROQ_PRIMARY_MODEL ||
+        process.env.GROQ_LARGE_MODEL ||
+        GROQ_MODELS.PRO.modelId,
+      GROQ_SMALL_MODEL:
+        process.env.GROQ_SMALL_MODEL ||
+        process.env.GROQ_PRIMARY_MODEL ||
+        GROQ_MODELS.FREE.modelId,
       ANTHROPIC_API_KEY: process.env.ANTHROPIC_API_KEY || '',
     };
   }
@@ -1584,30 +1035,30 @@ export class AgentRuntimeManager {
   }
 
   /**
-   * Enhance runtime with Babylon plugin (wrapped for trajectory logging)
+   * Enhance runtime with Feed plugin (wrapped for trajectory logging)
    */
-  private async enhanceWithBabylon(
+  private async enhanceWithFeed(
     runtime: AgentRuntime,
     agentId: string,
     trajectoryLogger: TrajectoryLoggerService
   ): Promise<void> {
-    // Wrap Babylon plugin BEFORE registering (so wrapped version is used)
-    let wrappedBabylonPlugin = babylonPlugin;
-    if (babylonPlugin.actions) {
-      wrappedBabylonPlugin = wrapPluginActions(
-        wrappedBabylonPlugin,
+    // Wrap Feed plugin BEFORE registering (so wrapped version is used)
+    let wrappedFeedPlugin = feedPlugin;
+    if (feedPlugin.actions) {
+      wrappedFeedPlugin = wrapPluginActions(
+        wrappedFeedPlugin,
         trajectoryLogger
       );
     }
-    if (babylonPlugin.providers) {
-      wrappedBabylonPlugin = wrapPluginProviders(
-        wrappedBabylonPlugin,
+    if (feedPlugin.providers) {
+      wrappedFeedPlugin = wrapPluginProviders(
+        wrappedFeedPlugin,
         trajectoryLogger
       );
     }
 
-    // Enhance with wrapped Babylon plugin
-    await enhanceRuntimeWithBabylon(runtime, agentId, wrappedBabylonPlugin);
+    // Enhance with wrapped Feed plugin
+    await enhanceRuntimeWithFeed(runtime, agentId, wrappedFeedPlugin);
   }
 
   /**
@@ -1673,7 +1124,7 @@ export class AgentRuntimeManager {
    * Key differences from agent runtimes:
    * - Uses plugin-user-core instead of plugin-agent-core
    * - Has limited actions (read-only, informational)
-   * - Does not have Babylon plugin enhancement (no agent-specific features)
+   * - Does not have Feed plugin enhancement (no agent-specific features)
    * - Shared across all users
    */
   private async createCoordinatorRuntime(): Promise<AgentRuntime> {
@@ -1682,14 +1133,14 @@ export class AgentRuntimeManager {
     const postgresUrl =
       process.env.DATABASE_URL ||
       process.env.POSTGRES_URL ||
-      `postgres://postgres:password@localhost:${dbPort}/babylon`;
+      `postgres://postgres:password@localhost:${dbPort}/feed`;
 
     // Character configuration for coordinator
     const character: Character = {
       name: 'Coordinator',
       system: COORDINATOR_SYSTEM_PROMPT,
       bio: [
-        'Team chat coordinator for Babylon - helps users understand and coordinate their AI agents',
+        'Team chat coordinator for Feed - helps users understand and coordinate their AI agents',
       ],
       messageExamples: [],
       plugins: [],
@@ -1701,13 +1152,17 @@ export class AgentRuntimeManager {
     // actions (userCorePlugin) and doesn't require the full capabilities of OpenAI models.
     // The coordinator relies on Groq/ElizaCloud/Anthropic for cost efficiency with its limited scope.
     const hasGroqAccessCoordinator = !!(
-      process.env.GROQ_API_KEY || process.env.ELIZACLOUD_API_KEY
+      process.env.SURPLUS_API_KEY ||
+      process.env.GROQ_API_KEY ||
+      process.env.ELIZACLOUD_API_KEY
     );
     const plugins: Plugin[] = [
       userCorePlugin as Plugin, // Limited actions for coordinator
       trajectoryLoggerPlugin as Plugin,
       ...(hasGroqAccessCoordinator ? [groqPlugin as Plugin] : []),
-      ...(process.env.ANTHROPIC_API_KEY ? [anthropicPlugin as Plugin] : []),
+      ...(!getSurplusConfig() && process.env.ANTHROPIC_API_KEY
+        ? [anthropicPlugin as Plugin]
+        : []),
     ];
 
     const runtimeConfig = {
@@ -1724,11 +1179,8 @@ export class AgentRuntimeManager {
 
     runtime.currentModel = 'groq';
 
-    // Stub adapter methods - Babylon uses its own DB
-    runtime.adapter = createAdapterStubs(
-      runtime.adapter
-    ) as typeof runtime.adapter;
-    applyRuntimeCompatibilityShims(runtime);
+    // Runtime metadata is process-local; Feed domain records use PostgreSQL.
+    runtime.registerDatabaseAdapter(new FeedRuntimeAdapter());
 
     // Configure logger
     this.configureLogger(runtime, 'Coordinator');
@@ -1746,6 +1198,7 @@ export class AgentRuntimeManager {
     // This prevents 30s timeout errors in services waiting for runtime initialization
     // Skip migrations — see comment in createNPCAgentRuntime for rationale.
     await runtime.initialize({ skipMigrations: true });
+    installRuntimeProviders(runtime, plugins);
 
     const trajectoryLogger = await this.getRuntimeTrajectoryLogger(
       runtime,
@@ -1755,8 +1208,8 @@ export class AgentRuntimeManager {
     // Store trajectory logger reference
     runtime.trajectoryLogger = trajectoryLogger;
 
-    // NOTE: We intentionally do NOT call enhanceWithBabylon here
-    // The coordinator doesn't need agent-specific Babylon features
+    // NOTE: We intentionally do NOT call enhanceWithFeed here
+    // The coordinator doesn't need agent-specific Feed features
 
     return runtime;
   }
@@ -1775,6 +1228,7 @@ export class AgentRuntimeManager {
    */
   public async clearRuntime(agentUserId: string): Promise<void> {
     if (globalRuntimes.has(agentUserId)) {
+      await globalRuntimes.get(agentUserId)!.stop();
       globalRuntimes.delete(agentUserId);
       trajectoryLoggers.delete(agentUserId);
       runtimeLifecycleMetadata.delete(agentUserId);

@@ -6,13 +6,12 @@
  */
 
 import {
-  ApiError,
   authenticate,
+  declineGroupInvite,
   successResponse,
   withErrorHandling,
-} from '@babylon/api';
-import { asUser } from '@babylon/db';
-import { logger } from '@babylon/shared';
+} from '@feed/api';
+import { logger } from '@feed/shared';
 import type { NextRequest } from 'next/server';
 
 /**
@@ -27,45 +26,7 @@ export const POST = withErrorHandling(
     const user = await authenticate(request);
     const { inviteId } = await params;
 
-    await asUser(user, async (db) => {
-      // Get the invite
-      const invite = await db.groupInvite.findUnique({
-        where: { id: inviteId },
-      });
-
-      if (!invite) {
-        throw new ApiError('Invite not found', 404);
-      }
-
-      if (invite.invitedUserId !== user.userId) {
-        throw new ApiError('This invite is not for you', 403);
-      }
-
-      if (invite.status !== 'pending') {
-        throw new ApiError('This invite has already been processed', 400);
-      }
-
-      // Update invite status
-      await db.groupInvite.update({
-        where: { id: inviteId },
-        data: {
-          status: 'declined',
-          respondedAt: new Date(),
-        },
-      });
-
-      // Mark only this specific invite's notification as read
-      await db.notification.updateMany({
-        where: {
-          userId: user.userId,
-          type: 'group_invite',
-          inviteId: inviteId,
-        },
-        data: {
-          read: true,
-        },
-      });
-    });
+    await declineGroupInvite(user.userId, inviteId);
 
     logger.info(
       'Group invite declined',

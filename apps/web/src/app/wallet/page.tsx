@@ -13,10 +13,7 @@ import { PositionsTab } from '@/components/wallet/v2/positions-tab';
 import { useAuth } from '@/hooks/useAuth';
 import { useTeamTradingSummary } from '@/hooks/useTeamTradingSummary';
 import { useUserPositionsPolling } from '@/stores/userPositionsStore';
-import {
-  invalidateWalletBalance,
-  useWalletBalancePolling,
-} from '@/stores/walletBalanceStore';
+import { useWalletBalancePolling } from '@/stores/walletBalanceStore';
 
 const BuyPointsModal = nextDynamic(
   () =>
@@ -110,10 +107,6 @@ export default function WalletPage() {
         <BuyPointsModal
           isOpen={showBuyPoints}
           onClose={() => setShowBuyPoints(false)}
-          onSuccess={() => {
-            invalidateWalletBalance();
-            window.dispatchEvent(new CustomEvent('rewards-updated'));
-          }}
         />
       )}
     </PageContainer>

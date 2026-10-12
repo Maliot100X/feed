@@ -18,13 +18,14 @@
  */
 'use client';
 
-import { cn, formatDateTime, type JsonValue } from '@babylon/shared';
+import { cn, formatDateTime, type JsonValue } from '@feed/shared';
 import { AlertCircle, DollarSign } from 'lucide-react';
-import { useCallback, useEffect, useState, useTransition } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 import { toast } from 'sonner';
 import { Avatar } from '@/components/shared/Avatar';
 import { Skeleton } from '@/components/shared/Skeleton';
-import { apiUrl } from '@/utils/api-url';
+import { readApiErrorMessage } from '@/utils/api-error';
+import { apiFetch } from '@/utils/api-fetch';
 
 /**
  * Appeal structure for human review tab.
@@ -58,15 +59,19 @@ export function HumanReviewTab() {
   const [showActionModal, setShowActionModal] = useState(false);
 
   const fetchAppeals = useCallback(async () => {
-    const response = await fetch(apiUrl('/api/admin/moderation/human-review'));
-    if (!response.ok) {
+    try {
+      const response = await apiFetch('/api/admin/moderation/human-review');
+      if (!response.ok) {
+        toast.error('Failed to load appeals');
+        return;
+      }
+      const data = await response.json();
+      setAppeals(data.appeals || []);
+    } catch {
       toast.error('Failed to load appeals');
+    } finally {
       setLoading(false);
-      return;
     }
-    const data = await response.json();
-    setAppeals(data.appeals || []);
-    setLoading(false);
   }, []);
 
   useEffect(() => {
@@ -77,25 +82,32 @@ export function HumanReviewTab() {
     userId: string,
     action: 'approve' | 'deny',
     reasoning: string
-  ) => {
-    const response = await fetch(
-      `/api/admin/moderation/human-review/${userId}`,
-      {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ action, reasoning }),
-      }
-    );
+  ): Promise<void> => {
+    let response: Response;
+    try {
+      response = await apiFetch(
+        `/api/admin/moderation/human-review/${encodeURIComponent(userId)}`,
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ action, reasoning }),
+        }
+      );
+    } catch {
+      toast.error('Network error. Please try again.');
+      return;
+    }
 
     if (!response.ok) {
-      const error = await response.json();
-      toast.error(error.message || 'Failed to process appeal');
+      toast.error(
+        await readApiErrorMessage(response, 'Failed to process appeal')
+      );
       return;
     }
 
     setShowActionModal(false);
     setSelectedAppeal(null);
-    fetchAppeals();
+    void fetchAppeals();
   };
 
   const formatDate = (date: Date | null) =>
@@ -254,23 +266,28 @@ interface ActionModalProps {
     userId: string,
     action: 'approve' | 'deny',
     reasoning: string
-  ) => void;
+  ) => Promise<void>;
 }
 
 function ActionModal({ appeal, onAction, onClose }: ActionModalProps) {
   const [action, setAction] = useState<'approve' | 'deny'>('approve');
   const [reasoning, setReasoning] = useState('');
-  const [isSubmitting, startSubmit] = useTransition();
+  const [isSubmitting, setIsSubmitting] = useState(false);
 
-  const handleSubmit = () => {
+  const handleSubmit = async () => {
+    if (isSubmitting) return;
     if (!reasoning.trim()) {
       toast.error('Please provide reasoning for your decision');
       return;
     }
-
-    startSubmit(() => {
-      onAction(appeal.id, action, reasoning);
-    });
+    // Stay locked until the request settles (prevents duplicate decisions
+    // and edits to the submitted decision while it is in flight).
+    setIsSubmitting(true);
+    try {
+      await onAction(appeal.id, action, reasoning.trim());
+    } finally {
+      setIsSubmitting(false);
+    }
   };
 
   return (
@@ -296,6 +313,7 @@ function ActionModal({ appeal, onAction, onClose }: ActionModalProps) {
           <label className="mb-2 block font-medium text-sm">Decision</label>
           <select
             value={action}
+            disabled={isSubmitting}
             onChange={(e) => setAction(e.target.value as 'approve' | 'deny')}
             className="w-full rounded-lg border border-border bg-background px-3 py-2"
           >
@@ -310,6 +328,7 @@ function ActionModal({ appeal, onAction, onClose }: ActionModalProps) {
           <label className="mb-2 block font-medium text-sm">Reasoning</label>
           <textarea
             value={reasoning}
+            disabled={isSubmitting}
             onChange={(e) => setReasoning(e.target.value)}
             placeholder="Explain your decision..."
             className="w-full resize-none rounded-lg border border-border bg-background px-3 py-2"
@@ -326,7 +345,8 @@ function ActionModal({ appeal, onAction, onClose }: ActionModalProps) {
             Cancel
           </button>
           <button
-            onClick={handleSubmit}
+            type="button"
+            onClick={() => void handleSubmit()}
             disabled={isSubmitting || !reasoning.trim()}
             className={cn(
               'flex-1 rounded-lg px-4 py-2 transition-colors',

@@ -6,7 +6,7 @@
  * cron (production) or local simulator (development). All operations query the
  * database directly, which is updated by game tick.
  *
- * Vercel-compatible: No filesystem access, all data from database.
+ * Workers-compatible: No filesystem access, all data from database.
  */
 
 import {
@@ -17,8 +17,8 @@ import {
   getDbInstance,
   markets,
   questions,
-} from '@babylon/db';
-import { logger } from '@babylon/shared';
+} from '@feed/db';
+import { logger } from '@feed/shared';
 import { StaticDataRegistry } from './services/static-data-registry';
 import { getGameDayNumber } from './utils/date-utils';
 
@@ -28,6 +28,7 @@ import { getGameDayNumber } from './utils/date-utils';
 export interface ActiveMarketSummary {
   id: string;
   question: string;
+  questionId: string;
 }
 
 /**
@@ -105,7 +106,7 @@ class GameService {
   }
 
   async getRealtimePosts(limit = 100, offset = 0, actorId?: string) {
-    // On Vercel: Read from database instead of filesystem
+    // Serverless/Workers: Read from database instead of filesystem
     // The daemon writes posts to database, so we can query them directly
     const posts = actorId
       ? await getDbInstance().getPostsByActor(actorId, limit)
@@ -172,9 +173,11 @@ class GameService {
     const activeMarkets = await db
       .select({
         id: markets.id,
-        question: markets.question,
+        question: questions.text,
+        questionId: questions.id,
       })
       .from(markets)
+      .innerJoin(questions, eq(questions.marketId, markets.id))
       .where(eq(markets.resolved, false))
       .limit(limit);
 
@@ -186,18 +189,13 @@ class GameService {
    * Used by NPC game context to provide correct insider signals.
    */
   async getQuestionOutcome(marketId: string): Promise<boolean | null> {
-    try {
-      // Markets and questions are linked — market.id maps to question.id
-      const [question] = await db
-        .select({ outcome: questions.outcome })
-        .from(questions)
-        .where(eq(questions.id, marketId))
-        .limit(1);
+    const [question] = await db
+      .select({ outcome: questions.outcome })
+      .from(questions)
+      .where(eq(questions.marketId, marketId))
+      .limit(1);
 
-      return question?.outcome ?? null;
-    } catch {
-      return null;
-    }
+    return question?.outcome ?? null;
   }
 }
 

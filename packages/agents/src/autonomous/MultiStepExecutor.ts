@@ -8,6 +8,7 @@
  * This eliminates double LLM calls and makes execution faster.
  */
 
+import type { IAgentRuntime } from '@elizaos/core';
 import {
   actorState,
   agentLogs,
@@ -20,16 +21,18 @@ import {
   npcTrades,
   questions,
   users,
-} from '@babylon/db';
+} from '@feed/db';
 import {
+  countTokensSync,
   generateWorldContext,
+  getSafeContextLimit,
   StaticDataRegistry,
   WalletService,
-} from '@babylon/engine';
-import type { JsonValue } from '@babylon/shared';
-import type { IAgentRuntime } from '@elizaos/core';
+} from '@feed/engine';
+import type { JsonValue } from '@feed/shared';
 import { callAgentLLM } from '../llm/agent-llm';
-import { getNpcGameContext } from '../plugins/babylon/providers/npc-game-context';
+import { resolveGroqModel } from '../llm/direct-groq';
+import { getNpcGameContext } from '../plugins/feed/providers/npc-game-context';
 import { ensureTrajectoryStep } from '../plugins/plugin-trajectory-logger/src/action-interceptor';
 import { agentService } from '../services/AgentService';
 import { getAgentConfig, getAutonomousFeatures } from '../shared/agent-config';
@@ -50,7 +53,11 @@ import {
   executeDirectTrade,
   executeDirectUnfollow,
 } from './DirectExecutors';
-import { extractFirstJsonObject } from './decision-json';
+import {
+  DecisionValidationError,
+  extractFirstJsonObject,
+  parseDecisionJson,
+} from './decision-json';
 import {
   executeDirectRequestPayment,
   executeDirectShareInformation,
@@ -89,6 +96,8 @@ import {
   getRelationships,
   getWorldEventsContext,
 } from './utils';
+
+import { requireContextNumber } from './utils/context-validation';
 
 // =============================================================================
 // Helpers
@@ -140,7 +149,16 @@ export class MultiStepExecutor {
   /** NPCs get more iterations to chain actions (trade + post + engage) */
   private readonly npcMaxIterations: number;
 
-  constructor(_maxIterations = 5, npcMaxIterations = 12) {
+  private readonly maxIterations: number;
+
+  constructor(maxIterations = 5, npcMaxIterations = 12) {
+    if (
+      ![maxIterations, npcMaxIterations].every(
+        (n) => Number.isSafeInteger(n) && n > 0
+      )
+    )
+      throw new Error('Iteration budgets must be positive integers');
+    this.maxIterations = maxIterations;
     this.npcMaxIterations = npcMaxIterations;
   }
 
@@ -158,119 +176,6 @@ export class MultiStepExecutor {
     return '';
   }
 
-  private buildFallbackDecision(
-    context: AgentTickContext,
-    enabledFeatures: string[],
-    agentUserId: string
-  ): MultiStepDecision | null {
-    const fallbackReply =
-      'Watching this closely. I am keeping risk tight and will adjust if the signal changes.';
-    const fallbackComment =
-      'Watching this closely. The catalyst matters more than the hype.';
-    const fallbackDm =
-      'Saw your signal. I am watching this closely and keeping risk tight.';
-    const fallbackGroupMessage =
-      'Watching this setup closely and managing risk.';
-
-    if (
-      enabledFeatures.includes(Features.COMMENTING) &&
-      context.pendingCommentReplies.length > 0
-    ) {
-      const target = context.pendingCommentReplies[0];
-      if (!target) {
-        return null;
-      }
-      return {
-        action: Actions.REPLY_COMMENT,
-        isFinish: false,
-        thought:
-          'Parser fallback selected the first pending comment reply to avoid wasting the tick.',
-        parameters: {
-          commentId: target.id,
-          postId: target.postId,
-          content: fallbackReply,
-        },
-      };
-    }
-
-    if (enabledFeatures.includes(Features.COMMENTING)) {
-      const targetPost =
-        context.recentPosts.find(
-          (post) => post.authorId !== agentUserId && !post.agentComment
-        ) ?? context.recentPosts.find((post) => post.authorId !== agentUserId);
-      if (targetPost) {
-        return {
-          action: Actions.COMMENT,
-          isFinish: false,
-          thought:
-            'Parser fallback selected a fresh recent post to avoid wasting the tick.',
-          parameters: {
-            postId: targetPost.id,
-            content: fallbackComment,
-          },
-        };
-      }
-    }
-
-    if (enabledFeatures.includes(Features.ENGAGING)) {
-      const likeTarget =
-        context.recentPosts.find(
-          (post) => post.authorId !== agentUserId && !post.agentLiked
-        ) ?? context.recentPosts.find((post) => post.authorId !== agentUserId);
-      if (likeTarget) {
-        return {
-          action: Actions.LIKE,
-          isFinish: false,
-          thought:
-            'Parser fallback selected a simple engagement action to avoid wasting the tick.',
-          parameters: {
-            postId: likeTarget.id,
-          },
-        };
-      }
-    }
-
-    if (enabledFeatures.includes(Features.DMS)) {
-      const recipient = context.recentPosts.find(
-        (post) => post.authorId !== agentUserId
-      )?.authorId;
-      if (recipient) {
-        return {
-          action: Actions.DM,
-          isFinish: false,
-          thought:
-            'Parser fallback selected a direct message to avoid wasting the tick.',
-          parameters: {
-            recipientId: recipient,
-            content: fallbackDm,
-          },
-        };
-      }
-    }
-
-    if (
-      enabledFeatures.includes(Features.GROUP_CHATS) &&
-      (context.groupChats?.length ?? 0) > 0
-    ) {
-      const targetGroupChat = context.groupChats?.[0];
-      if (!targetGroupChat?.id) {
-        return null;
-      }
-      return {
-        action: Actions.GROUP_MESSAGE,
-        isFinish: false,
-        thought:
-          'Parser fallback selected an available group chat to avoid wasting the tick.',
-        parameters: {
-          chatId: targetGroupChat.id,
-          content: fallbackGroupMessage,
-        },
-      };
-    }
-
-    return null;
-  }
-
   /**
    * Execute a multi-step autonomous tick for an agent
    *
@@ -284,8 +189,10 @@ export class MultiStepExecutor {
   async execute(
     agentUserId: string,
     runtime: IAgentRuntime,
-    isNpc = false
+    isNpc = false,
+    signal?: AbortSignal
   ): Promise<MultiStepExecutorResult> {
+    signal?.throwIfAborted();
     const startTime = Date.now();
     const trace: ActionTraceResult[] = [];
 
@@ -313,18 +220,17 @@ export class MultiStepExecutor {
     // Get agent config (may be null for NPCs)
     const config = await getAgentConfig(agentUserId);
     const baseSystemPrompt =
-      config?.systemPrompt ?? 'You are an autonomous trading agent on Babylon.';
+      config?.systemPrompt ?? 'You are an autonomous trading agent on Feed.';
 
     // Determine enabled features - NPCs use per-character autonomy flags if available
     // For USER_CONTROLLED agents: trading defaults to true, others default to false
     let enabledFeatures: string[] = [];
     if (isNpc) {
-      // Read per-character autonomy flags from PackActor babylon metadata
+      // Read per-character autonomy flags from PackActor feed metadata
       const autonomy = (runtime.character as unknown as Record<string, unknown>)
-        ?.babylon
+        ?.feed
         ? (
-            (runtime.character as unknown as Record<string, unknown>)
-              .babylon as {
+            (runtime.character as unknown as Record<string, unknown>).feed as {
               autonomy?: {
                 trading: boolean;
                 posting: boolean;
@@ -411,30 +317,18 @@ export class MultiStepExecutor {
       ? `${baseSystemPrompt}\n\n${balanceGuidance}`
       : baseSystemPrompt;
 
-    // Get NPC game context ONCE before loop (arc awareness, world events)
-    // Graceful degradation: if context fetch fails, continue without it
-    let npcGameContext = '';
-    if (isNpc) {
-      try {
-        npcGameContext = await getNpcGameContext(agentUserId);
-      } catch (error) {
-        logger.warn(
-          'Failed to get NPC game context, continuing without it',
-          {
-            agentUserId,
-            error: error instanceof Error ? error.message : String(error),
-          },
-          'MultiStepExecutor'
-        );
-      }
-    }
+    // Missing NPC context is a failed tick, never permission to act without it.
+    const npcGameContext = isNpc ? await getNpcGameContext(agentUserId) : '';
 
     const contextRefreshSummary =
       await this.getLatestContextRefreshSummary(agentUserId);
 
-    // All agents get the same iteration budget (7 by default)
-    const effectiveMaxIterations = this.npcMaxIterations;
+    // NPCs and user agents retain their configured iteration budgets.
+    const effectiveMaxIterations = isNpc
+      ? this.npcMaxIterations
+      : this.maxIterations;
     for (let iteration = 1; iteration <= effectiveMaxIterations; iteration++) {
+      signal?.throwIfAborted();
       const iterationStartTime = Date.now();
       const iterationTimings: Record<string, number> = {};
 
@@ -483,6 +377,13 @@ export class MultiStepExecutor {
 
       const { prompt, tokenBreakdown } = buildMultiStepDecisionPrompt({
         agentName,
+        tokenBudget:
+          !process.env.AGENT_LLM_PROVIDER ||
+          process.env.AGENT_LLM_PROVIDER === 'groq'
+            ? getSafeContextLimit(resolveGroqModel({ runtime }), 1000) -
+              countTokensSync(systemPrompt || '') -
+              1000
+            : 6000,
         iterationCount: iteration,
         maxIterations: effectiveMaxIterations,
         traceActionResults: trace,
@@ -505,17 +406,18 @@ export class MultiStepExecutor {
       let validationFeedback: string | undefined;
 
       for (let decisionAttempt = 1; decisionAttempt <= 2; decisionAttempt++) {
+        signal?.throwIfAborted();
         const candidateDecision = await this.getDecision(
           prompt,
           runtime,
           iteration,
           systemPrompt,
           {
-            requireConcreteAction: trace.length === 0 && actionability.hasAny,
             feedback: validationFeedback,
           }
         );
 
+        signal?.throwIfAborted();
         if (!candidateDecision) {
           decisionResult = null;
           break;
@@ -568,43 +470,9 @@ export class MultiStepExecutor {
             continue;
           }
 
-          logger.warn(
-            `[MultiStep] Exhausted retries for invalid decision, finishing iteration`,
-            {
-              action: normalizedAction || '(empty)',
-              parameters: normalizedParameters,
-              validationError,
-            },
-            'MultiStepExecutor'
+          throw new Error(
+            `Invalid decision for agent ${agentUserId} at iteration ${iteration}: ${validationError}`
           );
-          const fallbackDecision =
-            trace.length === 0 && actionability.hasAny
-              ? this.buildFallbackDecision(
-                  context,
-                  effectiveFeatures,
-                  agentUserId
-                )
-              : null;
-          if (fallbackDecision) {
-            logger.warn(
-              `[MultiStep] Using deterministic fallback after invalid first action`,
-              {
-                fallbackAction: fallbackDecision.action,
-                fallbackParameters: fallbackDecision.parameters,
-              },
-              'MultiStepExecutor'
-            );
-            candidateDecision.decision = fallbackDecision;
-            normalizedAction = fallbackDecision.action;
-            normalizedParameters = fallbackDecision.parameters;
-            decisionResult = candidateDecision;
-            break;
-          }
-          candidateDecision.decision.action = Actions.FINISH;
-          candidateDecision.decision.isFinish = true;
-          candidateDecision.decision.parameters = {};
-          normalizedAction = Actions.FINISH;
-          normalizedParameters = {};
         }
 
         decisionResult = candidateDecision;
@@ -613,40 +481,9 @@ export class MultiStepExecutor {
       iterationTimings.llmDecision = Date.now() - llmStartTime;
 
       if (!decisionResult) {
-        const fallbackDecision =
-          trace.length === 0 && actionability.hasAny
-            ? this.buildFallbackDecision(
-                context,
-                effectiveFeatures,
-                agentUserId
-              )
-            : null;
-        if (fallbackDecision) {
-          logger.warn(
-            `[MultiStep] Using deterministic fallback after parse failure`,
-            {
-              fallbackAction: fallbackDecision.action,
-              fallbackParameters: fallbackDecision.parameters,
-            },
-            'MultiStepExecutor'
-          );
-          decisionResult = {
-            decision: fallbackDecision,
-            rawResponse: '__deterministic_fallback__',
-          };
-          normalizedAction = fallbackDecision.action;
-          normalizedParameters = fallbackDecision.parameters;
-        }
-      }
-
-      if (!decisionResult) {
-        iterationTimings.total = Date.now() - iterationStartTime;
-        logger.warn(
-          `[MultiStep] Failed to parse decision at iteration ${iteration}, finishing`,
-          { iterationTimings },
-          'MultiStepExecutor'
+        throw new Error(
+          `Failed to parse decision for agent ${agentUserId} at iteration ${iteration}`
         );
-        break;
       }
 
       const { decision, rawResponse } = decisionResult;
@@ -684,11 +521,19 @@ export class MultiStepExecutor {
           { thought: decision.thought, iterationTimings },
           'MultiStepExecutor'
         );
+        await this.recordTrajectoryStep(runtime, decision, {
+          actionType: normalizedAction,
+          success: true,
+          parameters: normalizedParameters,
+          summary: decision.thought,
+          timestamp: Date.now(),
+        });
         break;
       }
 
       // Execute the chosen action with parameters (pass effectiveFeatures for enforcement)
       const actionStartTime = Date.now();
+      signal?.throwIfAborted();
       const actionResult = await this.executeAction(
         agentUserId,
         normalizedAction,
@@ -704,6 +549,11 @@ export class MultiStepExecutor {
       iterationTimings.total = Date.now() - iterationStartTime;
 
       trace.push(actionResult);
+      if (!actionResult.success) {
+        throw new Error(
+          `Agent action ${normalizedAction} failed: ${actionResult.error || actionResult.summary || 'No failure detail returned'}`
+        );
+      }
 
       // Log iteration timing summary - warn if iteration took more than 30s
       const iterLogLevel = iterationTimings.total > 30000 ? 'warn' : 'info';
@@ -743,7 +593,7 @@ export class MultiStepExecutor {
    * Gather current context for decision making
    * Uses utility functions for individual data fetching
    */
-  private async gatherContext(
+  async gatherContext(
     agentUserId: string,
     enabledFeatures: string[],
     isNpc: boolean,
@@ -771,12 +621,23 @@ export class MultiStepExecutor {
         );
       }
 
-      balance = Number(actor.tradingBalance);
+      balance = requireContextNumber(
+        actor.tradingBalance,
+        `NPC ${agentUserId} tradingBalance`,
+        0
+      );
       pnl = 0;
     } else {
       const walletBalance = await WalletService.getBalance(agentUserId);
-      balance = walletBalance.balance;
-      pnl = walletBalance.lifetimePnL;
+      balance = requireContextNumber(
+        walletBalance.balance,
+        `agent ${agentUserId} balance`,
+        0
+      );
+      pnl = requireContextNumber(
+        walletBalance.lifetimePnL,
+        `agent ${agentUserId} lifetimePnL`
+      );
 
       // Fetch creator info for user-controlled agents
       const [agentUser] = await db
@@ -1189,7 +1050,7 @@ export class MultiStepExecutor {
     runtime: IAgentRuntime,
     _iteration: number,
     systemPrompt?: string,
-    options?: { requireConcreteAction?: boolean; feedback?: string }
+    options?: { feedback?: string }
   ): Promise<{ decision: MultiStepDecision; rawResponse: string } | null> {
     const maxRetries = 3;
 
@@ -1200,11 +1061,6 @@ export class MultiStepExecutor {
 
     for (let attempt = 1; attempt <= maxRetries; attempt++) {
       const promptSegments = [prompt];
-      if (options?.requireConcreteAction) {
-        promptSegments.push(
-          'CRITICAL: You MUST choose exactly one concrete non-FINISH, non-WAIT action in valid JSON. Do not return FINISH, WAIT, or an empty action on this turn.'
-        );
-      }
       if (options?.feedback) {
         promptSegments.push(options.feedback);
       }
@@ -1241,26 +1097,7 @@ export class MultiStepExecutor {
       }
 
       try {
-        const parsed = JSON.parse(jsonText) as MultiStepDecision;
-        const rawIsFinish = parsed.isFinish;
-        parsed.isFinish =
-          typeof rawIsFinish === 'boolean' ? rawIsFinish : false;
-        if (!parsed.action) {
-          parsed.action = '';
-        }
-        if (!parsed.parameters) {
-          parsed.parameters = {};
-        }
-        if (!parsed.thought) {
-          parsed.thought = '';
-        }
-        if (
-          typeof parsed.parameters !== 'object' ||
-          parsed.parameters === null ||
-          Array.isArray(parsed.parameters)
-        ) {
-          parsed.parameters = {};
-        }
+        const parsed = parseDecisionJson(jsonText);
 
         const normalizedAction = normalizeDecisionAction(parsed.action);
         parsed.action = normalizedAction;
@@ -1270,28 +1107,13 @@ export class MultiStepExecutor {
             ? true
             : false;
 
-        if (
-          options?.requireConcreteAction &&
-          (!normalizedAction ||
-            normalizedAction === Actions.FINISH ||
-            normalizedAction === Actions.WAIT ||
-            parsed.isFinish)
-        ) {
-          logger.warn(
-            `[MultiStep] Rejected non-concrete decision (attempt ${attempt})`,
-            {
-              action: normalizedAction || '(empty)',
-              isFinish: parsed.isFinish,
-            },
-            'MultiStepExecutor'
-          );
-          retryFeedback =
-            'Your previous JSON chose FINISH, WAIT, or an empty action when a real action was required. Return one concrete action with valid parameters from the provided IDs.';
-          continue;
-        }
-
         return { decision: parsed, rawResponse: response };
-      } catch {
+      } catch (error) {
+        if (
+          !(error instanceof SyntaxError) &&
+          !(error instanceof DecisionValidationError)
+        )
+          throw error;
         retryFeedback =
           'Your previous response contained malformed JSON. Return a single valid JSON object with double-quoted keys and strings only.';
         logger.warn(
@@ -1334,6 +1156,28 @@ export class MultiStepExecutor {
           return 'Your TRADE was invalid because marketType must be exactly "prediction" or "perp". Choose a valid market from the provided context and return the corrected trade.';
         }
 
+        const allowedSides =
+          parameters.marketType === 'prediction'
+            ? ['buy_yes', 'buy_no', 'sell_yes', 'sell_no']
+            : ['open_long', 'open_short', 'close_position'];
+        if (!allowedSides.includes(side))
+          return 'TRADE side must match its marketType.';
+        const rawAmount = parameters.amount;
+        if (
+          (typeof rawAmount !== 'number' && typeof rawAmount !== 'string') ||
+          (typeof rawAmount === 'string' && !rawAmount.trim())
+        )
+          return 'TRADE requires an explicit amount.';
+        const amount = Number(rawAmount);
+        const closing = side.startsWith('sell_') || side === 'close_position';
+        if (
+          !Number.isFinite(amount) ||
+          amount < 0 ||
+          (!closing && amount === 0)
+        ) {
+          return 'TRADE amount must be finite and positive (zero is allowed only to close all holdings).';
+        }
+
         if (parameters.marketType === 'prediction') {
           const knownPredictionMarketIds = new Set([
             ...context.predictionMarkets.map((market) => market.id),
@@ -1343,6 +1187,15 @@ export class MultiStepExecutor {
           ]);
           if (!knownPredictionMarketIds.has(marketId)) {
             return `Your TRADE used prediction marketId ${marketId}, but that market is not in the current context. Choose an exact marketId from Available Prediction Markets or your open positions.`;
+          }
+          if (side === 'buy_yes' || side === 'buy_no') {
+            const market = context.predictionMarkets.find(
+              (m) => m.id === marketId
+            );
+            if (!market || !Number.isFinite(market.maxSafeBet))
+              return 'Prediction buy requires current liquidity limits in context.';
+            if (amount > market.maxSafeBet)
+              return `Requested amount exceeds safe liquidity limit $${market.maxSafeBet}. Reduce the amount or choose another action.`;
           }
         }
 
@@ -1784,11 +1637,13 @@ export class MultiStepExecutor {
     const marketType = parameters.marketType as 'prediction' | 'perp';
     const marketId = parameters.marketId as string;
     const side = parameters.side as string;
-    const isSell = typeof side === 'string' && side.startsWith('sell_');
-    const amount =
-      isSell && (parameters.amount === 0 || parameters.amount === '0')
+    const amount = requireContextNumber(
+      parameters.amount as string | number | null | undefined,
+      'trade amount',
+      side?.startsWith('sell_') || side === 'close_position'
         ? 0
-        : Number(parameters.amount || 100);
+        : Number.MIN_VALUE
+    );
     const reasoning = parameters.reasoning as string | undefined;
 
     if (!marketId || !side) {
@@ -1806,7 +1661,7 @@ export class MultiStepExecutor {
     try {
       tradeResult = await executeDirectTrade({
         agentUserId,
-        marketType: marketType || 'prediction',
+        marketType,
         marketId,
         side: side as
           | 'buy_yes'
@@ -2968,12 +2823,8 @@ export class MultiStepExecutor {
       }
     }
 
-    const hasMeaningfulAttempt = trace.some(
-      (r) => r.actionType !== Actions.WAIT && r.actionType !== Actions.FINISH
-    );
-
     return {
-      success: hasMeaningfulAttempt,
+      success: trace.every((action) => action.success),
       actionsExecuted: counts,
       iterations: trace.length,
       trace,

@@ -2,6 +2,7 @@ import { beforeEach, describe, expect, it } from 'bun:test';
 import type { IAgentRuntime, Memory, State, UUID } from '@elizaos/core';
 import type { JsonValue } from '../../../types/common';
 import { sendToAdminAction } from '../src/action';
+import { getAdminHistory } from '../src/admin-history';
 import { autonomyPlugin } from '../src/index';
 import { adminChatProvider } from '../src/provider';
 import { AutonomyService } from '../src/service';
@@ -76,13 +77,18 @@ describe('Autonomy Plugin Tests', () => {
         updateAgentCalls.push({ agentId, updates });
         return true;
       },
+      getRoomsForParticipants: async () => [],
       getMemories: async (_params: Record<string, JsonValue>) => [],
       createMemory: async () => 'test-memory-id' as UUID,
+      ensureWorldExists: async () => {},
+      ensureRoomExists: async () => {},
+      addParticipant: async () => true,
+      ensureParticipantInRoom: async () => {},
       createRoom: async () => {},
       getRoom: async () => null,
       sendMessageToTarget: async () => {},
       getService: (serviceName: string) => {
-        if (serviceName === 'AUTONOMY' || serviceName === 'autonomy') {
+        if (serviceName === 'AUTONOMOUS') {
           return {
             getAutonomousRoomId: () => 'autonomous-room-id' as UUID,
             isLoopRunning: () => false,
@@ -147,8 +153,81 @@ describe('Autonomy Plugin Tests', () => {
       ).not.toThrow();
     });
 
+    it('keeps the same thought room across restarts and isolates agents', () => {
+      const first = new AutonomyService(mockRuntime);
+      expect(new AutonomyService(mockRuntime).getAutonomousRoomId()).toBe(
+        first.getAutonomousRoomId()
+      );
+      expect(
+        new AutonomyService({
+          ...mockRuntime,
+          agentId: '22345678-1234-4567-8901-123456789012' as UUID,
+        }).getAutonomousRoomId()
+      ).not.toBe(first.getAutonomousRoomId());
+    });
+
+    it('halts and reports a missing required agent entity', async () => {
+      mockRuntime.getEntityById = async () => null;
+      const service = new AutonomyService(mockRuntime);
+      service.setLoopInterval(100);
+      await service.startLoop();
+      await Bun.sleep(180);
+      expect(service.getStatus()).toMatchObject({
+        running: false,
+        enabled: false,
+        error: 'Autonomy requires the persisted agent entity',
+      });
+      await service.stop();
+      await expect(service.startLoop()).rejects.toThrow('stopped');
+    });
+
     it('should have correct service metadata', () => {
       expect(AutonomyService.serviceType).toBe('AUTONOMOUS');
+    });
+  });
+
+  describe('Admin history integrity', () => {
+    it('loads both sides only from shared rooms using the messages table', async () => {
+      const adminId = 'a1b2c3d4-5678-4abc-b123-123456789012' as UUID;
+      const roomId = '32345678-1234-4567-8901-123456789012' as UUID;
+      mockRuntime.getRoomsForParticipants = async (participants) => {
+        expect(participants).toEqual([mockRuntime.agentId, adminId]);
+        return [roomId];
+      };
+      mockRuntime.getMemories = async (query) => {
+        expect(query.tableName).toBe('messages');
+        expect(query.roomId).toBe(roomId);
+        return [
+          {
+            ...mockMessage,
+            roomId,
+            entityId: mockRuntime.agentId,
+            createdAt: 2,
+            content: { text: 'Agent reply' },
+          },
+          {
+            ...mockMessage,
+            roomId,
+            entityId: adminId,
+            createdAt: 1,
+            content: { text: 'Admin instruction' },
+          },
+        ];
+      };
+      expect(
+        (await getAdminHistory(mockRuntime, adminId)).map(
+          (message) => message.content.text
+        )
+      ).toEqual(['Admin instruction', 'Agent reply']);
+    });
+
+    it('rejects delivery without a shared admin conversation', async () => {
+      await expect(
+        sendToAdminAction.handler(mockRuntime, {
+          ...mockMessage,
+          roomId: 'autonomous-room-id' as UUID,
+        })
+      ).rejects.toThrow('No existing shared admin conversation');
     });
   });
 
@@ -286,6 +365,7 @@ describe('Autonomy Plugin Tests', () => {
 
       // Check that loop is not running
       expect(service.isLoopRunning()).toBe(false);
+      await service.stop();
     });
 
     it('should provide status information', async () => {
@@ -317,6 +397,7 @@ describe('Autonomy Plugin Tests', () => {
       expect(roomId).toMatch(
         /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
       );
+      await service.stop();
     });
   });
 });

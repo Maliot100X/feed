@@ -42,13 +42,13 @@ const nextConfig: NextConfig = {
   // Transpile internal workspace packages to resolve TypeScript imports properly
   // This is necessary because these packages are not pre-built and use TypeScript source directly
   transpilePackages: [
-    '@babylon/shared',
-    '@babylon/engine',
-    '@babylon/agents',
-    '@babylon/api',
-    '@babylon/db',
-    '@babylon/training',
-    '@babylon/a2a',
+    '@feed/shared',
+    '@feed/engine',
+    '@feed/agents',
+    '@feed/api',
+    '@feed/db',
+    '@feed/training',
+    '@feed/a2a',
   ],
   experimental: {
     optimizePackageImports: [
@@ -82,14 +82,60 @@ const nextConfig: NextConfig = {
   // Skip prerendering for feed page (client-side only)
   skipTrailingSlashRedirect: true,
   skipProxyUrlNormalize: false,
-  // Farcaster Mini App manifest serving
+  // Response headers formerly declared in vercel.json. Applied by Next.js (and
+  // OpenNext on Cloudflare Workers); later entries override earlier ones per key.
+  async headers() {
+    return [
+      {
+        source: '/(.*)',
+        headers: [
+          {
+            key: 'Content-Security-Policy',
+            value:
+              "frame-src 'self' https://oauth.telegram.org; frame-ancestors 'self'",
+          },
+          { key: 'X-Content-Type-Options', value: 'nosniff' },
+          { key: 'X-Frame-Options', value: 'SAMEORIGIN' },
+          { key: 'X-XSS-Protection', value: '1; mode=block' },
+          { key: 'Referrer-Policy', value: 'strict-origin-when-cross-origin' },
+          {
+            key: 'Permissions-Policy',
+            value: 'camera=(), microphone=(), geolocation=()',
+          },
+        ],
+      },
+      {
+        source: '/api/:path*',
+        headers: [
+          { key: 'Access-Control-Allow-Credentials', value: 'true' },
+          {
+            key: 'Access-Control-Allow-Methods',
+            value: 'GET,DELETE,PATCH,POST,PUT,OPTIONS',
+          },
+          {
+            key: 'Access-Control-Allow-Headers',
+            value:
+              'X-CSRF-Token, X-Requested-With, Accept, Accept-Version, Content-Length, Content-MD5, Content-Type, Date, X-Api-Version, Authorization, x-admin-token, x-dev-admin-token',
+          },
+        ],
+      },
+      {
+        // Agent routes use Bearer token auth (not cookies), so wildcard CORS is safe.
+        source: '/api/agents/:path*',
+        headers: [
+          { key: 'Access-Control-Allow-Origin', value: '*' },
+          { key: 'Access-Control-Allow-Methods', value: 'GET,POST,OPTIONS' },
+          {
+            key: 'Access-Control-Allow-Headers',
+            value: 'Content-Type, Authorization',
+          },
+        ],
+      },
+    ];
+  },
   async rewrites() {
     // Legacy `/assets/agent-monkeys/` and `/assets/user-profiles/` preset URLs are rewritten to `user-pfps` in middleware.ts
     return [
-      {
-        source: '/.well-known/farcaster.json',
-        destination: '/farcaster.json',
-      },
       {
         source: '/.well-known/agent-card.json',
         destination: '/api/game/card',
@@ -101,7 +147,7 @@ const nextConfig: NextConfig = {
     ];
   },
   // Externalize packages with native Node.js dependencies for server-side
-  // Note: @babylon/* packages are in transpilePackages, so they can't be here
+  // Note: @feed/* packages are in transpilePackages, so they can't be here
   serverExternalPackages: [
     'ipfs-http-client',
     '@helia/unixfs',
@@ -116,17 +162,12 @@ const nextConfig: NextConfig = {
     'drizzle-orm/postgres-js',
     'ioredis', // Node.js Redis client - requires tls/net modules not available in edge runtime
     // NOTE: @elizaos/core was removed from externals because it's ESM-only ("type": "module").
-    // Externalizing ESM packages causes require() errors at Vercel runtime (ERR_REQUIRE_ESM).
+    // Externalizing ESM packages causes require() errors at runtime (ERR_REQUIRE_ESM).
     // Webpack now bundles it directly which resolves the ESM compatibility issue.
   ],
   images: {
     qualities: [100, 75],
     remotePatterns: [
-      {
-        protocol: 'https',
-        hostname: '**.public.blob.vercel-storage.com',
-        pathname: '/**',
-      },
       {
         protocol: 'http',
         hostname: 'localhost',
@@ -141,7 +182,7 @@ const nextConfig: NextConfig = {
   },
   // Turbopack config for monorepo
   // Explicitly set root to suppress Next.js warning about multiple lockfiles.
-  // The monorepo root contains the main bun.lock at /Users/shawwalters/babylon/bun.lock.
+  // The monorepo root contains the main bun.lock at /Users/shawwalters/feed/bun.lock.
   // Nested packages (packages/examples) may have their own lockfiles, but this
   // is the correct root for the web app's workspace.
   turbopack: {
@@ -149,6 +190,21 @@ const nextConfig: NextConfig = {
   },
   // Webpack configuration for backward compatibility
   webpack: (config, { isServer, webpack }) => {
+    if (process.env.DEPLOYMENT_PLATFORM === 'cloudflare') {
+      // Share the two supported tokenizer dictionaries across agent providers.
+      config.resolve.alias = {
+        ...config.resolve.alias,
+        'js-tiktoken$': path.resolve(process.cwd(), 'cloudflare-tokenizer.ts'),
+      };
+      if (isServer) {
+        config.module.rules.push({
+          test: /@elizaos[\\/]core[\\/]dist[\\/]node[\\/]index\.node\.js$/,
+          use: [
+            path.resolve(process.cwd(), 'webpack-elizaos-process-loader.cjs'),
+          ],
+        });
+      }
+    }
     // Enable WebAssembly experiments for tiktoken
     config.experiments = {
       ...config.experiments,
@@ -230,7 +286,7 @@ const nextConfig: NextConfig = {
       config.plugins.push(
         new webpack.IgnorePlugin({
           resourceRegExp:
-            /^@babylon\/(api|db|training|agents)(\/.*)?$|^(ioredis|postgres|electron-fetch|ipfs-http-client)$|^@elizaos\/core$/,
+            /^@feed\/(api|db|training|agents)(\/.*)?$|^(ioredis|postgres|electron-fetch|ipfs-http-client)$|^@elizaos\/core$/,
         })
       );
     }
@@ -249,7 +305,7 @@ const nextConfig: NextConfig = {
       // For server-side, ensure packages in serverExternalPackages are externalized
       // They're already in serverExternalPackages, but we also configure webpack
       // to externalize them so they're resolved at runtime from node_modules
-      // NOTE: Do NOT externalize @babylon/* packages - they are TypeScript source files
+      // NOTE: Do NOT externalize @feed/* packages - they are TypeScript source files
       // and must be transpiled by webpack via transpilePackages
       // NOTE: @elizaos/core intentionally excluded - it's ESM-only and must be bundled
       const serverExternalPackagesList = [
@@ -316,16 +372,16 @@ const nextConfig: NextConfig = {
       // Externalize agent0-sdk and related packages to prevent bundling electron-fetch
       // Also externalize postgres and Node.js-only packages
       // These should only be loaded server-side via dynamic imports
-      // CRITICAL: Externalize @babylon/api and @babylon/db to prevent bundling server-only code in client
+      // CRITICAL: Externalize @feed/api and @feed/db to prevent bundling server-only code in client
       const serverOnlyPackages = [
         'agent0-sdk',
-        '@babylon/agents/agent0',
+        '@feed/agents/agent0',
         'ipfs-http-client',
         'electron-fetch',
         'postgres',
         'ioredis',
-        '@babylon/db',
-        '@babylon/api',
+        '@feed/db',
+        '@feed/api',
         'swagger-jsdoc',
       ];
 
@@ -395,12 +451,11 @@ const nextConfig: NextConfig = {
   },
 };
 
-// Only enable Sentry uploads in CI/Vercel builds.
+// Only enable Sentry uploads in CI builds.
 // This prevents local builds from failing if a developer has a stale/invalid token set.
-const sentryAuthToken =
-  process.env.CI || process.env.VERCEL
-    ? sentryAuthTokenFromProcessEnv
-    : undefined;
+const sentryAuthToken = process.env.CI
+  ? sentryAuthTokenFromProcessEnv
+  : undefined;
 
 const sentryWebpackPluginOptions = {
   // For all available options, see:
@@ -408,7 +463,7 @@ const sentryWebpackPluginOptions = {
 
   org: process.env.SENTRY_ORG ?? 'eliza-uv',
 
-  project: process.env.SENTRY_PROJECT ?? 'babylon',
+  project: process.env.SENTRY_PROJECT ?? 'feed',
 
   // Auth token for uploading source maps and creating releases
   // Set SENTRY_AUTH_TOKEN in environment to enable source map uploads
@@ -426,13 +481,12 @@ const sentryWebpackPluginOptions = {
   // For all available options, see:
   // https://docs.sentry.io/platforms/javascript/guides/nextjs/manual-setup/
 
-  // Keep uploads narrow so Sentry source maps don't bloat Vercel build artifacts.
+  // Keep uploads narrow so Sentry source maps don't bloat build artifacts.
   widenClientFileUpload: false,
 
   sourcemaps: {
-    // Vercel's serverless size limit applies to deployed output, not just runtime code.
-    // Remove uploaded source maps from `.next` after Sentry has them to keep the
-    // production build path aligned with preview output size.
+    // Worker bundle size limits apply to deployed output, not just runtime code.
+    // Remove uploaded source maps from `.next` after Sentry has them.
     deleteSourcemapsAfterUpload: true,
   },
 
@@ -444,12 +498,6 @@ const sentryWebpackPluginOptions = {
 
   // Automatically tree-shake Sentry logger statements to reduce bundle size
   disableLogger: true,
-
-  // Enables automatic instrumentation of Vercel Cron Monitors. (Does not yet work with App Router route handlers.)
-  // See the following for more information:
-  // https://docs.sentry.io/product/crons/
-  // https://vercel.com/docs/cron-jobs
-  automaticVercelMonitors: true,
 };
 
 // Wrap Sentry config in async function to handle top-level await

@@ -33,7 +33,7 @@ export function AppUrlListener({
         const deepLinkUrl = new URL(event.url);
 
         // Handle Privy OAuth redirects — these come back from the external
-        // browser after social login (Farcaster, Twitter, Discord, etc.)
+        // browser after social login (Twitter, Discord, etc.)
         if (
           deepLinkUrl.searchParams.has('privy_oauth_code') &&
           deepLinkUrl.searchParams.has('privy_oauth_state') &&
@@ -47,7 +47,7 @@ export function AppUrlListener({
           return;
         }
 
-        // Handle app deep links (e.g., babylon.market/post/123)
+        // Handle app deep links (e.g., feed.fun/post/123)
         const path = deepLinkUrl.pathname + deepLinkUrl.search;
         if (path && path !== '/') {
           if (onNavigate) {

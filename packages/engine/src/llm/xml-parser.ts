@@ -10,7 +10,7 @@
  * XML is more forgiving than JSON and easier for LLMs to generate correctly.
  */
 
-import { logger } from '@babylon/shared';
+import { logger } from '@feed/shared';
 import type { JsonValue } from '../types/common';
 import { formatError } from '../utils/error-utils';
 
@@ -28,6 +28,14 @@ export interface XMLParseResult {
  */
 export function extractXMLFromText(content: string): string {
   const cleaned = content.trim();
+  // Never extract a complete child from a truncated XML document.
+  if (cleaned.startsWith('<')) {
+    const root = cleaned.match(/^<([\w-]+)(?:\s|>)/)?.[1];
+    if (!root) return cleaned;
+    const closing = `</${root}>`;
+    const end = cleaned.lastIndexOf(closing);
+    return end < 0 ? cleaned : cleaned.slice(0, end + closing.length);
+  }
 
   // Try to find the main XML document (starts with < and ends with >)
   // Look for patterns like <decisions>...</decisions> or <response>...</response>
@@ -205,11 +213,23 @@ export function repairTruncatedXML(xml: string): string {
  * Works in both Node.js and browser environments
  */
 export function parseXMLToObject(xml: string): JsonValue {
-  const cleaned = repairTruncatedXML(xml);
+  const cleaned = xml
+    .trim()
+    .replace(/<([\w-]+)(?:\s[^<>]*?)?\s*\/>/g, '<$1></$1>');
+  const stack: string[] = [];
+  for (const tag of cleaned.matchAll(/<(\/?)([\w-]+)(?:\s[^<>]*?)?>/g)) {
+    const name = tag[2]!;
+    if (tag[1]) {
+      if (stack.pop() !== name)
+        throw new Error(`Mismatched XML closing tag ${name}`);
+    } else stack.push(name);
+  }
+  if (stack.length)
+    throw new Error(`Truncated XML: unclosed ${stack.join(', ')}`);
 
   // Find root element
   const rootMatch = cleaned.match(/<([\w-]+)[^>]*>([\s\S]*)<\/\1>/);
-  if (!rootMatch || !rootMatch[1] || !rootMatch[2]) {
+  if (!rootMatch || !rootMatch[1] || rootMatch[2] === undefined) {
     throw new Error('No root element found in XML');
   }
 
@@ -249,7 +269,13 @@ function parseXMLContent(content: string): JsonValue {
     if (!tagName || tagContent === undefined) continue; // Skip invalid matches
 
     // Recursively parse child content
-    const value = parseXMLContent(tagContent);
+    // IDs are opaque strings, including numeric Snowflakes beyond JS safe integers.
+    const value =
+      /(?:id|ticker)$/i.test(tagName) &&
+      !tagContent.includes('<') &&
+      tagContent.trim() !== 'null'
+        ? tagContent.trim()
+        : parseXMLContent(tagContent);
 
     // Handle multiple elements with same tag name (arrays)
     const existing = children[tagName];

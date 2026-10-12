@@ -5,8 +5,9 @@
  * Eliminates duplicate boilerplate across autonomous services.
  */
 
-import { db, eq, users } from '@babylon/db';
-import { StaticDataRegistry } from '@babylon/engine';
+import { db, eq, users } from '@feed/db';
+import { StaticDataRegistry } from '@feed/engine';
+import { requireContextNumber } from './utils/context-validation';
 
 export interface AgentContext {
   agentUserId: string;
@@ -62,7 +63,7 @@ export async function getAgentContext(
     agentUserId,
     displayName: agent.displayName ?? agentUserId,
     isNpc: false,
-    lifetimePnL: Number(agent.lifetimePnL ?? 0),
+    lifetimePnL: requireContextNumber(agent.lifetimePnL, 'agent lifetimePnL'),
   };
 }
 

@@ -66,8 +66,8 @@ import {
   successResponse,
   WaitlistService,
   withErrorHandling,
-} from '@babylon/api';
-import { logger } from '@babylon/shared';
+} from '@feed/api';
+import { logger, POINTS } from '@feed/shared';
 import type { NextRequest } from 'next/server';
 import { z } from 'zod';
 
@@ -92,9 +92,9 @@ export const POST = withErrorHandling(async (request: NextRequest) => {
 
   return successResponse({
     awarded,
-    bonusAmount: awarded ? 25 : 0,
+    bonusAmount: awarded ? POINTS.WALLET_CONNECT : 0,
     message: awarded
       ? 'Wallet bonus awarded'
-      : 'Wallet bonus already awarded or user not found',
+      : 'Wallet bonus already awarded, or the wallet is not the one linked to your account',
   });
 });

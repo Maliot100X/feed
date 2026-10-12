@@ -4,5 +4,5 @@ exports/
 checkpoints/
 __pycache__/
 *.pyc
-.pytest_cache/curriculum_state.json
+curriculum_state.json
 hf_dataset/

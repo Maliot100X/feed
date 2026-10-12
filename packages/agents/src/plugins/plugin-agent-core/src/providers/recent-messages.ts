@@ -1,7 +1,7 @@
 /**
  * Recent Messages Provider
  *
- * Provides conversation history from Babylon's database.
+ * Provides conversation history from Feed's database.
  *
  * In team chat mode: Queries the `messages` table filtered to only
  * messages that target this specific agent (via targetIds) and the agent's responses.
@@ -9,6 +9,13 @@
  * In regular DM mode: Queries the `agentMessages` table (legacy behavior).
  */
 
+import type {
+  IAgentRuntime,
+  Memory,
+  Provider,
+  ProviderResult,
+  State,
+} from '@elizaos/core';
 import {
   and,
   db,
@@ -17,14 +24,7 @@ import {
   messages as messagesTable,
   or,
   sql,
-} from '@babylon/db';
-import type {
-  IAgentRuntime,
-  Memory,
-  Provider,
-  ProviderResult,
-  State,
-} from '@elizaos/core';
+} from '@feed/db';
 
 /**
  * Format timestamp to relative time string
@@ -68,11 +68,29 @@ export const recentMessagesProvider: Provider = {
     _message: Memory,
     state: State
   ): Promise<ProviderResult> => {
-    const agentUserId = runtime.agentId;
+    // The current request may not yet be persisted. SDK reply templates consume
+    // provider text directly, so history alone is insufficient for this turn.
+    const currentText = _message.content.text;
+    const withCurrentMessage = (history: string): string =>
+      typeof currentText === 'string' && currentText.trim()
+        ? `${history}\n\n# Current Message\n${currentText}`
+        : history;
+    const agentUserId =
+      typeof _message.content.agentId === 'string'
+        ? _message.content.agentId
+        : runtime.agentId;
 
     // Check if we're in team chat mode
-    const teamChatId = state?.values?.teamChatId as string | undefined;
-    const ownerId = state?.values?.ownerId as string | undefined;
+    const teamChatId = (
+      typeof _message.content.teamChatId === 'string'
+        ? _message.content.teamChatId
+        : state?.values?.teamChatId
+    ) as string | undefined;
+    const ownerId = (
+      typeof _message.content.ownerId === 'string'
+        ? _message.content.ownerId
+        : state?.values?.ownerId
+    ) as string | undefined;
     const isTeamChatMode = !!teamChatId && !!ownerId;
 
     let formattedMessages: string;
@@ -113,11 +131,15 @@ export const recentMessagesProvider: Provider = {
         return {
           data: { recentMessages: [], messageCount: 0 },
           values: {
-            recentMessages: 'No previous conversation history with this user.',
+            recentMessages: withCurrentMessage(
+              'No previous conversation history with this user.'
+            ),
             messageCount: 0,
             hasHistory: false,
           },
-          text: 'No previous conversation history with this user.',
+          text: withCurrentMessage(
+            'No previous conversation history with this user.'
+          ),
         };
       }
 
@@ -147,11 +169,13 @@ export const recentMessagesProvider: Provider = {
         return {
           data: { recentMessages: [], messageCount: 0 },
           values: {
-            recentMessages: 'No previous conversation history.',
+            recentMessages: withCurrentMessage(
+              'No previous conversation history.'
+            ),
             messageCount: 0,
             hasHistory: false,
           },
-          text: 'No previous conversation history.',
+          text: withCurrentMessage('No previous conversation history.'),
         };
       }
 
@@ -168,6 +192,7 @@ export const recentMessagesProvider: Provider = {
         .join('\n');
     }
 
+    formattedMessages = withCurrentMessage(formattedMessages);
     return {
       data: {
         recentMessages: rawMessages,

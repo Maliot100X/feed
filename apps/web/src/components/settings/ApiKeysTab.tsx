@@ -1,10 +1,11 @@
 'use client';
 
-import { logger } from '@babylon/shared';
+import { logger } from '@feed/shared';
 import { Copy, Plus, Trash2 } from 'lucide-react';
 import { useCallback, useEffect, useState } from 'react';
 import { toast } from 'sonner';
 import { useAuth } from '@/hooks/useAuth';
+import { readApiErrorMessage } from '@/utils/api-error';
 import { apiUrl } from '@/utils/api-url';
 
 interface ApiKey {
@@ -33,7 +34,8 @@ interface ApiKeyResponse {
  * @returns API Keys tab element
  */
 export function ApiKeysTab() {
-  const { getAccessToken } = useAuth();
+  const { getAccessToken, user } = useAuth();
+  const ownerId = user?.id ?? null;
   const [keys, setKeys] = useState<ApiKey[]>([]);
   const [loading, setLoading] = useState(true);
   const [generating, setGenerating] = useState(false);
@@ -73,17 +75,49 @@ export function ApiKeysTab() {
     setLoading(false);
   }, [getAccessToken]);
 
+  // A freshly generated full API key (and the key list) belongs to one
+  // account: never keep showing it after an account switch or logout.
+  // biome-ignore lint/correctness/useExhaustiveDependencies: reset is keyed on the owning account
   useEffect(() => {
-    fetchKeys();
+    setNewKey(null);
+    setKeys([]);
+    setKeyName('');
+  }, [ownerId]);
+
+  useEffect(() => {
+    void fetchKeys().catch((error: unknown) => {
+      logger.error(
+        'Failed to fetch API keys',
+        { error: String(error) },
+        'ApiKeysTab'
+      );
+      toast.error('Failed to load API keys');
+      setLoading(false);
+    });
   }, [fetchKeys]);
 
   const handleGenerateKey = async () => {
+    if (generating) return;
     setGenerating(true);
+    try {
+      await generateKey();
+    } catch (error) {
+      logger.error(
+        'Failed to generate API key',
+        { error: String(error) },
+        'ApiKeysTab'
+      );
+      toast.error('Failed to generate API key');
+    } finally {
+      setGenerating(false);
+    }
+  };
+
+  const generateKey = async () => {
     const token = await getAccessToken();
     if (!token) {
       logger.error('Not authenticated', undefined, 'ApiKeysTab');
       toast.error('Failed to generate API key');
-      setGenerating(false);
       return;
     }
 
@@ -97,24 +131,32 @@ export function ApiKeysTab() {
     });
 
     if (!response.ok) {
-      const error = await response.json();
-      const errorMessage = error.error || 'Failed to generate API key';
+      const errorMessage = await readApiErrorMessage(
+        response,
+        'Failed to generate API key'
+      );
       logger.error(
         'Failed to generate API key',
         { status: response.status, error: errorMessage },
         'ApiKeysTab'
       );
       toast.error(errorMessage);
-      setGenerating(false);
       return;
     }
 
     const data: ApiKeyResponse = await response.json();
     setNewKey(data);
     setKeyName('');
-    await fetchKeys();
     toast.success('API key generated successfully');
-    setGenerating(false);
+    // The key was created; a failed list refresh must not report otherwise.
+    void fetchKeys().catch((error: unknown) => {
+      logger.error(
+        'Failed to refresh API keys',
+        { error: String(error) },
+        'ApiKeysTab'
+      );
+      setLoading(false);
+    });
   };
 
   const handleRevokeKey = async (keyId: string) => {
@@ -289,9 +331,7 @@ export function ApiKeysTab() {
           </p>
           <p>
             3. Use the key in the{' '}
-            <code className="rounded bg-background px-1">
-              X-Babylon-Api-Key
-            </code>{' '}
+            <code className="rounded bg-background px-1">X-Feed-Api-Key</code>{' '}
             header when making MCP requests
           </p>
           <p>

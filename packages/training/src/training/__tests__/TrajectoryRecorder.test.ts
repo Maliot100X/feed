@@ -10,7 +10,7 @@ import * as fs from 'fs';
 import * as path from 'path';
 
 // Mock ONLY external dependencies - not the code under test
-mock.module('@babylon/db', () => ({
+mock.module('@feed/db', () => ({
   db: {
     insert: mock(() => ({
       values: mock(() => ({
@@ -154,6 +154,48 @@ describe('TrajectoryRecorder - Real Class Tests', () => {
 
     expect(stepId).toBe(`${trajectoryId}-step-0`);
     expect(recorder.getCurrentStepId(trajectoryId)).toBe(stepId);
+  });
+
+  test('does not overwrite or discard an unfinished model call', async () => {
+    const id = await recorder.startTrajectory({
+      agentId: 'test-agent-incomplete',
+    });
+    recorder.startStep(id, {
+      agentBalance: 1000,
+      agentPnL: 0,
+      openPositions: 0,
+    });
+    recorder.logLLMCall(id, {
+      model: 'test-model',
+      systemPrompt: 'identity',
+      userPrompt: 'required context',
+      response: 'invalid decision',
+      temperature: 0,
+      maxTokens: 100,
+      purpose: 'action',
+    });
+    expect(() =>
+      recorder.startStep(id, {
+        agentBalance: 1000,
+        agentPnL: 0,
+        openPositions: 0,
+      })
+    ).toThrow('unfinished');
+    await recorder.endTrajectory(id, { failure: 'Decision parsing failed' });
+    const saved = JSON.parse(
+      fs.readFileSync(path.join(TEST_OUTPUT_DIR, `${id}.json`), 'utf8')
+    );
+    expect(saved.trajectory.finalStatus).toBe('completed_with_errors');
+    expect(
+      JSON.parse(saved.trajectory.stepsJson)[0].llmCalls[0].userPrompt
+    ).toBe('required context');
+    expect(JSON.parse(saved.trajectory.stepsJson)[0].action.success).toBe(
+      false
+    );
+    expect(JSON.parse(saved.trajectory.metadataJson).executionError).toBe(
+      'Decision parsing failed'
+    );
+    fs.unlinkSync(path.join(TEST_OUTPUT_DIR, `${id}.json`));
   });
 
   test('startStep throws for non-existent trajectory', () => {
@@ -370,7 +412,7 @@ describe('TrajectoryRecorder - Real Class Tests', () => {
     expect(content.trajectory.finalBalance).toBe(10500);
     expect(content.trajectory.finalPnL).toBe(500);
     expect(content.trajectory.aiJudgeReward).toBeGreaterThan(0);
-    expect(content.rewardJudgment.judgeModel).toBe('babylon-deterministic');
+    expect(content.rewardJudgment.judgeModel).toBe('feed-deterministic');
     expect(content.llmCalls).toHaveLength(1);
 
     // Cleanup

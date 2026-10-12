@@ -9,11 +9,9 @@ from pathlib import Path
 import pytest
 
 TESTS_DIR = Path(__file__).resolve().parent
-SCRIPTS_DIR = TESTS_DIR.parent / "scripts"
+SCRIPTS_DIR = TESTS_DIR.parent / "scripts" / "data-prep"
 
 _SCRIPT = SCRIPTS_DIR / "generate_reasoning_traces.py"
-if not _SCRIPT.exists():
-    pytest.skip(f"script not found: {_SCRIPT.name}", allow_module_level=True)
 
 sys.path.insert(0, str(SCRIPTS_DIR))
 sys.path.insert(0, str(TESTS_DIR.parent))

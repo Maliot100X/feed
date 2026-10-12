@@ -28,14 +28,14 @@ from pathlib import Path
 from typing import Literal
 
 # Add src to path
-sys.path.insert(0, str(Path(__file__).parent.parent))
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from dotenv import load_dotenv
 
 from src.training.local_models import default_local_model_for_backend
 
 # Load environment
-env_path = Path(__file__).parent.parent.parent.parent.parent / ".env"
+env_path = Path(__file__).resolve().parents[5] / ".env"
 if env_path.exists():
     load_dotenv(env_path)
 
@@ -189,7 +189,7 @@ def test_cuda_model(model_path: str, prompts: list[str]) -> dict:
 def get_test_prompts() -> list[str]:
     """Get standard test prompts for trading agents."""
     return [
-        """You are a trading agent in Babylon prediction markets.
+        """You are a trading agent in Feed prediction markets.
 
 Current State:
 - Balance: $10,000

@@ -669,6 +669,19 @@ contract HackAttempts is Test {
         vm.stopPrank();
     }
 
+    /// @notice Address bans and unbans emit events for off-chain caches
+    function test_addressBanEmitsEvents() public {
+        vm.expectEmit(true, false, false, true, address(banManager));
+        emit BanManager.AddressBanApplied(victim, block.timestamp);
+        banManager.banAddress(victim);
+        assertTrue(banManager.isAddressBanned(victim));
+
+        vm.expectEmit(true, false, false, true, address(banManager));
+        emit BanManager.AddressBanRemoved(victim, block.timestamp);
+        banManager.unbanAddress(victim);
+        assertFalse(banManager.isAddressBanned(victim));
+    }
+
     // ============================================
     // ADVANCED ATTACKS
     // ============================================

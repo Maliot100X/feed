@@ -1,5 +1,5 @@
-import type { JsonValue } from '@babylon/shared';
 import { type UUID } from '@elizaos/core';
+import type { JsonValue } from '@feed/shared';
 
 export interface ScamAnalysis {
   schemaVersion: 'scam-analysis-v1';

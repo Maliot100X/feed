@@ -14,9 +14,9 @@ import {
   RATE_LIMIT_CONFIGS,
   successResponse,
   withErrorHandling,
-} from '@babylon/api';
-import { db, eq, users } from '@babylon/db';
-import { logger } from '@babylon/shared';
+} from '@feed/api';
+import { db, eq, users } from '@feed/db';
+import { logger } from '@feed/shared';
 import type { NextRequest } from 'next/server';
 import { NextResponse } from 'next/server';
 import { validateImageMagicBytes } from '@/lib/api/image-validation';
@@ -42,7 +42,7 @@ export const POST = withErrorHandling(async (request: NextRequest) => {
   const user = await authenticate(request);
 
   // Rate limiting
-  const rateLimitError = checkRateLimitAndDuplicates(
+  const rateLimitError = await checkRateLimitAndDuplicates(
     user.userId,
     null,
     RATE_LIMIT_CONFIGS.UPLOAD_IMAGE

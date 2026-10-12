@@ -1,6 +1,6 @@
 'use client';
 
-import { cn } from '@babylon/shared';
+import { cn } from '@feed/shared';
 import { Download, Maximize2 } from 'lucide-react';
 import { useCallback, useState } from 'react';
 import {
@@ -20,6 +20,7 @@ import {
   XAxis,
   YAxis,
 } from 'recharts';
+import { toCsv } from '@/lib/csv/to-csv';
 
 export type ChartType = 'line' | 'bar' | 'area' | 'pie';
 
@@ -317,22 +318,18 @@ export function ChartRenderer({
       return;
     }
 
-    // Default CSV export
-    const headers = Object.keys(data[0] || {});
-    const csvContent = [
-      headers.join(','),
-      ...data.map((row) =>
-        headers.map((h) => JSON.stringify(row[h] ?? '')).join(',')
-      ),
-    ].join('\n');
+    // Default CSV export (stable union of keys across all rows)
+    const headers = [...new Set(data.flatMap((row) => Object.keys(row)))];
+    const csvContent = toCsv(headers, data);
 
-    const blob = new Blob([csvContent], { type: 'text/csv' });
+    const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8' });
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
     a.href = url;
     a.download = `${config.title.toLowerCase().replace(/\s+/g, '-')}.csv`;
     a.click();
-    URL.revokeObjectURL(url);
+    // Revoke after the click has been handled so the download can start.
+    setTimeout(() => URL.revokeObjectURL(url), 0);
   }, [data, config.title, onExport]);
 
   const chartHeight = isFullscreen ? window.innerHeight - 200 : height;

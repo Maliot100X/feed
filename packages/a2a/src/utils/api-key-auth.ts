@@ -2,10 +2,10 @@
  * A2A API Key Authentication Utilities
  *
  * Supports two authentication methods:
- * 1. Server secret (BABYLON_A2A_API_KEY) - for server-to-server communication
+ * 1. Server secret (FEED_A2A_API_KEY) - for server-to-server communication
  * 2. Per-user API keys (from userApiKeys table) - for user-specific operations
  *
- * Uses shared cached validation from @babylon/api for efficiency.
+ * Uses shared cached validation from @feed/api for efficiency.
  */
 
 import {
@@ -14,8 +14,8 @@ import {
   invalidateCachedKey,
   invalidateCachedKeysForUser,
   validateUserApiKey,
-} from '@babylon/api';
-import { logger } from '@babylon/shared';
+} from '@feed/api';
+import { logger } from '@feed/shared';
 import crypto from 'crypto';
 
 /**
@@ -33,7 +33,7 @@ function timingSafeEqual(a: string, b: string): boolean {
   return crypto.timingSafeEqual(hashA, hashB);
 }
 
-// Re-export cache utilities from @babylon/api
+// Re-export cache utilities from @feed/api
 export {
   clearApiKeyCache,
   getApiKeyCacheStats,
@@ -42,7 +42,7 @@ export {
   validateUserApiKey,
 };
 
-export const A2A_API_KEY_HEADER = 'x-babylon-api-key';
+export const A2A_API_KEY_HEADER = 'x-feed-api-key';
 
 // ============================================================================
 // Types
@@ -52,7 +52,7 @@ export const A2A_API_KEY_HEADER = 'x-babylon-api-key';
  * Configuration for API key authentication
  */
 export interface ApiKeyAuthConfig {
-  /** Server-wide API key (BABYLON_A2A_API_KEY) */
+  /** Server-wide API key (FEED_A2A_API_KEY) */
   serverApiKey?: string;
   /** Allow localhost without authentication */
   allowLocalhost?: boolean;
@@ -87,17 +87,41 @@ export interface AuthResult {
 // Utility Functions
 // ============================================================================
 
+const LOOPBACK_HOSTNAMES = new Set(['localhost', '127.0.0.1', '::1']);
+
 /**
- * Check if host is localhost
+ * Check if a Host header value names a loopback host exactly, with an optional
+ * port. Prefix matches such as `localhost.evil.com` or `127.0.0.10` are
+ * rejected. IPv6 loopback may be bare (`::1`) or bracketed (`[::1]:3000`).
  */
 export function isLocalHost(host: string | undefined | null): boolean {
   if (!host) return false;
-  const lowerHost = host.toLowerCase();
-  return (
-    lowerHost.startsWith('localhost') ||
-    lowerHost.startsWith('127.0.0.1') ||
-    lowerHost.startsWith('::1')
-  );
+  const value = host.trim().toLowerCase();
+
+  let hostname: string;
+  let port: string | undefined;
+  if (value.startsWith('[')) {
+    const close = value.indexOf(']');
+    if (close === -1) return false;
+    hostname = value.slice(1, close);
+    const rest = value.slice(close + 1);
+    if (rest !== '') {
+      if (!rest.startsWith(':')) return false;
+      port = rest.slice(1);
+    }
+  } else if (value === '::1') {
+    hostname = value;
+  } else {
+    const parts = value.split(':');
+    if (parts.length > 2) return false;
+    hostname = parts[0]!;
+    port = parts[1];
+  }
+
+  if (port !== undefined) {
+    if (!/^\d{1,5}$/.test(port) || Number(port) > 65535) return false;
+  }
+  return LOOPBACK_HOSTNAMES.has(hostname);
 }
 
 // ============================================================================
@@ -137,7 +161,7 @@ export function validateApiKey(
   if (!providedKey) {
     return {
       authenticated: false,
-      error: 'Unauthorized: X-Babylon-Api-Key header is required',
+      error: 'Unauthorized: X-Feed-Api-Key header is required',
       statusCode: 401,
     };
   }
@@ -154,7 +178,7 @@ export function validateApiKey(
  *
  * Checks in order:
  * 1. Localhost bypass (if enabled)
- * 2. Server API key (BABYLON_A2A_API_KEY)
+ * 2. Server API key (FEED_A2A_API_KEY)
  * 3. Per-user API key (from database, cached)
  *
  * @param request - Request with headers
@@ -183,7 +207,7 @@ export async function validateApiKeyAsync(
     logger.warn('No API key provided', { host }, 'A2AAuth');
     return {
       authenticated: false,
-      error: 'Unauthorized: X-Babylon-Api-Key header is required',
+      error: 'Unauthorized: X-Feed-Api-Key header is required',
       statusCode: 401,
     };
   }
@@ -194,7 +218,7 @@ export async function validateApiKeyAsync(
     return { authenticated: true, authMethod: 'server-key' };
   }
 
-  // Check per-user API key (cached lookup from @babylon/api)
+  // Check per-user API key (cached lookup from @feed/api)
   if (allowUserApiKeys) {
     const userKeyResult = await validateUserApiKey(providedKey);
     if (userKeyResult) {
@@ -233,7 +257,7 @@ export async function validateApiKeyAsync(
  * Get the server API key from environment
  */
 export function getServerApiKey(): string | undefined {
-  return process.env.BABYLON_A2A_API_KEY;
+  return process.env.FEED_A2A_API_KEY;
 }
 
 /**

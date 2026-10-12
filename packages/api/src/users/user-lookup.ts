@@ -4,11 +4,11 @@
  * @description Utilities for finding users by various identifiers (ID, privyId, username).
  */
 
-import { db, eq, users } from '@babylon/db';
-import { type StaticActor, StaticDataRegistry } from '@babylon/engine';
-import { resolveUserIdentifierKind } from '@babylon/shared';
+import { db, eq, users } from '@feed/db';
+import { type StaticActor, StaticDataRegistry } from '@feed/engine';
+import { resolveUserIdentifierKind } from '@feed/shared';
 import type { InferSelectModel } from 'drizzle-orm';
-import { sql } from 'drizzle-orm';
+import { getTableColumns, sql } from 'drizzle-orm';
 import {
   CACHE_KEYS,
   DEFAULT_TTLS,
@@ -17,26 +17,41 @@ import {
 import { NotFoundError } from '../errors';
 
 type User = InferSelectModel<typeof users>;
+type UserKey = keyof User;
 
-function projectUser(
-  user: User | null,
-  select?: Record<string, boolean>
-): User | null {
-  if (!user || !select) {
-    return user;
+/** Field selection for user lookups: `{ id: true, username: true }`. */
+export type UserFieldSelection<K extends UserKey> = { [P in K]: true };
+
+/** Timestamp columns of the users table (serialized as strings in Redis). */
+const USER_DATE_FIELDS = Object.entries(getTableColumns(users))
+  .filter(([, column]) => column.dataType === 'date')
+  .map(([key]) => key as UserKey);
+
+/**
+ * Cached users round-trip through JSON, which turns Date columns into ISO
+ * strings; restore them so cached and fresh results have the same types.
+ */
+function reviveUserDates(user: User | null): User | null {
+  if (!user) return user;
+  const revived = { ...user };
+  for (const key of USER_DATE_FIELDS) {
+    const value = revived[key];
+    if (typeof value === 'string') {
+      Object.assign(revived, { [key]: new Date(value) });
+    }
   }
+  return revived;
+}
 
-  const projected = Object.entries(select).reduce<Record<string, unknown>>(
-    (result, [key, enabled]) => {
-      if (enabled && key in user) {
-        result[key] = (user as Record<string, unknown>)[key];
-      }
-      return result;
-    },
-    {}
-  );
-
-  return projected as User;
+function pickUserFields<K extends UserKey>(
+  user: User,
+  select: UserFieldSelection<K>
+): Pick<User, K> {
+  const picked: Partial<Pick<User, K>> = {};
+  for (const key of Object.keys(select) as K[]) {
+    picked[key] = user[key];
+  }
+  return picked as Pick<User, K>;
 }
 
 /**
@@ -148,9 +163,16 @@ function getUserIdentifierCacheKey(
  * ```
  */
 export async function findUserByIdentifier(
+  identifier: string
+): Promise<User | null>;
+export async function findUserByIdentifier<K extends UserKey>(
   identifier: string,
-  select?: Record<string, boolean>
-): Promise<User | null> {
+  select: UserFieldSelection<K>
+): Promise<Pick<User, K> | null>;
+export async function findUserByIdentifier<K extends UserKey>(
+  identifier: string,
+  select?: UserFieldSelection<K>
+): Promise<User | Pick<User, K> | null> {
   // WHY early return for empty/null? Avoids unnecessary classification and cache lookup
   // Empty strings can't match any identifier type, so return null immediately
   if (!identifier || identifier.trim() === '') {
@@ -173,7 +195,9 @@ export async function findUserByIdentifier(
     }
   );
 
-  return projectUser(user, select);
+  const revived = reviveUserDates(user);
+  if (!revived || !select) return revived;
+  return pickUserFields(revived, select);
 }
 
 /**
@@ -229,7 +253,8 @@ export async function findUserByIdentifierWithSelect<
     }
   );
 
-  if (!user) return null;
+  const revived = reviveUserDates(user);
+  if (!revived) return null;
 
   // WHY filter in memory? Drizzle select objects have field names as keys
   // Object.keys({ id: users.id, username: users.username }) returns ["id", "username"]
@@ -237,8 +262,8 @@ export async function findUserByIdentifierWithSelect<
   // This is fast (microseconds) compared to a database query (milliseconds)
   const filtered: Record<string, unknown> = {};
   for (const key of Object.keys(select)) {
-    if (key in user) {
-      filtered[key] = (user as Record<string, unknown>)[key];
+    if (key in revived) {
+      filtered[key] = (revived as Record<string, unknown>)[key];
     }
   }
 
@@ -251,8 +276,8 @@ export async function findUserByIdentifierWithSelect<
  * @description Searches for a user and throws NotFoundError if not found.
  *
  * @param {string} identifier - The user ID, privyId, or username
- * @param {Record<string, boolean>} [_select] - Optional select fields (for compatibility)
- * @returns {Promise<User>} User object
+ * @param select - Optional fields to return (typed projection)
+ * @returns {Promise<User>} User object (or the selected fields)
  * @throws {NotFoundError} If user is not found
  *
  * @example
@@ -266,14 +291,21 @@ export async function findUserByIdentifierWithSelect<
  * ```
  */
 export async function requireUserByIdentifier(
+  identifier: string
+): Promise<User>;
+export async function requireUserByIdentifier<K extends UserKey>(
   identifier: string,
-  _select?: Record<string, boolean>
-): Promise<User> {
+  select: UserFieldSelection<K>
+): Promise<Pick<User, K>>;
+export async function requireUserByIdentifier<K extends UserKey>(
+  identifier: string,
+  select?: UserFieldSelection<K>
+): Promise<User | Pick<User, K>> {
   const user = await findUserByIdentifier(identifier);
   if (!user) {
     throw new NotFoundError('User', undefined, { identifier });
   }
-  return user;
+  return select ? pickUserFields(user, select) : user;
 }
 
 /**
@@ -318,7 +350,7 @@ export async function findTargetByIdentifier(
       user,
       actor: null,
       targetId: user.id,
-      isActor: false,
+      isActor: user.isActor,
     };
   }
 

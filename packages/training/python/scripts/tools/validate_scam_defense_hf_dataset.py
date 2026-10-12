@@ -16,6 +16,7 @@ from typing import Any
 import yaml
 
 # assemble_scam_defense_hf_dataset lives in data-prep/
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "data-prep"))
 
 from assemble_scam_defense_hf_dataset import (

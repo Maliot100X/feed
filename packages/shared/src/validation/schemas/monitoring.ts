@@ -3,7 +3,12 @@
  */
 
 import { z } from 'zod';
-import { PaginationSchema, SnowflakeIdSchema } from './common';
+import {
+  createQueryBooleanSchema,
+  OptionalQueryBooleanSchema,
+  PaginationSchema,
+  SnowflakeIdSchema,
+} from './common';
 
 /**
  * SSE channel schema
@@ -27,14 +32,14 @@ export const SSEChannelsQuerySchema = z.object({
  * Cache monitoring query schema
  */
 export const CacheMonitoringQuerySchema = z.object({
-  includeDetails: z.coerce.boolean().optional(),
+  includeDetails: OptionalQueryBooleanSchema,
 });
 
 /**
  * Notifications query schema
  */
 export const NotificationsQuerySchema = PaginationSchema.extend({
-  unreadOnly: z.coerce.boolean().default(false),
+  unreadOnly: createQueryBooleanSchema(false),
   type: z.string().optional(),
 });
 

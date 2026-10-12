@@ -1,10 +1,7 @@
 import { afterEach, describe, expect, test } from 'bun:test';
-import { db } from '@babylon/db';
-import {
-  seedScamBenchScenario,
-  sharedChatContextService,
-} from '@babylon/engine';
-import { generateSnowflakeId } from '@babylon/shared';
+import { db } from '@feed/db';
+import { seedScamBenchScenario, sharedChatContextService } from '@feed/engine';
+import { generateSnowflakeId } from '@feed/shared';
 
 const testIds: {
   userIds: string[];
@@ -151,7 +148,7 @@ afterEach(async () => {
 });
 
 describe('seedScamBenchScenario', () => {
-  test('seeds scripted multi-turn attacks into Babylon chats and refreshes shared context', async () => {
+  test('seeds scripted multi-turn attacks into Feed chats and refreshes shared context', async () => {
     const targetUserId = await createTestUser({
       username: 'target-user',
       displayName: 'Target User',

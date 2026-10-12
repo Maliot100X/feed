@@ -1,4 +1,4 @@
-import type { MessageMetadata, NotificationData } from '@babylon/shared';
+import type { MessageMetadata, NotificationData } from '@feed/shared';
 import { relations, sql } from 'drizzle-orm';
 import {
   boolean,
@@ -51,11 +51,6 @@ export const chats = pgTable(
     createdAt: timestamp('createdAt', { mode: 'date' }).notNull().defaultNow(),
     updatedAt: timestamp('updatedAt', { mode: 'date' }).notNull(),
     groupId: text('groupId'),
-    requiredNftContractAddress: text('requiredNftContractAddress'),
-    requiredNftTokenId: integer('requiredNftTokenId'),
-    requiredNftChainId: integer('requiredNftChainId'),
-    nftGated: boolean('nftGated').notNull().default(false),
-    lastNftRevalidatedAt: timestamp('lastNftRevalidatedAt', { mode: 'date' }),
   },
   (table) => [
     index('Chat_gameId_dayNumber_idx').on(table.gameId, table.dayNumber),
@@ -63,10 +58,6 @@ export const chats = pgTable(
     index('Chat_isGroup_idx').on(table.isGroup),
     index('Chat_createdBy_idx').on(table.createdBy),
     index('Chat_relatedQuestion_idx').on(table.relatedQuestion),
-    index('Chat_nftGated_idx').on(table.nftGated),
-    index('Chat_requiredNftContractAddress_idx').on(
-      table.requiredNftContractAddress
-    ),
   ]
 );
 
@@ -491,9 +482,9 @@ export type NewGroupInvite = typeof groupInvites.$inferInsert;
 export type GroupType = 'user' | 'npc' | 'agent' | 'team';
 export type GroupMemberRole = 'owner' | 'admin' | 'member';
 export type GroupInviteStatus = 'pending' | 'accepted' | 'declined';
-// MessageType is exported from @babylon/shared - use that canonical definition
-export type { MessageType } from '@babylon/shared';
-// TierLevel is exported from @babylon/shared - use that canonical definition
+// MessageType is exported from @feed/shared - use that canonical definition
+export type { MessageType } from '@feed/shared';
+// TierLevel is exported from @feed/shared - use that canonical definition
 
 // Alpha group enhancement types (for grandfathering and invite decay)
 export type GroupMemberGrandfatherFields = Pick<

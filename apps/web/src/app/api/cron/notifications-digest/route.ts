@@ -5,8 +5,8 @@ import {
   successResponse,
   verifyCronAuth,
   withErrorHandling,
-} from '@babylon/api';
-import { logger, type NotificationDigestSettings } from '@babylon/shared';
+} from '@feed/api';
+import { logger, type NotificationDigestSettings } from '@feed/shared';
 import type { NextRequest } from 'next/server';
 import {
   deliverDigestForUser,
@@ -15,7 +15,6 @@ import {
 } from '@/lib/services/notification-digest-service';
 
 export const dynamic = 'force-dynamic';
-export const maxDuration = 120;
 
 /**
  * Determines whether this environment should process a given user.

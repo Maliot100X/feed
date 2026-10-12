@@ -1,6 +1,6 @@
 'use client';
 
-import { logger } from '@babylon/shared';
+import { logger } from '@feed/shared';
 import { useCallback, useEffect, useState } from 'react';
 import { useStewardAuthContext } from '@/components/providers/StewardAuthProvider';
 import { Button } from '@/components/ui/button';
@@ -13,6 +13,11 @@ import {
 } from '@/components/ui/dialog';
 import { Input } from '@/components/ui/input';
 import { useAuth } from '@/hooks/useAuth';
+import { getStewardApiUrl, STEWARD_TENANT_ID } from '@/lib/auth/steward-config';
+import {
+  type StewardLoginResult,
+  stewardExchangeSchema,
+} from '@/lib/auth/steward-exchange';
 
 /**
  * Steward-backed login modal.
@@ -21,39 +26,15 @@ import { useAuth } from '@/hooks/useAuth';
  * - Email magic link (no password)
  * - Passkey (WebAuthn)
  * - OAuth: Google, Discord, Twitter/X
- * - Farcaster SIWF
  */
 
-type Step = 'idle' | 'email-sent' | 'loading' | 'error';
+type Step = 'idle' | 'email-sent' | 'loading' | 'error' | 'mfa';
 
 interface LoginModalProps {
   isOpen: boolean;
   onClose: () => void;
   title?: string;
   message?: string;
-}
-
-function getStewardApiUrl(): string {
-  if (typeof window === 'undefined') {
-    return process.env.NEXT_PUBLIC_STEWARD_API_URL ?? 'http://localhost:3200';
-  }
-  return process.env.NEXT_PUBLIC_STEWARD_API_URL ?? 'http://localhost:3200';
-}
-
-const STEWARD_TENANT_ID =
-  process.env.NEXT_PUBLIC_STEWARD_TENANT_ID ?? 'babylon';
-
-/** Build the Steward OAuth authorize URL. Callback lands on our /auth/callback/[provider] page. */
-function oauthUrl(provider: string): string {
-  const stewardBase = getStewardApiUrl();
-  const callbackBase =
-    typeof window !== 'undefined' ? window.location.origin : '';
-  const redirectUri = `${callbackBase}/auth/callback/${provider}`;
-  return (
-    `${stewardBase}/auth/oauth/${provider}/authorize` +
-    `?redirect_uri=${encodeURIComponent(redirectUri)}` +
-    `&tenant_id=${encodeURIComponent(STEWARD_TENANT_ID)}`
-  );
 }
 
 export function LoginModal({
@@ -67,6 +48,24 @@ export function LoginModal({
   const [email, setEmail] = useState('');
   const [step, setStep] = useState<Step>('idle');
   const [errorMsg, setErrorMsg] = useState('');
+  const [verificationCode, setVerificationCode] = useState('');
+  const [verifying, setVerifying] = useState(false);
+  const [mfa, setMfa] = useState<
+    Extract<StewardLoginResult, { mfaRequired: true }>['mfa'] | null
+  >(null);
+
+  const completeLogin = useCallback(
+    async (result: StewardLoginResult) => {
+      if ('mfa' in result) {
+        setMfa(result.mfa);
+        setVerificationCode('');
+        setStep('mfa');
+        return;
+      }
+      await onLoginSuccess(result.token, result.refreshToken);
+    },
+    [onLoginSuccess]
+  );
 
   useEffect(() => {
     if (authenticated && isOpen) onClose();
@@ -77,6 +76,8 @@ export function LoginModal({
       setStep('idle');
       setEmail('');
       setErrorMsg('');
+      setVerificationCode('');
+      setMfa(null);
     }
   }, [isOpen]);
 
@@ -115,7 +116,7 @@ export function LoginModal({
     setErrorMsg('');
     try {
       const result = await stewardAuth.signInWithPasskey(trimmed);
-      await onLoginSuccess(result.token);
+      await completeLogin(result);
       logger.info('Passkey login successful', { email: trimmed }, 'LoginModal');
     } catch (err) {
       const msg = err instanceof Error ? err.message : 'Passkey login failed';
@@ -123,14 +124,89 @@ export function LoginModal({
       setErrorMsg(msg);
       setStep('error');
     }
-  }, [email, stewardAuth, onLoginSuccess]);
+  }, [email, stewardAuth, completeLogin]);
 
   const handleOAuth = useCallback(
-    (provider: 'google' | 'discord' | 'twitter') => {
-      window.location.href = oauthUrl(provider);
+    async (provider: 'google' | 'discord' | 'twitter') => {
+      setStep('loading');
+      setErrorMsg('');
+      try {
+        const result = await stewardAuth.signInWithOAuth(provider, {
+          tenantId: STEWARD_TENANT_ID,
+          redirectUri: `${window.location.origin}/auth/callback/${provider}`,
+        });
+        await completeLogin(result);
+      } catch (error) {
+        setErrorMsg(error instanceof Error ? error.message : 'Sign-in failed');
+        setStep('error');
+      }
     },
-    []
+    [stewardAuth, completeLogin]
   );
+
+  const verifyEmailCode = async () => {
+    setVerifying(true);
+    setErrorMsg('');
+    try {
+      const response = await fetch(
+        `${getStewardApiUrl()}/auth/email/code/verify`,
+        {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'X-Steward-Tenant': STEWARD_TENANT_ID,
+          },
+          body: JSON.stringify({
+            email: email.trim(),
+            code: verificationCode.trim(),
+            tenantId: STEWARD_TENANT_ID,
+          }),
+        }
+      );
+      if (!response.ok)
+        throw new Error(
+          'The code is invalid or expired. Try again or request another email.'
+        );
+      await completeLogin(stewardExchangeSchema.parse(await response.json()));
+    } catch (error) {
+      setErrorMsg(
+        error instanceof Error ? error.message : 'Code verification failed'
+      );
+    } finally {
+      setVerifying(false);
+    }
+  };
+
+  const verifyMfa = async (recovery = false) => {
+    if (!mfa) return;
+    setVerifying(true);
+    setErrorMsg('');
+    try {
+      const result = recovery
+        ? await stewardAuth.completeRecoveryCodeMfa(
+            mfa.challengeId,
+            verificationCode.trim()
+          )
+        : mfa.type === 'sms'
+          ? await stewardAuth.completeSmsMfa(
+              mfa.challengeId,
+              verificationCode.trim()
+            )
+          : mfa.type === 'passkey'
+            ? await stewardAuth.completePasskeyMfa()
+            : await stewardAuth.completeTotpMfa(
+                mfa.challengeId,
+                verificationCode.trim()
+              );
+      await completeLogin(result);
+    } catch (error) {
+      setErrorMsg(
+        error instanceof Error ? error.message : 'Verification failed'
+      );
+    } finally {
+      setVerifying(false);
+    }
+  };
 
   return (
     <Dialog
@@ -142,7 +218,7 @@ export function LoginModal({
       <DialogContent className="p-8 sm:max-w-sm">
         <DialogHeader>
           <DialogTitle className="text-center text-xl">
-            {title ?? 'Sign in to Babylon'}
+            {title ?? 'Sign in to Feed'}
           </DialogTitle>
           {message && (
             <DialogDescription className="text-center">
@@ -152,13 +228,59 @@ export function LoginModal({
         </DialogHeader>
 
         <div className="flex flex-col gap-3 pt-1">
-          {step === 'email-sent' ? (
+          {step === 'mfa' && mfa ? (
+            <div className="flex flex-col gap-3">
+              <p className="text-sm">
+                Complete your account's additional verification.
+              </p>
+              <Input
+                aria-label="Verification or recovery code"
+                autoComplete="one-time-code"
+                value={verificationCode}
+                onChange={(event) => setVerificationCode(event.target.value)}
+                disabled={verifying}
+              />
+              <Button
+                onClick={() => void verifyMfa()}
+                disabled={
+                  verifying ||
+                  (mfa.type !== 'passkey' && !verificationCode.trim())
+                }
+              >
+                {mfa.type === 'passkey' ? 'Verify with passkey' : 'Verify code'}
+              </Button>
+              <Button
+                variant="outline"
+                onClick={() => void verifyMfa(true)}
+                disabled={verifying || !verificationCode.trim()}
+              >
+                Use recovery code
+              </Button>
+            </div>
+          ) : step === 'email-sent' ? (
             <div className="rounded-xl border bg-muted/50 p-5 text-center">
               <div className="mb-2 text-2xl">📬</div>
               <p className="font-semibold">Check your inbox</p>
               <p className="mt-1 text-muted-foreground text-sm">
-                We sent a magic link to <strong>{email}</strong>.
+                Enter the six-digit code sent to <strong>{email}</strong>.
               </p>
+              <Input
+                className="mt-3"
+                aria-label="Email verification code"
+                inputMode="numeric"
+                autoComplete="one-time-code"
+                maxLength={6}
+                value={verificationCode}
+                onChange={(event) => setVerificationCode(event.target.value)}
+                disabled={verifying}
+              />
+              <Button
+                className="mt-3 w-full"
+                onClick={() => void verifyEmailCode()}
+                disabled={verifying || !/^\d{6}$/.test(verificationCode)}
+              >
+                Verify email
+              </Button>
               <p className="mt-1 text-muted-foreground text-xs">
                 No email? Check spam or{' '}
                 <button
@@ -204,13 +326,6 @@ export function LoginModal({
                 </Button>
               </div>
 
-              {/* Farcaster */}
-              <FarcasterSignInSection
-                onLoginSuccess={onLoginSuccess}
-                onClose={onClose}
-                loading={step === 'loading'}
-              />
-
               <div className="relative flex items-center gap-3">
                 <div className="flex-1 border-t" />
                 <span className="text-muted-foreground text-xs">
@@ -246,7 +361,7 @@ export function LoginModal({
                         Sending…
                       </span>
                     ) : (
-                      'Send link'
+                      'Send code'
                     )}
                   </Button>
                   <Button
@@ -261,96 +376,16 @@ export function LoginModal({
                   </Button>
                 </div>
               </div>
-
-              {errorMsg && (
-                <p className="text-center text-destructive text-xs">
-                  {errorMsg}
-                </p>
-              )}
             </>
+          )}
+          {errorMsg && (
+            <p role="alert" className="text-center text-destructive text-xs">
+              {errorMsg}
+            </p>
           )}
         </div>
       </DialogContent>
     </Dialog>
-  );
-}
-
-// ── Farcaster section ─────────────────────────────────────────────────────────
-
-function FarcasterSignInSection({
-  onLoginSuccess,
-  onClose,
-  loading,
-}: {
-  onLoginSuccess: (token: string) => Promise<void>;
-  onClose: () => void;
-  loading: boolean;
-}) {
-  const [error, setError] = useState('');
-  const [SignInButton, setSignInButton] = useState<React.ComponentType<{
-    onSuccess?: (res: unknown) => void;
-    onError?: (err: unknown) => void;
-  }> | null>(null);
-
-  useEffect(() => {
-    import('@farcaster/auth-kit')
-      .then((mod) => setSignInButton(() => mod.SignInButton))
-      .catch(() => {
-        // auth-kit unavailable — omit the button silently
-      });
-  }, []);
-
-  const handleSuccess = useCallback(
-    async (res: { message?: string; signature?: string; nonce?: string }) => {
-      setError('');
-      try {
-        const r = await fetch('/api/auth/farcaster', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          credentials: 'include',
-          body: JSON.stringify({
-            message: res.message,
-            signature: res.signature,
-            nonce: res.nonce,
-          }),
-        });
-        const data = (await r.json()) as {
-          ok: boolean;
-          token?: string;
-          error?: string;
-        };
-        if (!data.ok || !data.token)
-          throw new Error(data.error ?? 'Farcaster auth failed');
-        await onLoginSuccess(data.token);
-        onClose();
-      } catch (err) {
-        const msg =
-          err instanceof Error ? err.message : 'Farcaster sign-in failed';
-        logger.warn('Farcaster SIWF failed', { error: msg }, 'LoginModal');
-        setError(msg);
-      }
-    },
-    [onLoginSuccess, onClose]
-  );
-
-  if (!SignInButton) return null;
-
-  return (
-    <div className="flex flex-col items-center gap-1">
-      <div className={loading ? 'pointer-events-none opacity-50' : ''}>
-        <SignInButton
-          onSuccess={(res) =>
-            void handleSuccess(res as Parameters<typeof handleSuccess>[0])
-          }
-          onError={(err) => {
-            const msg =
-              err instanceof Error ? err.message : 'Farcaster sign-in error';
-            setError(msg);
-          }}
-        />
-      </div>
-      {error && <p className="text-destructive text-xs">{error}</p>}
-    </div>
   );
 }
 

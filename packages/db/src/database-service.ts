@@ -7,23 +7,24 @@
  *
  * @usage
  * ```typescript
- * import { getDbInstance } from '@babylon/db'
+ * import { getDbInstance } from '@feed/db'
  * await getDbInstance().createPost({...})
  * const posts = await getDbInstance().getRecentPosts(100)
  * ```
  */
 
-import { generateSnowflakeId } from '@babylon/shared';
+import { generateSnowflakeId } from '@feed/shared';
 import {
   and,
   count,
   desc,
   eq,
   gte,
-  inArray,
   isNull,
   lt,
   lte,
+  notExists,
+  notLike,
   sql,
 } from 'drizzle-orm';
 import { db } from './db';
@@ -166,6 +167,7 @@ class DatabaseService {
       .insert(posts)
       .values({
         id: post.id,
+        type: post.type ?? 'post',
         content: post.content,
         authorId: post.author,
         gameId: post.gameId,
@@ -294,6 +296,7 @@ class DatabaseService {
 
       return {
         id: post.id,
+        type: post.type ?? 'post',
         content: post.content,
         authorId: post.author,
         gameId: post.gameId,
@@ -302,9 +305,14 @@ class DatabaseService {
       };
     });
 
-    await db.insert(posts).values(values).onConflictDoNothing();
+    // Count rows actually inserted (existing IDs are skipped).
+    const inserted = await db
+      .insert(posts)
+      .values(values)
+      .onConflictDoNothing()
+      .returning({ id: posts.id });
 
-    return { count: postsData.length };
+    return { count: inserted.length };
   }
 
   /**
@@ -338,40 +346,32 @@ class DatabaseService {
       conditions.push(lte(posts.timestamp, now));
     }
 
-    const allPosts = await db
+    // Exclude test authors in SQL before paginating, so pages are full
+    // (fetching 2x then filtering underfilled pages with many test posts).
+    // Test actors use IDs starting with 'test-'.
+    conditions.push(notLike(posts.authorId, 'test-%'));
+    conditions.push(
+      notExists(
+        db
+          .select({ id: users.id })
+          .from(users)
+          .where(and(eq(users.id, posts.authorId), eq(users.isTest, true)))
+      )
+    );
+
+    const filteredPosts = await db
       .select()
       .from(posts)
       .where(and(...conditions))
-      .limit(limit * 2)
-      .offset(cursor ? 0 : offset)
-      .orderBy(desc(posts.timestamp));
-
-    const authorIds = [...new Set(allPosts.map((p) => p.authorId))];
-
-    // Check users table for isTest flag
-    const testUsers = await db
-      .select({ id: users.id })
-      .from(users)
-      .where(and(inArray(users.id, authorIds), eq(users.isTest, true)));
-
-    // For actors, use ID pattern: test actors have IDs starting with 'test-'
-    const testActorIds = authorIds.filter((id) => id.startsWith('test-'));
-
-    const testAuthorIds = new Set([
-      ...testUsers.map((u) => u.id),
-      ...testActorIds,
-    ]);
-
-    const filteredPosts = allPosts
-      .filter((post) => !testAuthorIds.has(post.authorId))
-      .slice(0, limit);
+      .orderBy(desc(posts.timestamp))
+      .limit(limit)
+      .offset(cursor ? 0 : offset);
 
     logger.info('DatabaseService.getRecentPosts completed', {
       limit,
       cursor,
       offset,
       postCount: filteredPosts.length,
-      filteredTestPosts: allPosts.length - filteredPosts.length,
       firstPostId: filteredPosts[0]?.id,
       lastPostId: filteredPosts[filteredPosts.length - 1]?.id,
     });
@@ -648,7 +648,7 @@ class DatabaseService {
   /**
    * Upsert organization state (dynamic data only).
    * For static organization data (name, description, type, etc.),
-   * use StaticDataRegistry from @babylon/engine.
+   * use StaticDataRegistry from @feed/engine.
    *
    * @param id - Organization ID
    * @param currentPrice - Current price value
@@ -956,7 +956,7 @@ class DatabaseService {
 
   // ========== ACTOR STATE ==========
   // For static actor data (name, description, tier, etc.), use StaticDataRegistry
-  // from @babylon/engine. This table only stores dynamic runtime state.
+  // from @feed/engine. This table only stores dynamic runtime state.
 
   /**
    * Upsert actor state: create if it doesn't exist, update if it does.

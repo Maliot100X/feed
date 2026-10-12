@@ -1,0 +1,65 @@
+{
+  "$schema": "../../node_modules/wrangler/config-schema.json",
+  "name": "feed-web-staging",
+  "main": "cloudflare-worker.ts",
+  "compatibility_date": "2026-10-10",
+  "compatibility_flags": ["nodejs_compat", "global_fetch_strictly_public"],
+  "workers_dev": true,
+  "assets": {
+    "directory": ".open-next/assets",
+    "binding": "ASSETS"
+  },
+  "services": [
+    {
+      "binding": "WORKER_SELF_REFERENCE",
+      "service": "feed-web-staging"
+    }
+  ],
+  "hyperdrive": [
+    {
+      "binding": "HYPERDRIVE",
+      // Local proxy only (docker-compose Postgres); deployed Workers use the Hyperdrive config.
+      "localConnectionString": "postgresql://feed:feed_dev_password@localhost:5433/feed",
+      "id": "e379cb0027b449588ee8eee7250ceffa"
+    }
+  ],
+  "r2_buckets": [
+    {
+      "binding": "NEXT_INC_CACHE_R2_BUCKET",
+      "bucket_name": "feed-next-cache-staging"
+    },
+    {
+      "binding": "UPLOADS",
+      "bucket_name": "feed-uploads-staging"
+    },
+    {
+      "binding": "TRAINING_OBJECTS",
+      "bucket_name": "feed-training-staging"
+    }
+  ],
+  "images": {
+    "binding": "IMAGES"
+  },
+  "observability": {
+    "enabled": true
+  },
+  "limits": {
+    "cpu_ms": 300000
+  },
+  "vars": {
+    "DEPLOYMENT_PLATFORM": "cloudflare",
+    "DEPLOYMENT_ENV": "staging",
+    "NEXT_PUBLIC_APP_URL": "https://staging.feed.fun",
+    "NEXT_PUBLIC_API_URL": "https://staging.feed.fun",
+    "CORS_ALLOWED_ORIGINS": "https://staging.feed.fun",
+    "SURPLUS_BASE_URL": "https://api.surplusintelligence.ai/v1",
+    "STORAGE_PROVIDER": "r2",
+    "R2_PUBLIC_URL": "https://staging.feed.fun/media",
+    "ENABLE_INTERNAL_CRON_SCHEDULER": "false",
+    "DISABLE_SENTRY": "true",
+    "NEXT_PUBLIC_DISABLE_SENTRY": "true",
+    "SURPLUS_MODEL": "gpt-4o-mini",
+    "SURPLUS_EMBEDDING_MODEL": "venice-embed-1"
+  },
+  "minify": true
+}

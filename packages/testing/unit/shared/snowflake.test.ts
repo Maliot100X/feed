@@ -3,140 +3,119 @@
  * Tests for the shared package's Snowflake ID utilities
  */
 
-import { describe, expect, it } from 'bun:test';
+import { afterEach, describe, expect, it, mock, spyOn } from 'bun:test';
 import {
   isValidSnowflakeId,
   parseSnowflakeId,
   SnowflakeGenerator,
 } from '../../../shared/src/utils/snowflake';
 
-/** Fallback valid id when generated id is unparseable by BigInt in some runtimes */
-const FALLBACK_ID = '1234567890123456789';
-
-function parseIdSafe(id: string): bigint | null {
-  try {
-    return BigInt(id.trim());
-  } catch {
-    return null;
-  }
-}
+const EPOCH_MS = 1704067200000;
 
 describe('Snowflake ID Generator', () => {
-  const testGenerator = new SnowflakeGenerator(777);
+  afterEach(() => {
+    // Restore any Date.now spy installed by a test.
+    mock.restore();
+  });
 
-  describe('generateSnowflakeId', () => {
-    it('should generate a unique ID', async () => {
-      const id = await testGenerator.generate();
-      expect(typeof id).toBe('string');
-      expect(id.length).toBeGreaterThan(0);
-    });
-
-    it('should generate IDs that are valid numbers', async () => {
-      const id = await testGenerator.generate();
-      const num = parseIdSafe(id);
-      if (num !== null) {
-        expect(num).toBeGreaterThan(0n);
-      } else {
-        expect(typeof id).toBe('string');
-        expect(id.length).toBeGreaterThan(0);
-      }
-    });
-
-    it('should generate unique IDs on sequential calls', async () => {
+  describe('generate', () => {
+    it('generates strictly increasing decimal IDs with exact components', async () => {
+      const generator = new SnowflakeGenerator(777);
       const ids: string[] = [];
-      for (let i = 0; i < 5; i++) {
-        ids.push(await testGenerator.generate());
+      for (let i = 0; i < 50; i++) {
+        ids.push(await generator.generate());
       }
 
-      const uniqueIds = new Set(ids);
-      expect(uniqueIds.size).toBe(ids.length);
+      const values = ids.map((id) => {
+        expect(id).toMatch(/^\d+$/);
+        return BigInt(id);
+      });
+      for (let i = 1; i < values.length; i++) {
+        expect(values[i]! > values[i - 1]!).toBe(true);
+      }
+      for (const id of ids) {
+        expect(parseSnowflakeId(id).workerId).toBe(777);
+      }
     });
 
-    it('should generate monotonically increasing IDs', async () => {
-      const id1 = await testGenerator.generate();
-      const id2 = await testGenerator.generate();
-      const id3 = await testGenerator.generate();
-      const n1 = parseIdSafe(id1);
-      const n2 = parseIdSafe(id2);
-      const n3 = parseIdSafe(id3);
-      if (n1 !== null && n2 !== null && n3 !== null) {
-        expect(n1).toBeLessThan(n2);
-        expect(n2).toBeLessThan(n3);
-      } else {
-        expect(
-          [id1, id2, id3].every((s) => typeof s === 'string' && s.length > 0)
-        ).toBe(true);
-      }
+    it('uses the clock timestamp and increments sequence within a millisecond', async () => {
+      const now = EPOCH_MS + 10_000;
+      spyOn(Date, 'now').mockReturnValue(now);
+      const generator = new SnowflakeGenerator(3);
+
+      const first = parseSnowflakeId(await generator.generate());
+      const second = parseSnowflakeId(await generator.generate());
+
+      expect(first.timestamp.getTime()).toBe(now);
+      expect(first.sequence).toBe(0);
+      expect(second.timestamp.getTime()).toBe(now);
+      expect(second.sequence).toBe(1);
+    });
+
+    it('produces unique IDs for concurrent callers', async () => {
+      const generator = new SnowflakeGenerator(1);
+      const ids = await Promise.all(
+        Array.from({ length: 500 }, () => generator.generate())
+      );
+      expect(new Set(ids).size).toBe(ids.length);
+    });
+
+    it('rejects on clock rollback and recovers once the clock catches up', async () => {
+      const clock = spyOn(Date, 'now');
+      const generator = new SnowflakeGenerator(5);
+
+      clock.mockReturnValue(EPOCH_MS + 5_000);
+      const before = BigInt(await generator.generate());
+
+      clock.mockReturnValue(EPOCH_MS + 4_000);
+      await expect(generator.generate()).rejects.toThrow(
+        'Clock moved backwards'
+      );
+
+      clock.mockReturnValue(EPOCH_MS + 6_000);
+      const after = await Promise.race([
+        generator.generate(),
+        new Promise<string>((_, reject) =>
+          setTimeout(() => reject(new Error('generator wedged')), 500)
+        ),
+      ]);
+      expect(BigInt(after) > before).toBe(true);
+      expect(parseSnowflakeId(after).timestamp.getTime()).toBe(
+        EPOCH_MS + 6_000
+      );
+    });
+
+    it('rejects invalid worker IDs', () => {
+      expect(() => new SnowflakeGenerator(-1)).toThrow();
+      expect(() => new SnowflakeGenerator(1024)).toThrow();
+      expect(() => new SnowflakeGenerator(1.5)).toThrow();
+      expect(() => new SnowflakeGenerator(Number.NaN)).toThrow();
+      expect(() => new SnowflakeGenerator(1023)).not.toThrow();
     });
   });
 
   describe('isValidSnowflakeId', () => {
-    it('should validate correct snowflake IDs', async () => {
-      const id = await testGenerator.generate();
-      const valid =
-        parseIdSafe(id) !== null
-          ? isValidSnowflakeId(id)
-          : isValidSnowflakeId(FALLBACK_ID);
-      expect(valid).toBe(true);
-    });
-
-    it('should reject invalid snowflake IDs', () => {
-      // Non-numeric strings are rejected (return false or throw in some runtimes)
-      expect(isValidSnowflakeId('invalid')).toBe(false);
-      expect(isValidSnowflakeId('abc123')).toBe(false);
-      expect(isValidSnowflakeId('12.34')).toBe(false); // Floats are invalid
-    });
-
-    it('should handle edge cases', () => {
-      // Empty string is rejected (BigInt('') throws in some runtimes)
-      expect(isValidSnowflakeId('')).toBe(false);
-      // Very large numbers beyond 63 bits should be invalid
-      expect(isValidSnowflakeId('9223372036854775808')).toBe(false); // 2^63
-    });
-
-    it('should validate numeric strings', () => {
-      // Valid 64-bit numbers should pass
+    it('accepts generated IDs and numeric strings in range', async () => {
+      const id = await new SnowflakeGenerator(0).generate();
+      expect(isValidSnowflakeId(id)).toBe(true);
       expect(isValidSnowflakeId('123456789012345')).toBe(true);
       expect(isValidSnowflakeId('1')).toBe(true);
+    });
+
+    it('rejects non-numeric, fractional, empty and out-of-range IDs', () => {
+      expect(isValidSnowflakeId('invalid')).toBe(false);
+      expect(isValidSnowflakeId('abc123')).toBe(false);
+      expect(isValidSnowflakeId('12.34')).toBe(false);
+      expect(isValidSnowflakeId('')).toBe(false);
+      expect(isValidSnowflakeId('9223372036854775808')).toBe(false); // 2^63
     });
   });
 
   describe('parseSnowflakeId', () => {
-    it('should parse a snowflake ID and return components', async () => {
-      let id = await testGenerator.generate();
-      if (parseIdSafe(id) === null) id = FALLBACK_ID;
-      const parsed = parseSnowflakeId(id);
-
-      expect(parsed.timestamp).toBeInstanceOf(Date);
-      expect(typeof parsed.workerId).toBe('number');
-      expect(typeof parsed.sequence).toBe('number');
-    });
-
-    it('should return a timestamp close to current time', async () => {
-      const before = new Date();
-      let id = await testGenerator.generate();
-      const useFallback = parseIdSafe(id) === null;
-      if (useFallback) id = FALLBACK_ID;
-      const after = new Date();
-
-      const parsed = parseSnowflakeId(id);
-      expect(parsed.timestamp).toBeInstanceOf(Date);
-      if (!useFallback) {
-        expect(parsed.timestamp.getTime()).toBeGreaterThanOrEqual(
-          before.getTime() - 1000
-        );
-        expect(parsed.timestamp.getTime()).toBeLessThanOrEqual(
-          after.getTime() + 1000
-        );
-      }
-    });
-
-    it('should handle BigInt input', async () => {
-      const id = await testGenerator.generate();
-      const n = parseIdSafe(id);
-      const parsed = parseSnowflakeId(n !== null ? n : BigInt(FALLBACK_ID));
-
-      expect(parsed.timestamp).toBeInstanceOf(Date);
+    it('parses string and bigint forms identically', async () => {
+      const id = await new SnowflakeGenerator(42).generate();
+      expect(parseSnowflakeId(id)).toEqual(parseSnowflakeId(BigInt(id)));
+      expect(parseSnowflakeId(id).workerId).toBe(42);
     });
   });
 });

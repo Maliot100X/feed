@@ -86,24 +86,22 @@
  * ```
  */
 
-import { callGroqDirect } from '@babylon/agents';
+import { callGroqDirect } from '@feed/agents';
 import {
   authenticateUser,
   checkRateLimitAndDuplicates,
   RATE_LIMIT_CONFIGS,
   withErrorHandling,
-} from '@babylon/api';
-import { logger } from '@babylon/shared';
+} from '@feed/api';
+import { logger } from '@feed/shared';
 import type { NextRequest } from 'next/server';
 import { NextResponse } from 'next/server';
-
-export const maxDuration = 30;
 
 export const POST = withErrorHandling(async function POST(req: NextRequest) {
   const user = await authenticateUser(req);
 
   // Apply rate limiting - 5 generations per minute
-  const rateLimitError = checkRateLimitAndDuplicates(
+  const rateLimitError = await checkRateLimitAndDuplicates(
     user.userId,
     null, // No duplicate detection for agent generation
     RATE_LIMIT_CONFIGS.GENERATE_AGENT_PROFILE

@@ -15,8 +15,9 @@
 
 import * as fs from 'node:fs';
 import * as path from 'node:path';
-import { requireAdmin, successResponse, withErrorHandling } from '@babylon/api';
+import { requireAdmin, successResponse, withErrorHandling } from '@feed/api';
 import type { NextRequest } from 'next/server';
+import { isSafePathSegment } from '@/lib/fs/safe-path-segment';
 
 const TRACE_DIR = path.resolve(process.cwd(), 'runs', 'dag-traces');
 
@@ -32,6 +33,15 @@ export const GET = withErrorHandling(
     const include = url.searchParams.get('include') ?? '';
     const llmCallId = url.searchParams.get('llmCallId');
     const nodeFile = url.searchParams.get('nodeFile');
+
+    // IDs are used as file-system path segments: reject anything that could
+    // escape the trace directory (../, separators, etc.).
+    if (!isSafePathSegment(tickId)) {
+      return Response.json({ error: 'Invalid tickId' }, { status: 400 });
+    }
+    if (llmCallId !== null && !isSafePathSegment(llmCallId)) {
+      return Response.json({ error: 'Invalid llmCallId' }, { status: 400 });
+    }
 
     // Find the trace directory - search by dirName containing tickId
     const traceDir = findTraceDir(tickId);

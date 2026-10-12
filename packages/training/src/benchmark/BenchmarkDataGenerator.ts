@@ -9,7 +9,7 @@
  * 2. Causal Simulation Mode: Hidden facts → Events → Price movements (learnable signal)
  */
 
-import type { JsonValue } from '@babylon/shared';
+import type { JsonValue } from '@feed/shared';
 import { logger } from '../utils/logger';
 import type { TrustGroundTruth } from './trust';
 
@@ -221,7 +221,7 @@ export interface GroundTruth {
   }>;
 
   /**
-   * Trust/scam ground truth used by the Babylon trust benchmark.
+   * Trust/scam ground truth used by the Feed trust benchmark.
    * Optional so existing market-only scenarios remain valid.
    */
   trustGroundTruth?: TrustGroundTruth;
@@ -986,15 +986,11 @@ export class BenchmarkDataGenerator {
     startTimestamp: number
   ): Tick[] {
     const ticks: Tick[] = [];
-    // Create a mutable copy of initial state
-    const currentState: GameState = {
-      ...initialState,
-      predictionMarkets: [...initialState.predictionMarkets],
-      perpetualMarkets: [...initialState.perpetualMarkets],
-      agents: [...initialState.agents],
-      posts: initialState.posts ? [...initialState.posts] : [],
-      groupChats: initialState.groupChats ? [...initialState.groupChats] : [],
-    };
+    // Deep copy: ticks mutate nested market objects (e.g. perp.price), which
+    // must not leak back into initialState or earlier tick snapshots.
+    const currentState: GameState = structuredClone(initialState);
+    currentState.posts ??= [];
+    currentState.groupChats ??= [];
 
     // Track group chats across ticks
     const groupChatMap = new Map<string, GroupChat>();
@@ -1223,21 +1219,9 @@ export class BenchmarkDataGenerator {
       // Update group chats array from map
       currentState.groupChats = Array.from(groupChatMap.values());
 
-      // Create snapshot of state (shallow copy is sufficient since we're not mutating nested objects)
-      const stateSnapshot: GameState = {
-        ...currentState,
-        predictionMarkets: [...currentState.predictionMarkets],
-        perpetualMarkets: [...currentState.perpetualMarkets],
-        agents: [...currentState.agents],
-        posts: currentState.posts ? [...currentState.posts] : [],
-        groupChats: currentState.groupChats
-          ? currentState.groupChats.map((gc) => ({
-              ...gc,
-              memberIds: [...gc.memberIds],
-              messages: gc.messages ? [...gc.messages] : undefined,
-            }))
-          : [],
-      };
+      // Snapshot must be independent of later ticks, which mutate nested
+      // market objects in place.
+      const stateSnapshot: GameState = structuredClone(currentState);
 
       ticks.push({
         number: i,

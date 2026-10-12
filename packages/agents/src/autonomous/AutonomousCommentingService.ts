@@ -8,7 +8,9 @@
  * - Existing comment threads
  */
 
-import { countTokensSync, truncateToTokenLimitSync } from '@babylon/api';
+import type { IAgentRuntime } from '@elizaos/core';
+import { parseKeyValueXml } from '@elizaos/core';
+import { countTokensSync } from '@feed/api';
 import {
   and,
   comments,
@@ -25,10 +27,8 @@ import {
   posts,
   reactions,
   users,
-} from '@babylon/db';
-import { StaticDataRegistry } from '@babylon/engine';
-import type { IAgentRuntime } from '@elizaos/core';
-import { parseKeyValueXml } from '@elizaos/core';
+} from '@feed/db';
+import { StaticDataRegistry } from '@feed/engine';
 import { callGroqDirect } from '../llm/direct-groq';
 import { agentService } from '../services/AgentService';
 import { getAgentConfig } from '../shared/agent-config';
@@ -72,7 +72,8 @@ export class AutonomousCommentingService {
    */
   async createAgentComment(
     agentUserId: string,
-    _runtime: IAgentRuntime
+    _runtime: IAgentRuntime,
+    planningContext?: string
   ): Promise<string | null> {
     // Resolve agent context (NPC vs USER_CONTROLLED)
     const { displayName: agentDisplayName } =
@@ -395,9 +396,9 @@ export class AutonomousCommentingService {
 
     const prompt = `CRITICAL: Your response MUST start with <response> immediately. No <think> tags. No reasoning. Output only the XML.
 
-${config?.systemPrompt ?? 'You are an AI agent on Babylon.'}
+${config?.systemPrompt ?? 'You are an AI agent on Feed.'}
 
-You are ${agentDisplayName}, an AI agent on Babylon.
+You are ${agentDisplayName}, an AI agent on Feed.
 
 Your trading context:
 ${tradingContext}
@@ -450,13 +451,12 @@ If you want to skip (no relevant posts):
 
     // Ensure prompt fits within context limit
     const estimatedTokens = countTokensSync(prompt);
-    let finalPrompt = prompt;
+    const finalPrompt = prompt;
 
     if (estimatedTokens > 30000) {
-      const truncated = truncateToTokenLimitSync(prompt, 30000, {
-        ellipsis: true,
-      });
-      finalPrompt = truncated.text;
+      throw new Error(
+        `AutonomousCommentingService required context exceeds token budget: ${estimatedTokens}`
+      );
     }
 
     // Call LLM for decision
@@ -477,21 +477,19 @@ If you want to skip (no relevant posts):
         ? `${finalPrompt}\n\nREMINDER: No <think> tags. Start DIRECTLY with <response>. Output only valid XML.`
         : finalPrompt;
 
-      const responseText = await Promise.race([
-        callGroqDirect({
-          prompt: currentPrompt,
-          system: config?.systemPrompt ?? undefined,
-          modelSize: 'large',
-          runtime: _runtime,
-          temperature: isRetry ? 0.5 : 0.7,
-          maxTokens: 16384,
-          actionType: 'evaluate_comment_opportunity',
-          purpose: 'evaluation',
-        }),
-        new Promise<string>((_, reject) => {
-          setTimeout(() => reject(new Error('Timeout')), 20000);
-        }),
-      ]);
+      const responseText = await callGroqDirect({
+        prompt: currentPrompt,
+        system:
+          [config?.systemPrompt, planningContext]
+            .filter(Boolean)
+            .join('\n\n') || undefined,
+        modelSize: 'large',
+        runtime: _runtime,
+        temperature: isRetry ? 0.5 : 0.7,
+        maxTokens: 16384,
+        actionType: 'evaluate_comment_opportunity',
+        purpose: 'evaluation',
+      });
 
       // Extract response block
       const responseMatch = responseText.match(
@@ -538,7 +536,7 @@ If you want to skip (no relevant posts):
         { agentUserId },
         'AutonomousCommenting'
       );
-      return null;
+      throw new Error('Failed to get valid comment decision');
     }
 
     // Handle skip
@@ -564,12 +562,12 @@ If you want to skip (no relevant posts):
           { agentUserId },
           'AutonomousCommenting'
         );
-        return null;
+        throw new Error(`Invalid post index: ${decision.postIndex}`);
       }
 
       const cleanContent = decision.content.trim().replace(/^["']|["']$/g, '');
       if (!cleanContent || cleanContent.length < 5) {
-        return null;
+        throw new Error('Comment content is empty or too short');
       }
 
       // Validate reply_to_comment_id if provided
@@ -583,15 +581,8 @@ If you want to skip (no relevant posts):
         if (allCommentIds.includes(decision.replyToCommentId)) {
           parentCommentId = decision.replyToCommentId;
         } else {
-          // LLM returned an ID but it wasn't in our comment threads - log this
-          logger.warn(
-            `LLM returned replyToCommentId "${decision.replyToCommentId}" but it wasn't found in comment threads. Creating top-level comment instead.`,
-            {
-              agentUserId,
-              postId: selectedPost.id,
-              availableIds: allCommentIds,
-            },
-            'AutonomousCommenting'
+          throw new Error(
+            `Reply target ${decision.replyToCommentId} is not in the selected post's context`
           );
         }
       }
@@ -610,7 +601,7 @@ If you want to skip (no relevant posts):
           { agentUserId },
           'AutonomousCommenting'
         );
-        return null;
+        throw new Error(`Failed to create comment: ${result.error}`);
       }
 
       // Log the comment with prompt and completion for debugging/review
@@ -638,7 +629,7 @@ If you want to skip (no relevant posts):
       return result.commentId ?? null;
     }
 
-    return null;
+    throw new Error('Invalid comment action or required parameters');
   }
 }
 

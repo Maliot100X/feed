@@ -32,7 +32,6 @@ export function PostHogIdentifier() {
         hasProfileImage: Boolean(user.profileImageUrl),
         hasBio: Boolean(user.bio),
         profileComplete: user.profileComplete ?? false,
-        hasFarcaster: user.hasFarcaster ?? false,
         hasTwitter: user.hasTwitter ?? false,
         authenticated: true,
       };
@@ -42,9 +41,6 @@ export function PostHogIdentifier() {
       }
       if (user.displayName) {
         properties.displayName = user.displayName;
-      }
-      if (user.farcasterUsername) {
-        properties.farcasterUsername = user.farcasterUsername;
       }
       if (user.twitterUsername) {
         properties.twitterUsername = user.twitterUsername;

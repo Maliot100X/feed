@@ -22,6 +22,13 @@ import sys
 from pathlib import Path
 
 
+def _money(value: object) -> str:
+    """Format a dollar amount, or 'n/a' when the field is missing/non-numeric."""
+    if isinstance(value, int | float) and not isinstance(value, bool):
+        return f"${value:.2f}"
+    return "n/a"
+
+
 def estimate_tokens(text: str) -> int:
     """Rough token estimate: ~4 chars per token for English text."""
     return len(text) // 4
@@ -98,7 +105,7 @@ def print_trajectory(
 
         print(f"\n  Step {step_num}:")
         print(
-            f"    Balance: ${env.get('agentBalance', '?'):.2f} | PnL: ${env.get('agentPnL', '?'):.2f} | Positions: {env.get('openPositions', '?')}"
+            f"    Balance: {_money(env.get('agentBalance'))} | PnL: {_money(env.get('agentPnL'))} | Positions: {env.get('openPositions', '?')}"
         )
 
         # Group chat context (new fields)

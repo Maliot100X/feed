@@ -13,7 +13,7 @@ import {
   DUPLICATE_DETECTION_CONFIGS,
   getRateLimitStatus,
   RATE_LIMIT_CONFIGS,
-} from '@babylon/engine';
+} from '@feed/engine';
 
 describe('Rate Limiting', () => {
   beforeEach(() => {
@@ -293,5 +293,29 @@ describe('Rate Limiting', () => {
       );
       expect(duplicate2.isDuplicate).toBe(true);
     });
+  });
+});
+
+describe('API duplicate detector (structured keys)', () => {
+  it('attributes DID user records to the right action and user', async () => {
+    const api = await import('../../api/src/utils/duplicate-detector');
+    api.clearAllDuplicates();
+    api.checkDuplicate(
+      'did:privy:abc',
+      'hello',
+      api.DUPLICATE_DETECTION_CONFIGS.POST
+    );
+    api.checkDuplicate(
+      'did:privy:abc',
+      'hi',
+      api.DUPLICATE_DETECTION_CONFIGS.COMMENT
+    );
+    api.checkDuplicate('user-2', 'hello', api.DUPLICATE_DETECTION_CONFIGS.POST);
+    expect(api.getDuplicateStats()).toEqual({
+      totalUsers: 2,
+      totalRecords: 3,
+      recordsByType: { post: 2, comment: 1 },
+    });
+    api.clearAllDuplicates();
   });
 });

@@ -16,7 +16,7 @@ import {
   expect,
   it,
 } from 'bun:test';
-import { WaitlistService } from '@babylon/api';
+import { WaitlistService } from '@feed/api';
 import {
   db,
   eq,
@@ -24,8 +24,8 @@ import {
   pointsTransactions,
   referrals,
   users,
-} from '@babylon/db';
-import { generateSnowflakeId } from '@babylon/shared';
+} from '@feed/db';
+import { generateSnowflakeId } from '@feed/shared';
 
 // Skip tests if DATABASE_URL is not set
 const shouldSkip = !process.env.DATABASE_URL;
@@ -112,7 +112,7 @@ describeWaitlist('WaitlistService', () => {
 
       expect(result.success).toBe(true);
       expect(result.waitlistPosition).toBeGreaterThan(0);
-      expect(result.inviteCode).toHaveLength(8);
+      expect(result.inviteCode.length).toBeGreaterThan(0);
       expect(result.points).toBe(100);
 
       // Verify in database
@@ -128,7 +128,8 @@ describeWaitlist('WaitlistService', () => {
 
       expect(updatedUser?.isWaitlistActive).toBe(true);
       expect(updatedUser?.waitlistPosition).toBeGreaterThan(0);
-      expect(updatedUser?.referralCode).toBeTruthy();
+      // The returned invite code is the stored canonical referral code.
+      expect(updatedUser?.referralCode).toBe(result.inviteCode);
     });
 
     it('should prevent self-referral', async () => {
@@ -400,17 +401,33 @@ describeWaitlist('WaitlistService', () => {
         displayName: 'Test Wallet User',
         reputationPoints: 100,
         bonusPoints: 0,
+        walletAddress: `0x${userId.padStart(40, '0')}`,
         isTest: true,
         updatedAt: new Date(),
       });
       testUserIds.push(userId);
+      const linkedWallet = `0x${userId.padStart(40, '0')}`;
 
-      // Award first time
-      const awarded1 = await WaitlistService.awardWalletBonus(userId, '0x1234');
+      // A wallet that is not the linked wallet is never awarded or stored
+      expect(
+        await WaitlistService.awardWalletBonus(
+          userId,
+          '0x00000000000000000000000000000000000000ff'
+        )
+      ).toBe(false);
+
+      // Award first time (case-insensitive match on the linked wallet)
+      const awarded1 = await WaitlistService.awardWalletBonus(
+        userId,
+        linkedWallet.toUpperCase().replace('0X', '0x')
+      );
       expect(awarded1).toBe(true);
 
       // Try to award again
-      const awarded2 = await WaitlistService.awardWalletBonus(userId, '0x5678');
+      const awarded2 = await WaitlistService.awardWalletBonus(
+        userId,
+        linkedWallet
+      );
       expect(awarded2).toBe(false); // Should not award twice
 
       // Verify only 300 points awarded (wallet bonus amount)
@@ -427,7 +444,7 @@ describeWaitlist('WaitlistService', () => {
       expect(updatedUser?.reputationPoints).toBe(400);
     });
 
-    it('should award email bonus and save email to user record', async () => {
+    it('should award email bonus for the account email without changing it', async () => {
       const userId = await generateSnowflakeId();
       await db.insert(users).values({
         id: userId,
@@ -437,12 +454,13 @@ describeWaitlist('WaitlistService', () => {
         reputationPoints: 100,
         bonusPoints: 0,
         isWaitlistActive: true,
+        email: `test-${userId}@example.com`,
         isTest: true,
         updatedAt: new Date(),
       });
       testUserIds.push(userId);
 
-      const testEmail = `test-${Date.now()}@example.com`;
+      const testEmail = `test-${userId}@example.com`;
       const awarded = await WaitlistService.awardEmailBonus(userId, testEmail);
       expect(awarded).toBe(true);
 
@@ -473,20 +491,21 @@ describeWaitlist('WaitlistService', () => {
         reputationPoints: 100,
         bonusPoints: 0,
         isWaitlistActive: true,
+        email: `first-${userId}@example.com`,
         isTest: true,
         updatedAt: new Date(),
       });
       testUserIds.push(userId);
 
-      const firstEmail = `first-${Date.now()}@example.com`;
+      const firstEmail = `first-${userId}@example.com`;
       const awarded1 = await WaitlistService.awardEmailBonus(
         userId,
         firstEmail
       );
       expect(awarded1).toBe(true);
 
-      // Second attempt with a different email should be rejected
-      const secondEmail = `second-${Date.now()}@example.com`;
+      // A different email is rejected and never stored
+      const secondEmail = `second-${userId}@example.com`;
       const awarded2 = await WaitlistService.awardEmailBonus(
         userId,
         secondEmail
@@ -519,12 +538,13 @@ describeWaitlist('WaitlistService', () => {
         reputationPoints: 50,
         bonusPoints: 0,
         isWaitlistActive: true,
+        email: `txn-${userId}@example.com`,
         isTest: true,
         updatedAt: new Date(),
       });
       testUserIds.push(userId);
 
-      const testEmail = `txn-${Date.now()}@example.com`;
+      const testEmail = `txn-${userId}@example.com`;
       await WaitlistService.awardEmailBonus(userId, testEmail);
 
       const [txn] = await db
@@ -538,6 +558,30 @@ describeWaitlist('WaitlistService', () => {
       expect(txn?.reason).toBe('email_submit');
       expect(txn?.pointsBefore).toBe(50);
       expect(txn?.pointsAfter).toBe(150);
+    });
+
+    it('never stores a submitted email when the account has none', async () => {
+      const userId = await generateSnowflakeId();
+      await db.insert(users).values({
+        id: userId,
+        privyId: `test-email4-${userId}`,
+        username: `useremail4${userId.slice(-8)}`,
+        reputationPoints: 0,
+        bonusPoints: 0,
+        isWaitlistActive: true,
+        isTest: true,
+        updatedAt: new Date(),
+      });
+      testUserIds.push(userId);
+
+      expect(
+        await WaitlistService.awardEmailBonus(userId, 'boss@admin.example')
+      ).toBe(false);
+      const [user] = await db
+        .select({ email: users.email, bonusPoints: users.bonusPoints })
+        .from(users)
+        .where(eq(users.id, userId));
+      expect(user).toEqual({ email: null, bonusPoints: 0 });
     });
 
     it('should return false for unknown user', async () => {

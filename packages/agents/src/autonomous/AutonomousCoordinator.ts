@@ -12,7 +12,9 @@
  * 5. Optional trajectory recording for RL training
  */
 
+import type { IAgentRuntime } from '@elizaos/core';
 import {
+  actorState,
   and,
   db,
   eq,
@@ -21,11 +23,10 @@ import {
   or,
   userAgentConfigs,
   users,
-} from '@babylon/db';
-import { StaticDataRegistry } from '@babylon/engine';
-import type { JsonValue } from '@babylon/shared';
-import { trajectoryRecorder } from '@babylon/training';
-import type { IAgentRuntime } from '@elizaos/core';
+} from '@feed/db';
+import { StaticDataRegistry } from '@feed/engine';
+import type { JsonValue } from '@feed/shared';
+import { trajectoryRecorder } from '@feed/training';
 import {
   clearTrajectoryContext,
   setTrajectoryContext,
@@ -39,6 +40,7 @@ import { multiStepExecutor } from './MultiStepExecutor';
 import { priceAlertService } from './PriceAlertService';
 import { topicDiversityService } from './TopicDiversityService';
 import type { ActionTraceResult } from './templates/multi-step-decision';
+import { requireContextNumber } from './utils/context-validation';
 import { getPredictionMarketPrices } from './utils/prediction-pricing';
 
 /** Agent identity entry for interaction labeling */
@@ -337,8 +339,10 @@ export class AutonomousCoordinator {
     agentUserId: string,
     runtime: IAgentRuntime,
     recordTrajectories = false,
-    isNpc = false
+    isNpc = false,
+    signal?: AbortSignal
   ): Promise<AutonomousTickResult> {
+    signal?.throwIfAborted();
     const startTime = Date.now();
 
     // Initialize trajectory recording if enabled
@@ -350,15 +354,14 @@ export class AutonomousCoordinator {
     if (recordTrajectories) {
       // Enrich NPC trajectories with world state context
       // Derive archetype from character sheet metadata
-      const babylonMeta = (
-        runtime.character as unknown as Record<string, unknown>
-      )?.babylon as Record<string, unknown> | undefined;
-      const archetype = babylonMeta
+      const feedMeta = (runtime.character as unknown as Record<string, unknown>)
+        ?.feed as Record<string, unknown> | undefined;
+      const archetype = feedMeta
         ? deriveArchetype(
-            babylonMeta.alignment as string,
-            babylonMeta.team as string,
-            babylonMeta.scamProfile as string,
-            babylonMeta.tradingStyle as string
+            feedMeta.alignment as string,
+            feedMeta.team as string,
+            feedMeta.scamProfile as string,
+            feedMeta.tradingStyle as string
           )
         : 'trader';
 
@@ -393,19 +396,21 @@ export class AutonomousCoordinator {
           const snapshotId = null;
 
           // Query NPC actor state for memory/relationship snapshots
-          const { actorState } = await import('@babylon/db/schema');
+          const { actorState } = await import('@feed/db/schema');
           const npcState = await db
             .select()
             .from(actorState)
             .where(eq(actorState.id, agentUserId))
             .limit(1);
-          const memorySnapshot = npcState[0]?.recentMemories;
+          if (!npcState[0])
+            throw new Error(`Missing actorState for trajectory ${agentUserId}`);
+          const memorySnapshot = npcState[0].recentMemories;
           const relationshipSnapshot = npcState[0]?.relationships;
 
           // Determine NPC role from active arc plans
           let npcRole: string = 'observer';
           try {
-            const { questionArcPlans } = await import('@babylon/db/schema');
+            const { questionArcPlans } = await import('@feed/db/schema');
             const activePlans = await db
               .select({
                 insiderActorIds: questionArcPlans.insiderActorIds,
@@ -423,8 +428,8 @@ export class AutonomousCoordinator {
                 break;
               }
             }
-          } catch {
-            // Non-fatal: default to observer
+          } catch (error) {
+            throw error;
           }
 
           enrichedMetadata = {
@@ -436,17 +441,7 @@ export class AutonomousCoordinator {
             relationshipSnapshot: relationshipSnapshot as unknown as JsonValue,
           };
         } catch (enrichError) {
-          logger.warn(
-            'Failed to enrich NPC trajectory metadata',
-            {
-              agentId: agentUserId,
-              error:
-                enrichError instanceof Error
-                  ? enrichError.message
-                  : String(enrichError),
-            },
-            'AutonomousCoordinator'
-          );
+          throw enrichError;
         }
       }
 
@@ -503,28 +498,7 @@ export class AutonomousCoordinator {
       'AutonomousCoordinator'
     );
 
-    // For NPCs, skip User table lookup (they don't have User records)
-    // For USER_CONTROLLED agents, verify they exist in User table
-    if (!isNpc) {
-      const agentResult = await db
-        .select({ id: users.id, isAgent: users.isAgent })
-        .from(users)
-        .where(eq(users.id, agentUserId))
-        .limit(1);
-
-      const agent = agentResult[0];
-      if (!agent || !agent.isAgent) {
-        throw new Error('Agent not found or not an agent');
-      }
-    }
-
-    // Get agent config (only for USER_CONTROLLED agents, NPCs don't have UserAgentConfig)
-    const config = isNpc ? null : await getAgentConfig(agentUserId);
-
-    // Populate identity map for interaction labeling
-    if (recordTrajectories) {
-      await populateIdentityMapOnRuntime(runtime, agentUserId, isNpc);
-    }
+    let executionError: Error | undefined;
 
     // Helper to clean up trajectory context
     const cleanupTrajectory = async (): Promise<void> => {
@@ -541,7 +515,24 @@ export class AutonomousCoordinator {
 
         // Extract enriched fields from trajectory start metadata
         const trajMetadata = enrichedMetadata ?? {};
+        const activeStepId = trajectoryRecorder.getCurrentStepId(trajId);
+        if (activeStepId && !executionError) {
+          trajectoryRecorder.completeStep(
+            trajId,
+            {
+              actionType: 'TICK_END',
+              actionName: 'TICK_END',
+              parameters: {},
+              success: result.success,
+              ...(result.success
+                ? {}
+                : { error: 'Tick completed without a successful action' }),
+            },
+            0
+          );
+        }
         await trajectoryRecorder.endTrajectory(trajId, {
+          failure: executionError?.message,
           finalBalance: finalState.agentBalance,
           finalPnL: finalState.agentPnL,
           scenarioProfile:
@@ -608,6 +599,29 @@ export class AutonomousCoordinator {
     };
 
     try {
+      // For NPCs, skip User table lookup (they don't have User records)
+      // For USER_CONTROLLED agents, verify they exist in User table
+      if (!isNpc) {
+        const agentResult = await db
+          .select({ id: users.id, isAgent: users.isAgent })
+          .from(users)
+          .where(eq(users.id, agentUserId))
+          .limit(1);
+
+        const agent = agentResult[0];
+        if (!agent || !agent.isAgent) {
+          throw new Error('Agent not found or not an agent');
+        }
+      }
+
+      // Get agent config (only for USER_CONTROLLED agents, NPCs don't have UserAgentConfig)
+      const config = isNpc ? null : await getAgentConfig(agentUserId);
+
+      // Populate identity map for interaction labeling
+      if (recordTrajectories) {
+        await populateIdentityMapOnRuntime(runtime, agentUserId, isNpc);
+      }
+
       // Price alert pre-step: lightweight DB checks, no LLM calls
       // Only for user-controlled agents (NPCs don't have price alert configs)
       if (!isNpc) {
@@ -672,7 +686,12 @@ export class AutonomousCoordinator {
           }
         }
 
-        result.success = executionResult.successful > 0;
+        const failedAction = executionResult.results.find(
+          (action) => !action.success
+        );
+        if (failedAction)
+          throw new Error(`Planned action ${failedAction.action.type} failed`);
+        result.success = true;
         result.method = 'planning_coordinator';
         result.duration = Date.now() - startTime;
 
@@ -727,7 +746,8 @@ export class AutonomousCoordinator {
       const multiStepResult = await multiStepExecutor.execute(
         agentUserId,
         runtime,
-        isNpc
+        isNpc,
+        signal
       );
 
       // Map multi-step results to standard format
@@ -778,16 +798,41 @@ export class AutonomousCoordinator {
       );
 
       return result;
+    } catch (error) {
+      executionError =
+        error instanceof Error ? error : new Error(String(error));
+      throw error;
     } finally {
-      // Always clean up trajectory context, even on exception
-      await cleanupTrajectory();
+      try {
+        await cleanupTrajectory();
+      } catch (cleanupError) {
+        if (executionError)
+          throw new AggregateError(
+            [executionError, cleanupError],
+            'Agent execution and trajectory finalization failed'
+          );
+        throw cleanupError;
+      } finally {
+        clearTrajectoryContext(runtime);
+        (runtime as { currentTrajectoryId?: string }).currentTrajectoryId =
+          undefined;
+        (
+          runtime as { _trustOutcomes?: Record<string, unknown> }
+        )._trustOutcomes = undefined;
+        (
+          runtime as { _agentIdentityMap?: Map<string, AgentIdentity> }
+        )._agentIdentityMap = undefined;
+        (
+          runtime as { _trajectoryRunContext?: RuntimeTrajectoryRunContext }
+        )._trajectoryRunContext = undefined;
+      }
     }
   }
 
   /**
    * Execute autonomous tick for all active agents
    */
-  async executeTickForAllAgents(runtime: IAgentRuntime): Promise<{
+  async executeTickForAllAgents(_runtime: IAgentRuntime): Promise<{
     agentsProcessed: number;
     totalActions: number;
     errors: number;
@@ -826,7 +871,11 @@ export class AutonomousCoordinator {
     let totalActions = 0;
     let errors = 0;
 
+    const { agentRuntimeManager } = await import(
+      '../runtime/AgentRuntimeManager'
+    );
     for (const agent of activeAgentResults) {
+      const runtime = await agentRuntimeManager.getRuntime(agent.id);
       const tickResult = await this.executeAutonomousTick(agent.id, runtime);
 
       if (tickResult.success) {
@@ -925,6 +974,32 @@ export class AutonomousCoordinator {
       .limit(1);
 
     const agent = agentResult[0];
+    const isNpc = Boolean(StaticDataRegistry.getActor(agentUserId));
+    let agentBalance: number;
+    let agentPnL: number;
+    if (isNpc) {
+      const [state] = await db
+        .select({ balance: actorState.tradingBalance })
+        .from(actorState)
+        .where(eq(actorState.id, agentUserId))
+        .limit(1);
+      agentBalance = requireContextNumber(
+        state?.balance,
+        `NPC ${agentUserId} trajectory balance`,
+        0
+      );
+      agentPnL = 0;
+    } else {
+      agentBalance = requireContextNumber(
+        agent?.virtualBalance,
+        `agent ${agentUserId} trajectory balance`,
+        0
+      );
+      agentPnL = requireContextNumber(
+        agent?.lifetimePnL,
+        `agent ${agentUserId} trajectory PnL`
+      );
+    }
 
     // Get open positions count
     const positionsCount = await db.perpPosition.count({
@@ -942,8 +1017,8 @@ export class AutonomousCoordinator {
     });
 
     return {
-      agentBalance: agent ? Number(agent.virtualBalance ?? 0) : 0,
-      agentPnL: agent ? Number(agent.lifetimePnL ?? 0) : 0,
+      agentBalance,
+      agentPnL,
       openPositions: positionsCount,
       activeMarkets: marketsCount,
       timestamp: Date.now(),

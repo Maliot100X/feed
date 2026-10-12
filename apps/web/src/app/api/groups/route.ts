@@ -152,27 +152,23 @@ import {
   notifyUserGroupInvite,
   successResponse,
   withErrorHandling,
-} from '@babylon/api';
-import { asUser, generateSnowflakeId, groupInvites } from '@babylon/db';
-import { logger } from '@babylon/shared';
+} from '@feed/api';
+import { asUser, generateSnowflakeId, groupInvites } from '@feed/db';
+import { logger } from '@feed/shared';
 import { nanoid } from 'nanoid';
 import type { NextRequest } from 'next/server';
 import { z } from 'zod';
 
-const CreateGroupSchema = z.object({
-  name: z.string().min(1).max(100),
-  memberIds: z.array(z.string()).optional().default([]),
-  // Note: 'type' is intentionally NOT accepted from client.
-  // User-created groups always get type: 'user'.
-  // NPC groups (type: 'npc') are created by backend services.
-  // Agent groups (type: 'agent') are created via MCP tools.
-  requiredNftContractAddress: z
-    .string()
-    .regex(/^0x[a-fA-F0-9]{40}$/, 'Invalid contract address format')
-    .optional(),
-  requiredNftTokenId: z.number().int().min(0).nullable().optional(),
-  requiredNftChainId: z.number().int().positive().optional(),
-});
+const CreateGroupSchema = z
+  .object({
+    name: z.string().min(1).max(100),
+    memberIds: z.array(z.string()).optional().default([]),
+    // Note: 'type' is intentionally NOT accepted from client.
+    // User-created groups always get type: 'user'.
+    // NPC groups (type: 'npc') are created by backend services.
+    // Agent groups (type: 'agent') are created via MCP tools.
+  })
+  .strict();
 
 /**
  * GET /api/groups
@@ -282,7 +278,6 @@ export const POST = withErrorHandling(async (request: NextRequest) => {
 
     // Create associated chat with groupId link (Chat.groupId → Group.id)
     const chatId = nanoid();
-    const nftGated = !!data.requiredNftContractAddress;
     await db.chat.create({
       data: {
         id: chatId,
@@ -291,10 +286,6 @@ export const POST = withErrorHandling(async (request: NextRequest) => {
         groupId, // Link Chat → Group
         createdAt: new Date(),
         updatedAt: new Date(),
-        requiredNftContractAddress: data.requiredNftContractAddress || null,
-        requiredNftTokenId: data.requiredNftTokenId ?? null,
-        requiredNftChainId: data.requiredNftChainId ?? null,
-        nftGated,
       },
     });
 

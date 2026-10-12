@@ -78,22 +78,24 @@ import {
   JsonRpcTransportHandler,
 } from '@a2a-js/sdk/server';
 import {
-  BabylonAgentExecutor,
-  babylonAgentCard,
+  authorizeTaskReference,
+  FeedAgentExecutor,
+  feedAgentCard,
   PersistentTaskStore,
-} from '@babylon/a2a';
-import { withErrorHandling } from '@babylon/api';
-import { logger } from '@babylon/shared';
+  scopeRequestToCaller,
+} from '@feed/a2a';
+import { withErrorHandling } from '@feed/api';
+import { logger } from '@feed/shared';
 import type { NextRequest } from 'next/server';
 import { NextResponse } from 'next/server';
 import { checkApiKey } from '@/lib/api/check-api-key';
 
 // Initialize A2A protocol components with Redis-backed persistence
 const taskStore = new PersistentTaskStore();
-const executor = new BabylonAgentExecutor();
+const executor = new FeedAgentExecutor();
 const eventBusManager = new DefaultExecutionEventBusManager();
 const requestHandler = new DefaultRequestHandler(
-  babylonAgentCard,
+  feedAgentCard,
   taskStore,
   executor,
   eventBusManager
@@ -109,7 +111,7 @@ export const dynamic = 'force-dynamic';
  * tasks including message sending, task execution, and agent discovery.
  *
  * Supports authentication via:
- * - Server API key (BABYLON_A2A_API_KEY)
+ * - Server API key (FEED_A2A_API_KEY)
  * - Per-user API keys (from userApiKeys table)
  *
  * @param request - Next.js request containing JSON-RPC 2.0 A2A protocol message
@@ -143,69 +145,42 @@ export const POST = withErrorHandling(async function POST(
     userId: authResult?.userId,
   });
 
-  // SECURITY: User-scoped execution for user API keys
-  // When authenticated via per-user API key, enforce that the ACTOR identity
-  // (contextId) is the authenticated user. This prevents impersonation attacks.
-  //
-  // NOTE: We do NOT enforce params.userId because many operations use it as
-  // the TARGET (e.g., blockUser targets params.userId, actor is contextId).
-  // The executor uses contextId as the actor for all write operations.
-  if (authResult?.authMethod === 'user-key') {
-    const authenticatedUserId = authResult.userId;
-
-    // Validate userId is present and non-empty
-    if (!authenticatedUserId || typeof authenticatedUserId !== 'string') {
+  // SECURITY: User-scoped execution for user API keys.
+  // For per-user API keys the ACTOR identity (contextId) is bound to the
+  // authenticated user, preventing impersonation. params.userId is NOT
+  // enforced because many operations use it as the TARGET.
+  if (authResult) {
+    const scope = scopeRequestToCaller(body, authResult);
+    if (!scope.ok) {
       logger.error('User API key authenticated but userId is missing', {
         authMethod: authResult.authMethod,
-        hasUserId: !!authenticatedUserId,
       });
       return NextResponse.json(
         {
           jsonrpc: '2.0',
-          error: {
-            code: -32001,
-            message: 'Authentication error: Invalid user identity',
-          },
+          error: { code: -32001, message: scope.message },
           id: body.id ?? null,
         },
         { status: 401 }
       );
     }
 
-    // Type guard: ensure params is a plain object
-    const isPlainObject = (val: unknown): val is Record<string, unknown> =>
-      typeof val === 'object' && val !== null && !Array.isArray(val);
-
-    // Ensure params exists and is a plain object
-    if (!isPlainObject(body.params)) {
-      body.params = {};
+    // Tasks are addressed by ID; only their owner may read or act on them.
+    const taskAccess = await authorizeTaskReference(
+      body,
+      authResult,
+      taskStore
+    );
+    if (!taskAccess.ok) {
+      return NextResponse.json(
+        {
+          jsonrpc: '2.0',
+          error: { code: -32001, message: 'Task not found' },
+          id: body.id ?? null,
+        },
+        { status: 404 }
+      );
     }
-
-    // Validate and override contextId in message params
-    if (isPlainObject(body.params.message)) {
-      if (
-        body.params.message.contextId &&
-        body.params.message.contextId !== authenticatedUserId
-      ) {
-        logger.warn('Overriding mismatched message contextId', {
-          providedContextId: body.params.message.contextId,
-          authenticatedUserId,
-        });
-      }
-      body.params.message.contextId = authenticatedUserId;
-    }
-
-    // Validate and override contextId at params level (for tasks/get and other methods)
-    if (
-      body.params.contextId &&
-      body.params.contextId !== authenticatedUserId
-    ) {
-      logger.warn('Overriding mismatched params contextId', {
-        providedContextId: body.params.contextId,
-        authenticatedUserId,
-      });
-    }
-    body.params.contextId = authenticatedUserId;
   }
 
   // SECURITY: Server API key and localhost bypass
@@ -243,14 +218,14 @@ export const POST = withErrorHandling(async function POST(
 /**
  * GET /api/a2a
  *
- * Returns the Babylon agent card (capabilities, endpoints, metadata) for A2A protocol discovery.
+ * Returns the Feed agent card (capabilities, endpoints, metadata) for A2A protocol discovery.
  * Provides agent information for external agents to discover and interact with this agent.
  *
  * Supports authentication via:
- * - Server API key (BABYLON_A2A_API_KEY)
+ * - Server API key (FEED_A2A_API_KEY)
  * - Per-user API keys (from userApiKeys table)
  *
- * @param request - Next.js request (API key required in X-Babylon-Api-Key header)
+ * @param request - Next.js request (API key required in X-Feed-Api-Key header)
  * @returns Agent card JSON with capabilities and metadata
  * @throws {401} Invalid or missing API key
  */
@@ -258,7 +233,7 @@ export const GET = withErrorHandling(async function GET(request: NextRequest) {
   const { error } = await checkApiKey(request);
   if (error) return error;
 
-  return NextResponse.json(babylonAgentCard, {
+  return NextResponse.json(feedAgentCard, {
     headers: {
       'Content-Type': 'application/json',
       'Cache-Control': 'public, max-age=3600',

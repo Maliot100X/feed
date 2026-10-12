@@ -1,7 +1,7 @@
 'use client';
 
-import type { FeedPost } from '@babylon/shared';
-import { logger } from '@babylon/shared';
+import type { FeedPost } from '@feed/shared';
+import { logger } from '@feed/shared';
 import { AlertCircle, Loader2 } from 'lucide-react';
 import dynamic from 'next/dynamic';
 import { useRouter } from 'next/navigation';
@@ -50,15 +50,7 @@ const WidgetSidebar = dynamic(
   }
 );
 
-const TradesFeed = dynamic(
-  () =>
-    import('@/components/trades/TradesFeed').then((m) => ({
-      default: m.TradesFeed,
-    })),
-  { ssr: false }
-);
-
-type FeedTab = 'latest' | 'stories' | 'forYou' | 'following' | 'trades';
+type FeedTab = 'latest' | 'stories' | 'forYou' | 'following';
 
 function ForYouFeedError({ onRetry }: { onRetry: () => Promise<void> }) {
   const [isRetrying, setIsRetrying] = useState(false);
@@ -106,14 +98,13 @@ function ForYouFeedError({ onRetry }: { onRetry: () => Promise<void> }) {
  * FeedClient - Main feed page orchestrator
  *
  * This component orchestrates the feed experience by:
- * - Managing tab state (latest, following, trades)
+ * - Managing tab state (for you, stories, latest, following)
  * - Coordinating data fetching hooks
  * - Handling pull-to-refresh
  * - Rendering inline post composer
  *
  * Heavy components are lazy loaded:
  * - WidgetSidebar (desktop only)
- * - TradesFeed (trades tab only)
  */
 export function FeedClient() {
   const router = useRouter();
@@ -127,9 +118,6 @@ export function FeedClient() {
 
   // Actor names for display
   const [actorNames, setActorNames] = useState<Map<string, string>>(new Map());
-
-  // Scroll container ref for TradesFeed
-  const scrollContainerRefObject = useRef<HTMLDivElement | null>(null);
 
   // Enable error toasts
   useErrorToasts();
@@ -299,22 +287,10 @@ export function FeedClient() {
     containerRef: scrollContainerCallbackRef,
   } = usePullToRefresh({
     onRefresh: handleRefresh,
-    enabled:
-      tab === 'latest' ||
-      tab === 'trades' ||
-      tab === 'forYou' ||
-      tab === 'stories',
+    enabled: tab === 'latest' || tab === 'forYou' || tab === 'stories',
   });
 
-  const scrollContainerRef = useCallback(
-    (node: HTMLDivElement | null) => {
-      scrollContainerCallbackRef(node);
-      if (scrollContainerRefObject.current !== node) {
-        scrollContainerRefObject.current = node;
-      }
-    },
-    [scrollContainerCallbackRef]
-  );
+  const scrollContainerRef = scrollContainerCallbackRef;
 
   // Load more handler
   const handleLoadMore = useCallback(() => {
@@ -361,10 +337,6 @@ export function FeedClient() {
 
   // Render content based on tab and state
   const renderContent = () => {
-    if (tab === 'trades') {
-      return <TradesFeed containerRef={scrollContainerRefObject} />;
-    }
-
     if (isLoading) {
       return (
         <div className="w-full">
@@ -482,7 +454,7 @@ export function FeedClient() {
         </div>
 
         {/* Widget sidebar - lazy loaded, desktop only */}
-        <WidgetSidebar showPositions />
+        <WidgetSidebar />
       </div>
     </PageContainer>
   );

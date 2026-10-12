@@ -1,0 +1,50 @@
+name: Cloudflare compatibility
+
+on:
+  pull_request:
+    branches: [staging, production]
+  push:
+    branches: [staging, production]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: cloudflare-check-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: Cloudflare build
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: feed_test
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.4.2
+      - run: bun install --frozen-lockfile --ignore-scripts
+      - run: bun run test:cloudflare
+      - name: Verify overlapping PostgreSQL request lifetimes
+        run: bun test packages/testing/integration/cloudflare-connections.integration.test.ts
+        env:
+          NODE_ENV: test
+          DEPLOYMENT_PLATFORM: cloudflare
+          RUN_CLOUDFLARE_CONNECTION_TESTS: '1'
+          DATABASE_URL: postgres://postgres:postgres@localhost:5432/feed_test
+      - run: bun run typecheck:cloudflare
+      - run: bun run build:cloudflare staging

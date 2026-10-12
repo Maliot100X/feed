@@ -22,6 +22,7 @@ export interface ParsedArgs {
  *
  * Supports:
  * - Long options: `--flag`, `--option=value`, `--option value`
+ * - `--` ends option parsing; remaining arguments are positional
  * - Short options: `-f`, `-o value`
  * - Positional arguments
  * - Commands (first non-flag argument)
@@ -47,8 +48,22 @@ export function parseArgs(args: string[]): ParsedArgs {
     const arg = args[i];
     if (!arg) continue;
 
+    if (arg === '--') {
+      // Everything after a bare `--` is positional, even if it looks like a flag.
+      for (const rest of args.slice(i + 1)) {
+        if (!result.command) result.command = rest;
+        else result.positional.push(rest);
+      }
+      break;
+    }
+
     if (arg.startsWith('--')) {
-      const [key, value] = arg.slice(2).split('=');
+      // Split on the first '=' only so values such as URLs keep their own '='.
+      const body = arg.slice(2);
+      const equalsIndex = body.indexOf('=');
+      const key = equalsIndex === -1 ? body : body.slice(0, equalsIndex);
+      const value =
+        equalsIndex === -1 ? undefined : body.slice(equalsIndex + 1);
       if (key) {
         if (value !== undefined) {
           result.options[key] = value;

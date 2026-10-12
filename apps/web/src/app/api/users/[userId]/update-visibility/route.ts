@@ -5,7 +5,7 @@
  * @access Authenticated (own profile only)
  *
  * @description
- * Updates social media visibility preferences (Twitter, Farcaster, wallet address).
+ * Updates social media visibility preferences (Twitter, wallet address).
  * Controls which social accounts are shown publicly on user profile.
  *
  * @openapi
@@ -36,7 +36,7 @@
  *             properties:
  *               platform:
  *                 type: string
- *                 enum: [twitter, farcaster, wallet]
+ *                 enum: [twitter, wallet]
  *               visible:
  *                 type: boolean
  *     responses:
@@ -53,8 +53,6 @@
  *                   type: object
  *                   properties:
  *                     twitter:
- *                       type: boolean
- *                     farcaster:
  *                       type: boolean
  *                     wallet:
  *                       type: boolean
@@ -82,14 +80,14 @@ import {
   requireUserByIdentifier,
   successResponse,
   withErrorHandling,
-} from '@babylon/api';
-import { db, eq, users } from '@babylon/db';
-import { logger, UserIdParamSchema } from '@babylon/shared';
+} from '@feed/api';
+import { db, eq, users } from '@feed/db';
+import { logger, UserIdParamSchema } from '@feed/shared';
 import type { NextRequest } from 'next/server';
 import { z } from 'zod';
 
 const UpdateVisibilityRequestSchema = z.object({
-  platform: z.enum(['twitter', 'farcaster', 'wallet']),
+  platform: z.enum(['twitter', 'wallet']),
   visible: z.boolean(),
 });
 
@@ -124,9 +122,6 @@ export const POST = withErrorHandling(
       case 'twitter':
         updateData.showTwitterPublic = visible;
         break;
-      case 'farcaster':
-        updateData.showFarcasterPublic = visible;
-        break;
       case 'wallet':
         updateData.showWalletPublic = visible;
         break;
@@ -140,7 +135,6 @@ export const POST = withErrorHandling(
       .returning({
         id: users.id,
         showTwitterPublic: users.showTwitterPublic,
-        showFarcasterPublic: users.showFarcasterPublic,
         showWalletPublic: users.showWalletPublic,
       });
 
@@ -154,7 +148,6 @@ export const POST = withErrorHandling(
       success: true,
       visibility: {
         twitter: updatedUser?.showTwitterPublic ?? false,
-        farcaster: updatedUser?.showFarcasterPublic ?? false,
         wallet: updatedUser?.showWalletPublic ?? false,
       },
     });

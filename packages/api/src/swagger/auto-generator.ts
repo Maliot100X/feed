@@ -1,8 +1,10 @@
 /**
- * Automated OpenAPI Specification Generator
+ * OpenAPI Specification
  *
  * @module lib/swagger/auto-generator
- * @description Returns the canonical Babylon OpenAPI spec used by the docs route.
+ * @description Returns the canonical (hand-maintained) Feed OpenAPI spec used
+ * by the docs route. Despite the module name, nothing is generated from
+ * route code.
  */
 
 import { swaggerDefinition } from './config';
@@ -22,7 +24,7 @@ interface OpenAPISpec {
 }
 
 /**
- * Generate the Babylon OpenAPI specification.
+ * Generate the Feed OpenAPI specification.
  *
  * The manual generator is the stable source of truth here. It already includes
  * the documented routes, tags, and security schemes used by the docs UI and

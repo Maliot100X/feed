@@ -7,10 +7,11 @@
  * @module useSessionHeartbeat
  */
 
-import { generateUUID, logger } from '@babylon/shared';
+import { generateUUID, logger } from '@feed/shared';
 import { usePathname } from 'next/navigation';
 import { useEffect, useRef } from 'react';
 import { useAuth } from '@/hooks/useAuth';
+import { apiFetch } from '@/utils/api-fetch';
 import { readStorageItem, writeStorageItem } from '@/utils/browser-storage';
 
 const HEARTBEAT_INTERVAL_MS = 5 * 60 * 1000; // 5 minutes
@@ -38,7 +39,6 @@ function getSessionId(userId: string): string {
 export function useSessionHeartbeat(): void {
   const { authenticated, ready, user } = useAuth();
   const pathname = usePathname();
-  const sessionIdRef = useRef<string | null>(null);
   const pageViewsRef = useRef(1);
   const intervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const isVisibleRef = useRef(true);
@@ -58,14 +58,14 @@ export function useSessionHeartbeat(): void {
     lastPathnameRef.current = pathname;
   }, [pathname, ready, authenticated]);
 
-  useEffect(() => {
-    if (!ready || !authenticated || !user) return;
+  const userId = user?.id ?? null;
 
-    // Get or create user-scoped session ID
-    if (!sessionIdRef.current) {
-      sessionIdRef.current = getSessionId(user.id);
-    }
-    const sessionId = sessionIdRef.current;
+  useEffect(() => {
+    if (!ready || !authenticated || !userId) return;
+
+    // User-scoped session ID; a new user starts a fresh page-view count.
+    const sessionId = getSessionId(userId);
+    pageViewsRef.current = 1;
 
     const sendHeartbeat = (): void => {
       const pageViews = pageViewsRef.current;
@@ -74,7 +74,7 @@ export function useSessionHeartbeat(): void {
       const controller = new AbortController();
       const timeoutId = setTimeout(() => controller.abort(), 5000);
 
-      void fetch('/api/activity/heartbeat', {
+      void apiFetch('/api/activity/heartbeat', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -127,7 +127,8 @@ export function useSessionHeartbeat(): void {
       if (intervalRef.current) clearInterval(intervalRef.current);
       document.removeEventListener('visibilitychange', onVisibilityChange);
     };
-  }, [authenticated, ready, user]);
+    // Depend on the user ID only: profile refreshes must not send heartbeats.
+  }, [authenticated, ready, userId]);
 }
 
 /** Provider that enables session heartbeat for its subtree */

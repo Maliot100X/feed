@@ -69,19 +69,24 @@
  * @see {@link /lib/services/trending-grouping-service} Trending grouping service
  */
 
+import { withErrorHandling } from '@feed/api';
 import {
-  type AuthenticatedUser,
-  optionalAuth,
-  withErrorHandling,
-} from '@babylon/api';
-import { asPublic, asUser, desc, eq, posts, postTags } from '@babylon/db';
+  and,
+  asPublic,
+  desc,
+  eq,
+  isNull,
+  lte,
+  posts,
+  postTags,
+} from '@feed/db';
 import {
   generateTrendingSummary,
   getCurrentTrendingTags,
   groupTrendingTags,
   type TrendingTag,
-} from '@babylon/engine';
-import { logger } from '@babylon/shared';
+} from '@feed/engine';
+import { logger } from '@feed/shared';
 import type { NextRequest } from 'next/server';
 import { NextResponse } from 'next/server';
 
@@ -97,7 +102,7 @@ const CACHE_TTL_MS = 5 * 60 * 1000; // 5 minutes
 // Request deduplication: prevent concurrent requests from all running expensive LLM calls
 let ongoingRequest: Promise<unknown[]> | null = null;
 
-export const GET = withErrorHandling(async (request: NextRequest) => {
+export const GET = withErrorHandling(async (_request: NextRequest) => {
   const startTime = Date.now();
 
   // Check server-side cache first
@@ -142,43 +147,33 @@ export const GET = withErrorHandling(async (request: NextRequest) => {
         undefined,
         'GET /api/feed/widgets/trending'
       );
+      trendingCache = { data: [], timestamp: Date.now() };
       return [];
     }
 
-    // Optional auth - trending tags are public but RLS still applies
-    const authUser: AuthenticatedUser | null = await optionalAuth(
-      request
-    ).catch(() => null);
-
-    // First, get all trending items with summaries
+    // The result is cached globally and served to every viewer, so it is
+    // always built from public, visible (non-deleted, published) posts.
+    const now = new Date();
     const trendingItems: TrendingTag[] = await Promise.all(
       trending.map(async (item) => {
-        const recentPosts =
-          authUser && authUser.userId
-            ? await asUser(authUser, async (db) => {
-                return await db
-                  .select({
-                    postId: postTags.postId,
-                    postContent: posts.content,
-                  })
-                  .from(postTags)
-                  .innerJoin(posts, eq(postTags.postId, posts.id))
-                  .where(eq(postTags.tagId, item.tag.id))
-                  .orderBy(desc(postTags.createdAt))
-                  .limit(3);
-              })
-            : await asPublic(async (db) => {
-                return await db
-                  .select({
-                    postId: postTags.postId,
-                    postContent: posts.content,
-                  })
-                  .from(postTags)
-                  .innerJoin(posts, eq(postTags.postId, posts.id))
-                  .where(eq(postTags.tagId, item.tag.id))
-                  .orderBy(desc(postTags.createdAt))
-                  .limit(3);
-              });
+        const recentPosts = await asPublic(async (db) => {
+          return await db
+            .select({
+              postId: postTags.postId,
+              postContent: posts.content,
+            })
+            .from(postTags)
+            .innerJoin(posts, eq(postTags.postId, posts.id))
+            .where(
+              and(
+                eq(postTags.tagId, item.tag.id),
+                isNull(posts.deletedAt),
+                lte(posts.timestamp, now)
+              )
+            )
+            .orderBy(desc(postTags.createdAt))
+            .limit(3);
+        });
 
         const postContents = recentPosts.map((pt) => pt.postContent);
 
@@ -200,13 +195,8 @@ export const GET = withErrorHandling(async (request: NextRequest) => {
       })
     );
 
-    // Filter out null values
-    const validItems = trendingItems.filter(
-      (item): item is NonNullable<typeof item> => item !== null
-    );
-
     // Group related tags using LLM analysis
-    const groupedTrending = await groupTrendingTags(validItems);
+    const groupedTrending = await groupTrendingTags(trendingItems);
 
     // Return top 5 groups
     const topGroups = groupedTrending.slice(0, 5);
@@ -230,9 +220,14 @@ export const GET = withErrorHandling(async (request: NextRequest) => {
     return topGroups;
   })();
 
-  ongoingRequest = processingPromise;
+  // Always release the shared promise (success, empty or failure) so an
+  // expired cache or a rejected attempt cannot poison later requests.
+  const sharedRequest: Promise<unknown[]> = processingPromise.finally(() => {
+    if (ongoingRequest === sharedRequest) ongoingRequest = null;
+  });
+  ongoingRequest = sharedRequest;
 
-  const result = await processingPromise;
+  const result = await sharedRequest;
 
   if (result.length === 0) {
     return NextResponse.json({

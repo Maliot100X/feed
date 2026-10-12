@@ -49,14 +49,13 @@
  * @see {@link /lib/training/AutomationPipeline} Automation pipeline
  */
 
-import { withCronAuth, withErrorHandling } from '@babylon/api';
-import { logger } from '@babylon/shared';
-import { automationPipeline } from '@babylon/training';
+import { withCronAuth, withErrorHandling } from '@feed/api';
+import { logger } from '@feed/shared';
+import { automationPipeline } from '@feed/training';
 import type { NextRequest } from 'next/server';
 import { NextResponse } from 'next/server';
 
 export const dynamic = 'force-dynamic';
-export const maxDuration = 60; // 1 minute
 
 /**
  * Daily training status check and reporting

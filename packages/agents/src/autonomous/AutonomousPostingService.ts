@@ -4,17 +4,17 @@
  * Handles agents creating posts autonomously
  */
 
-import { countTokensSync, truncateToTokenLimitSync } from '@babylon/api';
-import { agentTrades, db, desc, eq, posts } from '@babylon/db';
+import type { IAgentRuntime } from '@elizaos/core';
+import { parseKeyValueXml } from '@elizaos/core';
+import { countTokensSync } from '@feed/api';
+import { agentTrades, db, desc, eq, posts } from '@feed/db';
 import {
   characterMappingService,
   formatRandomContext,
   generateRandomMarketContext,
   generateWorldContext,
-} from '@babylon/engine';
-import { getTimeAgo } from '@babylon/shared';
-import type { IAgentRuntime } from '@elizaos/core';
-import { parseKeyValueXml } from '@elizaos/core';
+} from '@feed/engine';
+import { getTimeAgo } from '@feed/shared';
 import { callGroqDirect } from '../llm/direct-groq';
 import { agentService } from '../services/AgentService';
 import { getAgentConfig } from '../shared/agent-config';
@@ -30,7 +30,8 @@ export class AutonomousPostingService {
    */
   async createAgentPost(
     agentUserId: string,
-    _runtime: IAgentRuntime
+    _runtime: IAgentRuntime,
+    planningContext?: string
   ): Promise<string | null> {
     // Resolve agent context (NPC vs USER_CONTROLLED)
     const { displayName: agentDisplayName, lifetimePnL: agentLifetimePnL } =
@@ -78,8 +79,8 @@ export class AutonomousPostingService {
     let npcPersonality = '';
     let npcDomains = '';
     let npcPostExamples = '';
-    try {
-      const { StaticDataRegistry } = await import('@babylon/engine');
+    {
+      const { StaticDataRegistry } = await import('@feed/engine');
       const actor = StaticDataRegistry.getActor(agentUserId);
       if (actor) {
         npcVoice = actor.voice || '';
@@ -95,8 +96,6 @@ export class AutonomousPostingService {
             .join('\n');
         }
       }
-    } catch {
-      /* not an NPC or registry unavailable */
     }
 
     const prompt = `You are ${agentDisplayName}.
@@ -147,19 +146,12 @@ Or skip if you have nothing fresh to say:
 
     // Ensure prompt fits within 32K context limit (W&B trained models)
     const estimatedTokens = countTokensSync(prompt);
-    let finalPrompt = prompt;
+    const finalPrompt = prompt;
 
     if (estimatedTokens > 30000) {
-      // 30K with 2K safety margin
-      logger.warn(
-        `Post generation prompt too long: ${estimatedTokens} tokens, truncating`,
-        { agentUserId }
+      throw new Error(
+        `AutonomousPostingService required context exceeds token budget: ${estimatedTokens}`
       );
-      const truncated = truncateToTokenLimitSync(prompt, 30000, {
-        ellipsis: true,
-      });
-      finalPrompt = truncated.text;
-      logger.info(`Truncated to ${truncated.tokens} tokens`, { agentUserId });
     }
 
     // Use large model (qwen3-32b or trained W&B model) for post generation with retry loop
@@ -176,7 +168,10 @@ Or skip if you have nothing fresh to say:
 
       const postContent = await callGroqDirect({
         prompt: currentPrompt,
-        system: config?.systemPrompt ?? undefined,
+        system:
+          [config?.systemPrompt, planningContext]
+            .filter(Boolean)
+            .join('\n\n') || undefined,
         modelSize: 'large', // Uses trained W&B model if available, else qwen3-32b
         runtime: _runtime, // Pass runtime to access W&B trained models AND trajectory context
         temperature: isRetry ? 0.6 : 0.8,
@@ -223,7 +218,11 @@ Or skip if you have nothing fresh to say:
       }
 
       // Check if we got valid text
-      if (!parsed?.text || parsed.text.trim().length === 0) {
+      if (
+        parsed?.action !== 'post' ||
+        !parsed.text ||
+        parsed.text.trim().length < 10
+      ) {
         logger.warn(
           'Failed to parse XML response in post generation',
           {
@@ -243,14 +242,14 @@ Or skip if you have nothing fresh to say:
       break;
     }
 
-    // If all attempts failed, return null
+    // Exhausted generation is a failure, not an explicit skip.
     if (!cleanContent) {
       logger.error(
         `Failed to generate valid post after ${MAX_ATTEMPTS} attempts`,
         { agentUserId },
         'AutonomousPosting'
       );
-      return null;
+      throw new Error(`Failed to generate valid post for ${agentUserId}`);
     }
 
     // Post-process to fix any real names that slipped through
@@ -287,7 +286,7 @@ Or skip if you have nothing fresh to say:
         },
         'AutonomousPosting'
       );
-      return null;
+      throw new Error('Post content became empty or too short');
     }
 
     // Execute via DirectExecutors (handles DB insert and tagging)
@@ -302,7 +301,7 @@ Or skip if you have nothing fresh to say:
         { agentUserId },
         'AutonomousPosting'
       );
-      return null;
+      throw new Error(`Failed to create post: ${result.error}`);
     }
 
     // Log the post with prompt and completion for debugging/review

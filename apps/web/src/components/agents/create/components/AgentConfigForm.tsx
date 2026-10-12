@@ -1,6 +1,6 @@
 'use client';
 
-import { cn } from '@babylon/shared';
+import { cn } from '@feed/shared';
 import { Loader2, Sparkles } from 'lucide-react';
 import { memo } from 'react';
 import type { AgentFormData } from '../hooks/useAgentForm';
@@ -146,8 +146,10 @@ export const AgentConfigForm = memo(function AgentConfigForm({
           pattern="[0-9]*"
           value={agentData.initialDeposit === 0 ? '' : agentData.initialDeposit}
           onChange={(e) => {
-            // Allow free typing - accept empty or numeric values
-            const rawValue = e.target.value.replace(/[^0-9]/g, '');
+            // Whole points only: reject (don't silently rewrite) input such
+            // as "1.50" or "-10", which stripping would turn into 150 / 10.
+            const rawValue = e.target.value;
+            if (!/^\d*$/.test(rawValue)) return;
             if (rawValue === '') {
               onFieldChange('initialDeposit', 0);
             } else {

@@ -4,10 +4,10 @@ import type {
   FeedEventAction,
   FeedSurface,
   NarrativeStory,
-} from '@babylon/shared';
+} from '@feed/shared';
 import { Loader2 } from 'lucide-react';
 import { useRouter } from 'next/navigation';
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { useFeedEventTracker } from '@/app/feed/hooks';
 import {
   toArticleCardData,
@@ -45,7 +45,7 @@ export function ForYouFeedList({
 }: ForYouFeedListProps) {
   const router = useRouter();
   const { trackEvent } = useFeedEventTracker();
-  const allItems = useMemo(() => stories, [stories]);
+  const allItems = stories;
   const [visibleCount, setVisibleCount] = useState(PAGE_SIZE);
   const sentinelRef = useRef<HTMLDivElement>(null);
   const prevStoriesRef = useRef(stories);
@@ -57,8 +57,17 @@ export function ForYouFeedList({
   );
 
   useEffect(() => {
-    if (prevStoriesRef.current === stories) return;
+    const prev = prevStoriesRef.current;
+    if (prev === stories) return;
     prevStoriesRef.current = stories;
+    // Appending the next server page keeps the same head: keep the reveal
+    // window and impression tracking so the list does not collapse and
+    // already-seen stories are not counted twice.
+    const isAppend =
+      prev.length > 0 &&
+      stories.length >= prev.length &&
+      prev.every((story, i) => stories[i]?.storyKey === story.storyKey);
+    if (isAppend) return;
     setVisibleCount(PAGE_SIZE);
     impressionSentRef.current.clear();
     visibleSentRef.current.clear();

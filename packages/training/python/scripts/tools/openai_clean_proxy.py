@@ -8,7 +8,6 @@ import json
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
 from urllib.error import HTTPError
-from urllib.parse import urljoin
 from urllib.request import Request, urlopen
 
 TOOL_KEYS = {"tools", "tool_choice", "parallel_tool_calls", "tool_calls"}
@@ -40,7 +39,9 @@ class ProxyHandler(BaseHTTPRequestHandler):
     upstream_base_url = ""
 
     def _forward(self) -> None:
-        target_url = urljoin(self.upstream_base_url.rstrip("/") + "/", self.path.lstrip("/"))
+        # Concatenate instead of urljoin: an absolute-form request target
+        # (e.g. "http://other-host/...") would make urljoin leave the upstream.
+        target_url = self.upstream_base_url.rstrip("/") + "/" + self.path.lstrip("/")
         body = None
         if self.command in {"POST", "PUT", "PATCH"}:
             content_length = int(self.headers.get("Content-Length", "0") or 0)

@@ -1,7 +1,7 @@
 /**
  * Storage Module
  *
- * Services for storing models and training data to Vercel Blob.
+ * Services for storing models and training data to object storage (R2).
  */
 
 export {

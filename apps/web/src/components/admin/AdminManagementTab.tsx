@@ -1,6 +1,6 @@
 'use client';
 
-import { cn, formatDate } from '@babylon/shared';
+import { cn, formatDate } from '@feed/shared';
 import {
   AlertTriangle,
   RefreshCw,
@@ -28,7 +28,6 @@ interface AdminUser {
   isAdmin: boolean;
   createdAt: string;
   updatedAt: string;
-  hasFarcaster: boolean;
   hasTwitter: boolean;
 }
 
@@ -193,12 +192,6 @@ export function AdminManagementTab() {
 
             {/* Stats */}
             <div className="flex flex-wrap gap-4 text-muted-foreground text-sm">
-              {admin.hasFarcaster && (
-                <span className="flex items-center gap-1">
-                  <span className="text-purple-500">●</span>
-                  Farcaster
-                </span>
-              )}
               {admin.hasTwitter && (
                 <span className="flex items-center gap-1">
                   <span className="text-blue-500">●</span>

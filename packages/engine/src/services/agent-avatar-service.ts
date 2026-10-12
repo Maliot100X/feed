@@ -1,3 +1,5 @@
+import { generateSurplusImage } from './surplus-image-service';
+
 /**
  * Agent profile avatar generation via fal.ai (Nano Banana 2).
  *
@@ -6,8 +8,8 @@
  * that style; otherwise text-to-image with a detailed style prompt.
  */
 
-import { logger } from '@babylon/shared';
 import { fal } from '@fal-ai/client';
+import { getSurplusConfig, logger } from '@feed/shared';
 import { formatError } from '../utils/error-utils';
 import {
   initFalClient,
@@ -96,6 +98,13 @@ export async function generateAgentMonkeyProfileImage(
       : process.env.AGENT_AVATAR_REFERENCE_IMAGE_URL?.trim() || null;
 
   try {
+    if (getSurplusConfig())
+      return await generateSurplusImage({
+        prompt: referenceUrl
+          ? buildEditPrompt(params)
+          : buildTextToImagePrompt(params),
+        reference: referenceUrl,
+      });
     if (referenceUrl) {
       const result = (await fal.subscribe('fal-ai/nano-banana-2/edit', {
         input: {

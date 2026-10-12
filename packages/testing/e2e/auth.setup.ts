@@ -130,6 +130,7 @@ async function authenticateWithPrivy(
           document.querySelector('[data-privy]') !== null
         );
       },
+      undefined,
       { timeout: 45000 }
     );
     console.log('✅ Privy SDK detected');
@@ -243,6 +244,7 @@ async function authenticateWithPrivy(
           loginBtn !== undefined && !(loginBtn as HTMLButtonElement).disabled
         );
       },
+      undefined,
       { timeout: 45000 }
     );
     console.log('✅ Login button is enabled (Privy ready)');
@@ -349,8 +351,9 @@ async function authenticateWithPrivy(
                 text.includes('sign in')
               );
             });
-            return btn !== null && !(btn as HTMLButtonElement).disabled;
+            return btn !== undefined && !btn.disabled;
           },
+          undefined,
           { timeout: 15000 }
         )
         .catch(() => {
@@ -523,7 +526,7 @@ async function authenticateWithPrivy(
     const otp = process.env.PRIVY_TEST_OTP;
 
     if (otp) {
-      console.log(`⌨️ Filling OTP from environment: ${otp}`);
+      console.log('⌨️ Filling OTP from environment');
       // Privy often uses 6 separate inputs or one input.
       // Best strategy is to focus the input and type the code
 

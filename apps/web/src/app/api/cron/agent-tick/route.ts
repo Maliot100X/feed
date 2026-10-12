@@ -60,23 +60,22 @@ import {
   getAutonomousFeatures,
   hasAnyAutonomousFeature,
   releaseAgentLock,
-} from '@babylon/agents';
+  withAgentExecutionLease,
+} from '@feed/agents';
 import {
   DistributedLockService,
   recordCronExecution,
   relayCronToStaging,
   verifyCronAuth,
   withErrorHandling,
-} from '@babylon/api';
-import type { User, UserAgentConfig } from '@babylon/db';
-import { db, eq, inArray, userAgentConfigs, users } from '@babylon/db';
-import { GROQ_MODELS, logger } from '@babylon/shared';
+} from '@feed/api';
+import type { User, UserAgentConfig } from '@feed/db';
+import { db, eq, inArray, userAgentConfigs, users } from '@feed/db';
+import { GROQ_MODELS, logger } from '@feed/shared';
 import type { NextRequest } from 'next/server';
 import { NextResponse } from 'next/server';
 import { ensureEngineServices } from '@/lib/engine/ensure-engine-services';
 
-// Vercel function configuration
-export const maxDuration = 300; // 5 minutes max - reduced from 800s to prevent long lock holds
 export const dynamic = 'force-dynamic';
 
 /**
@@ -572,21 +571,21 @@ export const POST = withErrorHandling(async function POST(_req: NextRequest) {
         continue;
       }
 
-      // Only deduct points if cost is greater than 0
-      if (TICK_POINTS_COST > 0) {
-        // CRITICAL: Deduct points immediately after lock acquisition, BEFORE tick execution.
-        // This ensures points are always charged once we commit to running the tick.
-        // If we deducted after tick execution, errors in executeAutonomousTick() would
-        // skip the deduction (catch block), allowing agents to get free actions on errors.
-        await agentService.deductPoints(
-          eligibleAgent.user.id,
-          TICK_POINTS_COST,
-          'Autonomous tick'
-        );
-      }
-
-      // Process agent with error handling to ensure lock is always released
+      // Keep charging inside the lock cleanup boundary.
       try {
+        // Only deduct points if cost is greater than 0
+        if (TICK_POINTS_COST > 0) {
+          // CRITICAL: Deduct points immediately after lock acquisition, BEFORE tick execution.
+          // This ensures points are always charged once we commit to running the tick.
+          // If we deducted after tick execution, errors in executeAutonomousTick() would
+          // skip the deduction (catch block), allowing agents to get free actions on errors.
+          await agentService.deductPoints(
+            eligibleAgent.user.id,
+            TICK_POINTS_COST,
+            'Autonomous tick'
+          );
+        }
+
         // Determine enabled features from agent config
         const features = getAutonomousFeatures(eligibleAgent.config);
         const enabledFeatures: string[] = [];
@@ -602,49 +601,31 @@ export const POST = withErrorHandling(async function POST(_req: NextRequest) {
           'AgentTick'
         );
 
-        // Always record trajectories for RL training data collection.
-        // The timeout must cover runtime acquisition as well as the
-        // autonomous tick; otherwise a stalled runtime build can pin the
-        // entire cron request and never reach the error/logging path.
-        //
-        // Note on timeout behavior: when timeout fires, the underlying work
-        // can continue in the background. We still surface the timeout in the
-        // cron response and persist the failure log/config update so the
-        // system remains observable and the HTTP request does not hang.
-        let timeoutId: ReturnType<typeof setTimeout> | undefined;
-        const tickResult = await Promise.race([
-          (async () => {
+        // Await cancellation and in-flight work before releasing ownership.
+        const tickResult = await withAgentExecutionLease(
+          eligibleAgent.agentId,
+          processId,
+          async (signal) => {
             const runtime = await agentRuntimeManager.getRuntime(
               eligibleAgent.agentId
             );
+            signal.throwIfAborted();
             return autonomousCoordinator.executeAutonomousTick(
               eligibleAgent.user.id,
               runtime,
-              true, // Always record trajectories
-              false // isNpc = false for user agents
+              true,
+              false,
+              signal
             );
-          })(),
-          new Promise<never>((_, reject) => {
-            timeoutId = setTimeout(() => {
-              logger.warn(
-                `Agent ${eligibleAgent.name} timed out after ${
-                  PER_AGENT_TIMEOUT_MS / 1000
-                }s - execution continues in background`,
-                { agentId: eligibleAgent.agentId },
-                'AgentTick'
-              );
-              reject(
-                new AgentTimeoutError(
-                  eligibleAgent.agentId,
-                  PER_AGENT_TIMEOUT_MS
-                )
-              );
-            }, PER_AGENT_TIMEOUT_MS);
-          }),
-        ]).finally(() => {
-          // Clear timeout to prevent timer leak when main promise resolves first
-          if (timeoutId) clearTimeout(timeoutId);
-        });
+          },
+          {
+            timeoutMs: PER_AGENT_TIMEOUT_MS,
+            timeoutError: new AgentTimeoutError(
+              eligibleAgent.agentId,
+              PER_AGENT_TIMEOUT_MS
+            ),
+          }
+        );
 
         // Validation: Verify tick executed successfully
         if (!tickResult.success) {

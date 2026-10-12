@@ -1,0 +1,17 @@
+{
+  "kind": "slop-project-authority",
+  "policyRevision": "2026-10-11.1",
+  "projectId": "feed",
+  "proposal": "https://github.com/SlopDotCash/slopdotcash/issues/645",
+  "repository": {
+    "fullName": "feedforagents/feed",
+    "id": "1083451760",
+    "integrationBranch": "staging"
+  },
+  "schemaVersion": "1",
+  "steward": {
+    "actorId": "246782978",
+    "login": "feedforagents",
+    "nodeId": "O_kgDODrWcAg"
+  }
+}

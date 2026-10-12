@@ -1,3 +1,5 @@
+import { generateSurplusImage } from './surplus-image-service';
+
 /**
  * Article Image Generation Service
  *
@@ -12,8 +14,8 @@
  * via ArticleGenerator's character mapping. No additional name sanitization needed here.
  */
 
-import { logger } from '@babylon/shared';
 import { fal } from '@fal-ai/client';
+import { getSurplusConfig, logger } from '@feed/shared';
 import { articleCover, getRandomTwist, renderPrompt } from '../prompts';
 import { formatError } from '../utils/error-utils';
 
@@ -41,6 +43,7 @@ interface ArticleImageParams {
  * Should be called once at startup
  */
 export function initFalClient(): boolean {
+  if (getSurplusConfig()) return true;
   const falKey = process.env.FAL_KEY;
   if (!falKey) {
     logger.warn(
@@ -62,7 +65,7 @@ export function initFalClient(): boolean {
  * Check if image generation is available
  */
 export function isImageGenerationAvailable(): boolean {
-  return Boolean(process.env.FAL_KEY);
+  return Boolean(process.env.SURPLUS_API_KEY || process.env.FAL_KEY);
 }
 
 /**
@@ -115,6 +118,12 @@ export async function generateArticleImage(
   // fal.ai can fail for: network issues, rate limits, API changes, timeouts.
   let result: FalResponse;
   try {
+    if (getSurplusConfig())
+      return await generateSurplusImage({
+        prompt,
+        landscape: true,
+        persist: true,
+      });
     result = (await fal.subscribe('fal-ai/nano-banana-2', {
       input: {
         prompt,

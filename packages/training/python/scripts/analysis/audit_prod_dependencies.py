@@ -12,7 +12,7 @@ def main() -> int:
     parser = argparse.ArgumentParser(description="Audit the pinned RLVR production lockfile.")
     parser.add_argument(
         "--requirements",
-        default=str(Path(__file__).resolve().parents[1] / "requirements-prod.lock.txt"),
+        default=str(Path(__file__).resolve().parents[2] / "requirements-prod.lock.txt"),
         help="Pinned requirements lock file to audit.",
     )
     parser.add_argument(

@@ -15,9 +15,8 @@ function hasDsn(): boolean {
 function resolveCliRelease(): string | undefined {
   return (
     process.env.SENTRY_RELEASE ??
-    process.env.VERCEL_GIT_COMMIT_SHA ??
-    process.env.NEXT_PUBLIC_SENTRY_RELEASE ??
-    process.env.NEXT_PUBLIC_VERCEL_GIT_COMMIT_SHA
+    process.env.COMMIT_SHA ??
+    process.env.NEXT_PUBLIC_SENTRY_RELEASE
   );
 }
 

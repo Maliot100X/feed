@@ -22,7 +22,7 @@ export function isAbsoluteUrl(url: string): boolean {
  * @description In Next.js, files in /public are served from the root path /.
  * This function supports both:
  * - Legacy public folder assets (during migration)
- * - CDN assets (Vercel Blob in production, MinIO in dev)
+ * - CDN assets (R2 in production, MinIO in dev)
  *
  * @param {string} path - Path to the asset
  * @param {string} [cdnBaseUrl] - Optional CDN base URL (defaults to NEXT_PUBLIC_STATIC_ASSETS_URL)
@@ -128,7 +128,7 @@ export function parseAgentPresetProfileIndex(
  * Get actor/user profile image URL
  *
  * @description Tries multiple sources in order:
- * 1. Uploaded profile image URL (from CDN storage - Vercel Blob or MinIO)
+ * 1. Uploaded profile image URL (from CDN storage - R2 or MinIO)
  * 2. Static actor image from CDN or public/images/actors/
  * 3. Returns null if not found (Avatar component will handle fallback on error)
  *

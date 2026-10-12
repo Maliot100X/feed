@@ -75,8 +75,8 @@ export const TransactionHashSchema = z
  * Pagination schema for list endpoints
  */
 export const PaginationSchema = z.object({
-  page: z.coerce.number().positive().default(1),
-  limit: z.coerce.number().positive().max(100).default(20),
+  page: z.coerce.number().int().positive().default(1),
+  limit: z.coerce.number().int().positive().max(100).default(20),
   sortBy: z.string().optional(),
   sortOrder: z.enum(['asc', 'desc']).default('desc'),
 });
@@ -326,14 +326,16 @@ export const TrimmedStringSchema = z.string().transform((val) => val.trim());
  * Helper to create a trimmed string with min/max validation
  */
 export function createTrimmedStringSchema(min?: number, max?: number) {
-  let schema = z.string();
+  // Trim first so length limits apply to the stored value
+  // (whitespace-only input must not satisfy a minimum length).
+  let schema = z.string().trim();
   if (min !== undefined) {
     schema = schema.min(min);
   }
   if (max !== undefined) {
     schema = schema.max(max);
   }
-  return schema.transform((val) => val.trim());
+  return schema;
 }
 
 /**
@@ -341,9 +343,38 @@ export function createTrimmedStringSchema(min?: number, max?: number) {
  */
 export const SearchQuerySchema = z
   .string()
+  .trim()
   .min(1, 'Search query cannot be empty')
   .max(100, 'Search query too long')
-  .transform((val) => val.trim().toLowerCase());
+  .toLowerCase();
+
+const QueryBooleanValueSchema = z.union([
+  z.boolean(),
+  z.enum(['true', 'false']).transform((val) => val === 'true'),
+]);
+
+/**
+ * Query-string boolean. Accepts real booleans or the exact strings
+ * 'true'/'false'; absent values (undefined, null from
+ * URLSearchParams.get, or '') parse to undefined. Any other string is
+ * rejected. Unlike z.coerce.boolean, 'false' parses to false.
+ */
+export const OptionalQueryBooleanSchema = z.preprocess(
+  (val) => (val === null || val === '' ? undefined : val),
+  QueryBooleanValueSchema.optional()
+);
+
+/**
+ * Query-string boolean with a default for absent values.
+ * See {@link OptionalQueryBooleanSchema} for accepted inputs.
+ */
+export function createQueryBooleanSchema(defaultValue: boolean) {
+  return z.preprocess(
+    (val) =>
+      val === null || val === undefined || val === '' ? defaultValue : val,
+    QueryBooleanValueSchema
+  );
+}
 
 /**
  * File upload schema

@@ -18,13 +18,10 @@
  * - 404 — No matching entity
  */
 
-import {
-  findUserByIdentifierWithSelect,
-  withErrorHandling,
-} from '@babylon/api';
-import { users } from '@babylon/db';
-import { loadActorsData } from '@babylon/engine';
-import { extractUsername } from '@babylon/shared';
+import { findUserByIdentifierWithSelect, withErrorHandling } from '@feed/api';
+import { users } from '@feed/db';
+import { loadActorsData } from '@feed/engine';
+import { extractUsername } from '@feed/shared';
 import type { NextRequest } from 'next/server';
 import { NextResponse } from 'next/server';
 

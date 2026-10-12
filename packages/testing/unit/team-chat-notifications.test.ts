@@ -17,14 +17,14 @@ const mockDbSelect = mock(() => {
   return nextBuilder();
 });
 
-const _actualBabylonApi = await import('@babylon/api');
-mock.module('@babylon/api', () => ({
-  ..._actualBabylonApi,
+const _actualFeedApi = await import('@feed/api');
+mock.module('@feed/api', () => ({
+  ..._actualFeedApi,
   createNotification: mockCreateNotification,
 }));
 
-const _actualDb = await import('@babylon/db');
-mock.module('@babylon/db', () => ({
+const _actualDb = await import('@feed/db');
+mock.module('@feed/db', () => ({
   ..._actualDb,
   and: (...conditions: unknown[]) => conditions,
   chatParticipants: {
@@ -48,8 +48,8 @@ mock.module('@babylon/db', () => ({
   },
 }));
 
-const _actualShared = await import('@babylon/shared');
-mock.module('@babylon/shared', () => ({
+const _actualShared = await import('@feed/shared');
+mock.module('@feed/shared', () => ({
   ..._actualShared,
   logger: mockLogger,
 }));
@@ -153,7 +153,7 @@ describe('notifyTeamChatMessage', () => {
     expect(mockLogger.warn).not.toHaveBeenCalled();
   });
 
-  it('logs and swallows notification failures', async () => {
+  it('logs and propagates notification failures', async () => {
     queueSenderSelect([
       { displayName: 'Apex Force', username: 'apexforce890569' },
     ]);
@@ -161,12 +161,14 @@ describe('notifyTeamChatMessage', () => {
     queueChatSelect([{ name: 'Agents' }]);
     mockCreateNotification.mockRejectedValueOnce(new Error('db unavailable'));
 
-    await notifyTeamChatMessage({
-      chatId: 'chat-1',
-      messageId: 'message-1',
-      senderId: 'agent-1',
-      messagePreview: 'Closed NVDAI.',
-    });
+    await expect(
+      notifyTeamChatMessage({
+        chatId: 'chat-1',
+        messageId: 'message-1',
+        senderId: 'agent-1',
+        messagePreview: 'Closed NVDAI.',
+      })
+    ).rejects.toThrow('db unavailable');
 
     expect(mockLogger.warn).toHaveBeenCalledTimes(1);
     expect(mockLogger.warn).toHaveBeenCalledWith(

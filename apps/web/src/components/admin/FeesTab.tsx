@@ -1,10 +1,6 @@
 'use client';
 
-import {
-  BABYLON_POINTS_SYMBOL,
-  cn,
-  formatCompactCurrency,
-} from '@babylon/shared';
+import { cn, FEED_POINTS_SYMBOL, formatCompactCurrency } from '@feed/shared';
 import { Award, DollarSign, RefreshCw, TrendingUp, Users } from 'lucide-react';
 import { useCallback, useEffect, useState, useTransition } from 'react';
 import {
@@ -19,7 +15,7 @@ import {
 import { z } from 'zod';
 import { Avatar } from '@/components/shared/Avatar';
 import { Skeleton } from '@/components/shared/Skeleton';
-import { apiUrl } from '@/utils/api-url';
+import { apiFetch } from '@/utils/api-fetch';
 
 /**
  * Fee statistics schema for validation.
@@ -115,15 +111,22 @@ export function FeesTab() {
 
   const fetchStats = useCallback(() => {
     startRefresh(async () => {
-      const response = await fetch(apiUrl('/api/admin/fees'));
-      if (!response.ok) {
-        throw new Error(`Failed to fetch fee statistics: ${response.status}`);
+      try {
+        const response = await apiFetch('/api/admin/fees');
+        if (!response.ok) {
+          throw new Error(`Failed to fetch fee statistics: ${response.status}`);
+        }
+        const validated = FeeStatsSchema.parse(await response.json());
+        setStats(validated);
+        setError(null);
+      } catch (err) {
+        // Network, HTTP and schema failures all reach the error UI.
+        setError(
+          err instanceof Error ? err.message : 'Failed to fetch fee statistics'
+        );
+      } finally {
+        setLoading(false);
       }
-      const data = await response.json();
-      const validated = FeeStatsSchema.parse(data);
-      setStats(validated);
-      setError(null);
-      setLoading(false);
     });
   }, []);
 
@@ -286,7 +289,7 @@ export function FeesTab() {
             <YAxis
               stroke="#888"
               fontSize={12}
-              tickFormatter={(value) => `${BABYLON_POINTS_SYMBOL}${value}`}
+              tickFormatter={(value) => `${FEED_POINTS_SYMBOL}${value}`}
             />
             <Tooltip
               contentStyle={{
@@ -299,7 +302,7 @@ export function FeesTab() {
                   ? Number(value[0] ?? 0)
                   : Number(value ?? 0);
                 return [
-                  `${BABYLON_POINTS_SYMBOL}${numericValue.toFixed(2)}`,
+                  `${FEED_POINTS_SYMBOL}${numericValue.toFixed(2)}`,
                   'Fees',
                 ];
               }}

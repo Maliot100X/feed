@@ -13,8 +13,8 @@ export const BlockUserSchema = z.object({
 });
 
 export const GetBlocksSchema = z.object({
-  limit: z.coerce.number().min(1).max(100).default(20),
-  offset: z.coerce.number().min(0).default(0),
+  limit: z.coerce.number().int().min(1).max(100).default(20),
+  offset: z.coerce.number().int().min(0).default(0),
 });
 
 // ============ Mute Schemas ============
@@ -25,8 +25,8 @@ export const MuteUserSchema = z.object({
 });
 
 export const GetMutesSchema = z.object({
-  limit: z.coerce.number().min(1).max(100).default(20),
-  offset: z.coerce.number().min(0).default(0),
+  limit: z.coerce.number().int().min(1).max(100).default(20),
+  offset: z.coerce.number().int().min(0).default(0),
 });
 
 // ============ Report Schemas ============
@@ -80,8 +80,8 @@ export const UpdateReportSchema = z.object({
 });
 
 export const GetReportsSchema = z.object({
-  limit: z.coerce.number().min(1).max(100).default(50),
-  offset: z.coerce.number().min(0).default(0),
+  limit: z.coerce.number().int().min(1).max(100).default(50),
+  offset: z.coerce.number().int().min(0).default(0),
   status: ReportStatusEnum.optional(),
   category: ReportCategoryEnum.optional(),
   priority: ReportPriorityEnum.optional(),

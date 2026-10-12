@@ -12,9 +12,9 @@ import {
   requireAdmin,
   successResponse,
   withErrorHandling,
-} from '@babylon/api';
-import { db, eq, questions } from '@babylon/db';
-import { logger, toISO } from '@babylon/shared';
+} from '@feed/api';
+import { db, eq, questions } from '@feed/db';
+import { logger, toISO } from '@feed/shared';
 import type { NextRequest } from 'next/server';
 import { z } from 'zod';
 
@@ -40,7 +40,7 @@ export const POST = withErrorHandling(
     const admin = await requireAdmin(request);
 
     // Rate limit admin actions to prevent accidental rapid-fire approvals/rejections
-    const rateLimitResponse = checkRateLimitAndDuplicates(
+    const rateLimitResponse = await checkRateLimitAndDuplicates(
       admin.userId,
       null,
       RATE_LIMIT_CONFIGS.ADMIN_ACTION

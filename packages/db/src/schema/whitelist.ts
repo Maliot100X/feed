@@ -3,7 +3,7 @@ import { index, integer, pgTable, text, timestamp } from 'drizzle-orm/pg-core';
 import { users } from './users';
 
 /**
- * Whitelist - Stores individually whitelisted users who bypass NFT gating.
+ * Whitelist - Stores individually whitelisted users with platform access.
  *
  * Users can be whitelisted via:
  * - `snapshot_first_100`: Imported from end-of-year top-100 snapshot

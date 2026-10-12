@@ -19,7 +19,7 @@
   "snapshot": {
     "id": "scenario-scandal-unfolds-v1",
     "version": "1.0.0",
-    "createdAt": 1774399868367,
+    "createdAt": 1735689600000,
     "duration": 1900800,
     "tickInterval": 3600,
     "initialState": {
@@ -95,8 +95,8 @@
       "perpetualMarkets": [
         {
           "ticker": "BTCAI",
-          "price": 150070.03573060367,
-          "priceChange24h": 1.1040768985982365,
+          "price": 120000,
+          "priceChange24h": 0,
           "volume24h": 2000000,
           "openInterest": 800000,
           "fundingRate": 0.0001,
@@ -104,8 +104,8 @@
         },
         {
           "ticker": "ETHAI",
-          "price": 4959.155703955765,
-          "priceChange24h": 0.9753088548181666,
+          "price": 4000,
+          "priceChange24h": 0,
           "volume24h": 1500000,
           "openInterest": 600000,
           "fundingRate": 0.00005,
@@ -113,8 +113,8 @@
         },
         {
           "ticker": "SOLAI",
-          "price": 247.6943579195881,
-          "priceChange24h": 0.9743311442771179,
+          "price": 200,
+          "priceChange24h": 0,
           "volume24h": 800000,
           "openInterest": 400000,
           "fundingRate": 0.00008,
@@ -122,8 +122,8 @@
         },
         {
           "ticker": "TSLAI",
-          "price": 271.92118656722187,
-          "priceChange24h": -0.2729691786622541,
+          "price": 450,
+          "priceChange24h": 0,
           "volume24h": 1200000,
           "openInterest": 500000,
           "fundingRate": 0.0001,
@@ -131,8 +131,8 @@
         },
         {
           "ticker": "METAI",
-          "price": 653.3004920821035,
-          "priceChange24h": 1.1278739587195483,
+          "price": 520,
+          "priceChange24h": 0,
           "volume24h": 900000,
           "openInterest": 450000,
           "fundingRate": 0.00007,

@@ -7,10 +7,9 @@ from pathlib import Path
 
 import pytest
 
-SCRIPT_PATH = Path(__file__).resolve().parent.parent / "scripts" / "manage_rlvr_release.py"
-
-if not SCRIPT_PATH.exists():
-    pytest.skip(f"script not found: {SCRIPT_PATH.name}", allow_module_level=True)
+SCRIPT_PATH = (
+    Path(__file__).resolve().parent.parent / "scripts" / "releases" / "manage_rlvr_release.py"
+)
 
 
 def build_report(path: Path, adapter: Path, score: Path, label: str) -> Path:

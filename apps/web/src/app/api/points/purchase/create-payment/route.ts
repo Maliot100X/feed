@@ -64,40 +64,96 @@
  * ```
  */
 
-import { authenticate, withErrorHandling } from '@babylon/api';
-import { logger } from '@babylon/shared';
+import { getSharedX402Manager } from '@feed/a2a';
+import { authenticate, withErrorHandling } from '@feed/api';
+import { db, eq, users } from '@feed/db';
+import { logger } from '@feed/shared';
+import { getAddress, isAddress, parseEther } from 'ethers';
 import type { NextRequest } from 'next/server';
 import { NextResponse } from 'next/server';
-import { getPointsPurchaseX402Manager } from '@/lib/points-purchase-x402';
+import { z } from 'zod';
 import { trackServerEvent } from '@/lib/posthog/server';
 
-// Payment receiver address (configure this in your environment)
-const PAYMENT_RECEIVER =
-  process.env.POINTS_PAYMENT_RECEIVER ||
-  process.env.NEXT_PUBLIC_TREASURY_ADDRESS ||
-  '0x0000000000000000000000000000000000000000';
+const CreatePaymentBodySchema = z.object({
+  amountUSD: z
+    .number()
+    .finite()
+    .positive()
+    .refine((value) => Math.abs(value * 100 - Math.round(value * 100)) < 1e-6, {
+      message: 'amountUSD must have at most 2 decimal places',
+    }),
+  fromAddress: z.string().refine(isAddress, 'Invalid wallet address'),
+});
 
-interface CreatePaymentBody {
-  amountUSD: number; // Amount in USD
-  fromAddress: string; // User's wallet address
+/** Payment receiver; requests are refused when it is not configured. */
+function getPaymentReceiver(): string | null {
+  const receiver =
+    process.env.POINTS_PAYMENT_RECEIVER ||
+    process.env.NEXT_PUBLIC_TREASURY_ADDRESS;
+  if (!receiver || !isAddress(receiver) || BigInt(receiver) === 0n) {
+    return null;
+  }
+  return getAddress(receiver);
 }
 
 export const POST = withErrorHandling(async function POST(req: NextRequest) {
   const authUser = await authenticate(req);
   const userId = authUser.dbUserId!;
 
-  const body: CreatePaymentBody = await req.json();
-  const { amountUSD, fromAddress } = body;
+  const parsed = CreatePaymentBodySchema.safeParse(await req.json());
+  if (!parsed.success) {
+    return NextResponse.json(
+      {
+        success: false,
+        error: parsed.error.issues[0]?.message ?? 'Invalid request',
+      },
+      { status: 400 }
+    );
+  }
+  const { amountUSD, fromAddress } = parsed.data;
 
-  const balanceUnits = Math.floor(amountUSD * 100);
+  const paymentReceiver = getPaymentReceiver();
+  if (!paymentReceiver) {
+    logger.error(
+      'Points payment receiver is not configured',
+      undefined,
+      'TradingBalanceFunding'
+    );
+    return NextResponse.json(
+      { success: false, error: 'Crypto purchases are not available' },
+      { status: 503 }
+    );
+  }
 
-  const ethEquivalent = amountUSD * 0.001;
-  const amountInWei = (ethEquivalent * 1_000_000_000_000_000_000).toString();
+  // The paying wallet must be the user's linked wallet: verification binds
+  // the on-chain sender to this address.
+  const [user] = await db
+    .select({ walletAddress: users.walletAddress })
+    .from(users)
+    .where(eq(users.id, userId))
+    .limit(1);
+  if (
+    !user?.walletAddress ||
+    user.walletAddress.toLowerCase() !== fromAddress.toLowerCase()
+  ) {
+    return NextResponse.json(
+      {
+        success: false,
+        error: 'fromAddress must be the wallet linked to your account',
+      },
+      { status: 400 }
+    );
+  }
 
-  const x402Manager = await getPointsPurchaseX402Manager();
+  const balanceUnits = Math.round(amountUSD * 100);
+
+  // Existing conversion policy: 1 USD = 0.001 ETH.
+  const amountInWei = parseEther((amountUSD * 0.001).toFixed(18)).toString();
+
+  const x402Manager = await getSharedX402Manager();
   const paymentRequest = await x402Manager.createPaymentRequest(
-    fromAddress,
-    PAYMENT_RECEIVER,
+    getAddress(fromAddress),
+    paymentReceiver,
     amountInWei,
     'trading_balance_purchase',
     {

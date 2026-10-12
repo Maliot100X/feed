@@ -1,10 +1,10 @@
 import 'server-only';
 
-import { findUserByIdentifier } from '@babylon/api';
-import { asPublic, asUser, db, eq, users } from '@babylon/db';
-import { FEE_CONFIG } from '@babylon/engine/config/fees';
-import { toISO, toISOOrNull } from '@babylon/shared';
-import { calculatePredictionPositionSnapshot } from '@/lib/wallet/predictionPositionSnapshot';
+import { findUserByIdentifier } from '@feed/api';
+import { calculatePredictionPositionSnapshot } from '@feed/core/markets/prediction';
+import { asPublic, asUser, db, eq, users } from '@feed/db';
+import { FEE_CONFIG } from '@feed/engine/config/fees';
+import { toISO, toISOOrNull } from '@feed/shared';
 import type {
   UserPerpPositionSnapshot,
   UserPositionsSnapshot,
@@ -174,8 +174,16 @@ export async function getUserPositionsSnapshot({
 
   const closedAtFilter =
     status === 'closed' ? { not: null } : status === 'all' ? undefined : null;
+  // Open prediction positions are exactly the 'active' ones; resolved or
+  // closed positions belong to the closed view.
   const predictionStatusFilter =
-    status === 'closed' ? { in: ['closed', 'resolved'] } : undefined;
+    status === 'closed'
+      ? { in: ['closed', 'resolved'] }
+      : status === 'open'
+        ? 'active'
+        : undefined;
+  const includePerps = type !== 'prediction';
+  const includePredictions = type !== 'perp';
 
   const userAgents = await asPublic(async () => {
     return db
@@ -197,39 +205,42 @@ export async function getUserPositionsSnapshot({
       positionUserIds.length === 1 ? canonicalUserId : { in: positionUserIds },
     ...(predictionStatusFilter ? { status: predictionStatusFilter } : {}),
   };
-  const mappedPerps = await loadDbPerpPositions({
-    viewerUserId,
-    canonicalUserId,
-    positionUserIds,
-    closedAtFilter,
-    agentIds,
-    agentNameById,
-  });
-
-  const [userPredictionPositions, agentPredictionPositions] = await Promise.all(
-    [
-      readWithViewer({
+  const mappedPerps = includePerps
+    ? await loadDbPerpPositions({
         viewerUserId,
-        operation: async (database) => {
-          return database.position.findMany({
-            where: predictionWhereBase,
-          });
-        },
-      }),
-      agentIds.length > 0
-        ? asPublic(async (database) => {
+        canonicalUserId,
+        positionUserIds,
+        closedAtFilter,
+        agentIds,
+        agentNameById,
+      })
+    : [];
+
+  // type=perp must not load (or fail on) prediction positions.
+  const [userPredictionPositions, agentPredictionPositions] = includePredictions
+    ? await Promise.all([
+        readWithViewer({
+          viewerUserId,
+          operation: async (database) => {
             return database.position.findMany({
-              where: {
-                userId: { in: agentIds },
-                ...(predictionStatusFilter
-                  ? { status: predictionStatusFilter }
-                  : {}),
-              },
+              where: predictionWhereBase,
             });
-          })
-        : Promise.resolve([]),
-    ]
-  );
+          },
+        }),
+        agentIds.length > 0
+          ? asPublic(async (database) => {
+              return database.position.findMany({
+                where: {
+                  userId: { in: agentIds },
+                  ...(predictionStatusFilter
+                    ? { status: predictionStatusFilter }
+                    : {}),
+                },
+              });
+            })
+          : Promise.resolve([]),
+      ])
+    : [[], []];
 
   const allPredictionPositions = [
     ...userPredictionPositions.map((position) => ({
@@ -285,11 +296,11 @@ export async function getUserPositionsSnapshot({
 
       const shares = Number(position.shares);
       const avgPrice = Number(position.avgPrice);
-      const sideKey = position.side ? 'yes' : 'no';
+      const side = position.side ? 'yes' : 'no';
       const snapshot = calculatePredictionPositionSnapshot({
         shares,
         avgPrice,
-        sideKey,
+        side,
         yesShares: Number(market.yesShares),
         noShares: Number(market.noShares),
         feeRate: FEE_CONFIG.TRADING_FEE_RATE,
@@ -352,14 +363,14 @@ export async function getUserPositionsSnapshot({
     );
   }
 
-  const paginatedPerps =
-    status === 'closed'
-      ? filteredPerps.slice((page - 1) * limit, page * limit)
-      : filteredPerps;
-  const paginatedPredictions =
-    status === 'closed'
-      ? filteredPredictions.slice((page - 1) * limit, page * limit)
-      : filteredPredictions;
+  // Only the closed view is paginated; open/all views return everything.
+  const isPaginated = status === 'closed';
+  const paginatedPerps = isPaginated
+    ? filteredPerps.slice((page - 1) * limit, page * limit)
+    : filteredPerps;
+  const paginatedPredictions = isPaginated
+    ? filteredPredictions.slice((page - 1) * limit, page * limit)
+    : filteredPredictions;
 
   return {
     perpetuals: {
@@ -369,7 +380,7 @@ export async function getUserPositionsSnapshot({
           ? { totalPositions: 0, totalPnL: 0, totalFunding: 0 }
           : perpStats,
       total: filteredPerps.length,
-      hasMore: page * limit < filteredPerps.length,
+      hasMore: isPaginated && page * limit < filteredPerps.length,
     },
     predictions: {
       positions: paginatedPredictions,
@@ -377,7 +388,7 @@ export async function getUserPositionsSnapshot({
         totalPositions: filteredPredictions.length,
       },
       total: filteredPredictions.length,
-      hasMore: page * limit < filteredPredictions.length,
+      hasMore: isPaginated && page * limit < filteredPredictions.length,
     },
     timestamp: new Date().toISOString(),
   };

@@ -1,12 +1,12 @@
 'use client';
 
-import { getReferralUrl } from '@babylon/shared';
+import { getReferralUrl } from '@feed/shared';
 import { Check, Copy, ExternalLink, Trophy, X } from 'lucide-react';
 import Link from 'next/link';
 import { useEffect, useState } from 'react';
-import { getAuthToken } from '@/lib/auth';
 import { useAuthStore } from '@/stores/authStore';
-import { apiUrl } from '@/utils/api-url';
+import { apiFetch } from '@/utils/api-fetch';
+import { readStorageItem, writeStorageItem } from '@/utils/browser-storage';
 
 /**
  * Invite friends banner component for referral program.
@@ -31,41 +31,40 @@ export function InviteFriendsBanner({ onDismiss }: InviteFriendsBannerProps) {
   const { user, setUser } = useAuthStore();
   const [copiedReferral, setCopiedReferral] = useState(false);
 
+  const userId = user?.id ?? null;
+
   useEffect(() => {
+    if (!userId) return;
+    const controller = new AbortController();
+    const viewKey = `banner_view_${userId}`;
+
     const trackBannerView = async () => {
-      if (!user?.id) return;
-
-      const token = getAuthToken();
-      if (!token) return;
-
-      // Track banner view in local storage
-      const viewKey = `banner_view_${user.id}`;
-      const lastView = localStorage.getItem(viewKey);
+      const lastView = Number(readStorageItem('localStorage', viewKey) ?? 0);
       const now = Date.now();
+      // Server tracking at most once per day. Only a *successful* report
+      // updates the timestamp — writing it on every render kept pushing it
+      // forward and suppressed server tracking indefinitely.
+      if (lastView && now - lastView <= 86_400_000) return;
 
-      // Store this view
-      localStorage.setItem(viewKey, now.toString());
-
-      // Update server if more than 1 day since last tracked
-      if (!lastView || now - parseInt(lastView) > 86400000) {
-        await fetch(
-          `/api/users/${encodeURIComponent(user.id)}/update-profile`,
-          {
-            method: 'POST',
-            headers: {
-              Authorization: `Bearer ${token}`,
-              'Content-Type': 'application/json',
-            },
-            body: JSON.stringify({
-              bannerLastShown: new Date().toISOString(),
-            }),
-          }
-        );
-      }
+      const response = await apiFetch(
+        `/api/users/${encodeURIComponent(userId)}/update-profile`,
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            bannerLastShown: new Date(now).toISOString(),
+          }),
+          signal: controller.signal,
+        }
+      );
+      if (response.ok) writeStorageItem('localStorage', viewKey, String(now));
     };
 
-    trackBannerView();
-  }, [user]);
+    void trackBannerView().catch(() => {
+      // Best-effort telemetry: retried on a later visit.
+    });
+    return () => controller.abort();
+  }, [userId]);
 
   const handleCopyReferral = async (e: React.MouseEvent) => {
     e.preventDefault();
@@ -76,49 +75,41 @@ export function InviteFriendsBanner({ onDismiss }: InviteFriendsBannerProps) {
     setTimeout(() => setCopiedReferral(false), 2000);
   };
 
-  const handleDismiss = async (e: React.MouseEvent) => {
+  const handleDismiss = (e: React.MouseEvent) => {
     e.preventDefault();
     e.stopPropagation();
 
-    if (!user?.id) return;
+    if (!userId) return;
 
-    // Track dismiss in local storage
-    const dismissKey = `banner_dismiss_${user.id}`;
-    const dismissCount = parseInt(localStorage.getItem(dismissKey) || '0');
-    localStorage.setItem(dismissKey, (dismissCount + 1).toString());
-    localStorage.setItem(
-      `banner_dismiss_time_${user.id}`,
+    // Close immediately; reporting the dismissal must not block the UI.
+    onDismiss?.();
+
+    const dismissKey = `banner_dismiss_${userId}`;
+    const dismissCount =
+      Number(readStorageItem('localStorage', dismissKey) ?? 0) + 1;
+    writeStorageItem('localStorage', dismissKey, String(dismissCount));
+    writeStorageItem(
+      'localStorage',
+      `banner_dismiss_time_${userId}`,
       Date.now().toString()
     );
 
-    // Update server
-    const token = getAuthToken();
-    if (token) {
-      await fetch(
-        apiUrl(`/api/users/${encodeURIComponent(user.id)}/update-profile`),
-        {
-          method: 'POST',
-          headers: {
-            Authorization: `Bearer ${token}`,
-            'Content-Type': 'application/json',
-          },
-          body: JSON.stringify({
-            bannerDismissCount: dismissCount + 1,
-          }),
+    void apiFetch(`/api/users/${encodeURIComponent(userId)}/update-profile`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ bannerDismissCount: dismissCount }),
+    })
+      .then((response) => {
+        if (!response.ok) return;
+        // Patch the *current* user only if it is still the same account.
+        const current = useAuthStore.getState().user;
+        if (current?.id === userId) {
+          setUser({ ...current, bannerDismissCount: dismissCount });
         }
-      );
-
-      // Update local user state
-      if (user) {
-        setUser({
-          ...user,
-          bannerDismissCount: dismissCount + 1,
-        });
-      }
-    }
-
-    // Call parent dismiss handler
-    onDismiss?.();
+      })
+      .catch(() => {
+        // Best-effort: the local dismissal already took effect.
+      });
   };
 
   if (!user?.referralCode) {

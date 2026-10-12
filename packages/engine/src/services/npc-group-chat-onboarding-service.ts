@@ -21,8 +21,8 @@ import {
   messages,
   sql,
   users,
-} from '@babylon/db';
-import { generateSnowflakeId, logger } from '@babylon/shared';
+} from '@feed/db';
+import { generateSnowflakeId, logger } from '@feed/shared';
 import { type RngFunction, sampleRandom } from '../utils/randomization';
 
 function isTestEnvironment(): boolean {
@@ -188,7 +188,7 @@ export async function autoJoinEmptyUsersToNpcGroupChats(
     return 0;
   }
 
-  // Candidate NPC group chats (exclude NFT-gated chats so new users aren't stuck).
+  // Candidate NPC group chats.
   const chatAllowlist =
     options.chatIdAllowlist && options.chatIdAllowlist.length > 0
       ? options.chatIdAllowlist
@@ -207,7 +207,6 @@ export async function autoJoinEmptyUsersToNpcGroupChats(
       and(
         eq(chats.isGroup, true),
         eq(groups.type, 'npc'),
-        eq(chats.nftGated, false),
         ...(chatAllowlist ? [inArray(chats.id, chatAllowlist)] : [])
       )
     )

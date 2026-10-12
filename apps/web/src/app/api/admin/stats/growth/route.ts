@@ -18,9 +18,9 @@ import {
   validateDateRange,
   validateEnum,
   withErrorHandling,
-} from '@babylon/api';
-import { db } from '@babylon/db';
-import { logger, toISO } from '@babylon/shared';
+} from '@feed/api';
+import { db } from '@feed/db';
+import { logger, toISO } from '@feed/shared';
 import type { NextRequest } from 'next/server';
 
 /** Valid period types for growth metrics */
@@ -86,7 +86,7 @@ function toDateStr(value: Date | string | null | undefined): string {
 export const GET = withErrorHandling(async (request: NextRequest) => {
   const admin = await requirePermission(request, 'view_stats');
 
-  const rateLimitResult = applyRateLimit(
+  const rateLimitResult = await applyRateLimit(
     admin.userId,
     RATE_LIMIT_CONFIGS.ADMIN_STATS
   );

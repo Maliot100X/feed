@@ -6,21 +6,40 @@
  * Falls back to in-memory storage when Redis is unavailable.
  */
 
-import { logger } from '@babylon/shared';
+import { logger } from '@feed/shared';
 
 import { randomUUID } from 'crypto';
 import { getRedisClient, isRedisAvailable } from '../redis/client';
 
 interface RateLimitRecord {
-  count: number;
-  windowStart: number;
   recentActions: number[]; // Timestamps of recent actions for sliding window
+  /** Window of the config that owns this record (for cleanup). */
+  windowMs: number;
 }
 
 interface RateLimitConfig {
   maxRequests: number;
   windowMs: number;
   actionType: string;
+}
+
+/**
+ * Read a positive integer from the environment; invalid values (zero,
+ * negative, fractional, non-numeric) fall back to the default with a warning.
+ */
+function parsePositiveIntegerEnv(name: string, fallback: number): number {
+  const raw = process.env[name];
+  if (raw === undefined || raw === '') return fallback;
+  const value = Number(raw);
+  if (!Number.isInteger(value) || value <= 0) {
+    logger.warn(
+      `Invalid ${name}, using default`,
+      { value: raw, default: fallback },
+      'RateLimiter'
+    );
+    return fallback;
+  }
+  return value;
 }
 
 // In-memory fallback store for when Redis is unavailable
@@ -184,20 +203,6 @@ export const RATE_LIMIT_CONFIGS = {
     actionType: 'public_balance_fetch_anonymous',
   }, // 10 fetches per minute for anonymous bucket (shared, stricter)
 
-  // NFT image proxy (IPFS gateway protection)
-  PUBLIC_NFT_IMAGE: {
-    maxRequests: 60,
-    windowMs: 60000,
-    actionType: 'public_nft_image',
-  }, // 60 image fetches per minute per IP
-
-  // Anonymous NFT image requests (stricter)
-  PUBLIC_NFT_IMAGE_ANONYMOUS: {
-    maxRequests: 10,
-    windowMs: 60000,
-    actionType: 'public_nft_image_anonymous',
-  }, // 10 fetches per minute for anonymous bucket
-
   // External agent endpoints
   EXTERNAL_AGENT_DISCOVER: {
     maxRequests: 60,
@@ -212,7 +217,7 @@ export const RATE_LIMIT_CONFIGS = {
 
   // A2A transfer operations (stricter limit for points/token transfers)
   A2A_TRANSFER_OPS: {
-    maxRequests: Number(process.env.A2A_TRANSFER_RATE_LIMIT) || 10,
+    maxRequests: parsePositiveIntegerEnv('A2A_TRANSFER_RATE_LIMIT', 10),
     windowMs: 60000,
     actionType: 'a2a_transfer_ops',
   }, // 10 transfers per minute (configurable via env)
@@ -271,9 +276,9 @@ export const RATE_LIMIT_CONFIGS = {
     maxRequests: 60,
     windowMs: 60000,
     actionType: 'wallet_read',
-  }, // 60 reads per minute per user (tokens, nfts, transactions)
+  }, // 60 reads per minute per user (tokens, transactions)
 
-  // Wallet write endpoints (sendToken, sendNft)
+  // Wallet write endpoints (sendToken)
   WALLET_TRANSFER: {
     maxRequests: 10,
     windowMs: 60000,
@@ -320,27 +325,6 @@ export async function checkRateLimitAsync(
     { userId, actionType: config.actionType },
     'RateLimiter'
   );
-  return checkRateLimitMemory(userId, config);
-}
-
-/**
- * Synchronous rate limit check using in-memory fallback.
- * Kept for backwards compatibility with existing code.
- * @deprecated Use checkRateLimitAsync for proper Redis-backed rate limiting
- */
-export function checkRateLimit(
-  userId: string,
-  config: RateLimitConfig
-): { allowed: boolean; retryAfter?: number; remaining?: number } {
-  // If Redis is available, we should be using the async version
-  // Log a warning in production to encourage migration
-  if (isRedisAvailable()) {
-    logger.warn(
-      'Using synchronous rate limit check with Redis available - consider using checkRateLimitAsync',
-      { userId, actionType: config.actionType },
-      'RateLimiter'
-    );
-  }
   return checkRateLimitMemory(userId, config);
 }
 
@@ -495,13 +479,10 @@ function checkRateLimitMemory(
   let record = memoryFallbackStore.get(key);
 
   if (!record) {
-    record = {
-      count: 0,
-      windowStart: now,
-      recentActions: [],
-    };
+    record = { recentActions: [], windowMs: config.windowMs };
     memoryFallbackStore.set(key, record);
   }
+  record.windowMs = Math.max(record.windowMs, config.windowMs);
 
   // Remove actions outside the current window (sliding window)
   const windowStart = now - config.windowMs;
@@ -537,8 +518,6 @@ function checkRateLimitMemory(
 
   // Record this action
   record.recentActions.push(now);
-  record.count = record.recentActions.length;
-  record.windowStart = now;
 
   const remaining = config.maxRequests - record.recentActions.length;
 
@@ -723,16 +702,14 @@ export async function getRateLimitStatus(
  * Redis handles this automatically via key expiration.
  * Call periodically to prevent memory leaks when using fallback.
  */
-export function cleanupMemoryRateLimits(): void {
-  const now = Date.now();
-  const maxAge = 5 * 60 * 1000; // 5 minutes
-
+export function cleanupMemoryRateLimits(now: number = Date.now()): void {
   let cleanedCount = 0;
 
   for (const [key, record] of memoryFallbackStore.entries()) {
-    // Remove records where all actions are older than maxAge
+    // A record can be dropped only once every action has left ITS window
+    // (e.g. hour-long registration limits must survive a 5-minute sweep).
     const hasRecentActions = record.recentActions.some(
-      (timestamp) => now - timestamp < maxAge
+      (timestamp) => now - timestamp < record.windowMs
     );
 
     if (!hasRecentActions) {

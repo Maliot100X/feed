@@ -68,36 +68,12 @@
  * ```
  */
 
-import { X402Manager } from '@babylon/a2a';
-import { requireAdmin, withErrorHandling } from '@babylon/api';
-import { db } from '@babylon/db';
-import { generateSnowflakeId, logger, toISO } from '@babylon/shared';
-import { parseEther } from 'ethers';
+import { createEscrowPayment, escrowErrorHttpStatus } from '@feed/a2a';
+import { requireAdmin, withErrorHandling } from '@feed/api';
+import { logger, toISO } from '@feed/shared';
 import type { NextRequest } from 'next/server';
 import { NextResponse } from 'next/server';
 import { z } from 'zod';
-
-// Initialize x402 manager
-const x402Manager = new X402Manager({
-  rpcUrl: process.env.NEXT_PUBLIC_RPC_URL || 'https://sepolia.base.org',
-  paymentTimeout: 15 * 60 * 1000, // 15 minutes
-});
-
-// Payment receiver address (treasury/admin wallet)
-// Note: Falls back to zero address if not configured - this should be validated in production
-const PAYMENT_RECEIVER =
-  process.env.MODERATION_ESCROW_RECEIVER ||
-  process.env.NEXT_PUBLIC_TREASURY_ADDRESS ||
-  '0x0000000000000000000000000000000000000000';
-
-// Validate treasury address is configured (warn if zero address)
-if (PAYMENT_RECEIVER === '0x0000000000000000000000000000000000000000') {
-  logger.warn(
-    'MODERATION_ESCROW_RECEIVER or NEXT_PUBLIC_TREASURY_ADDRESS not configured - using zero address',
-    {},
-    'ModerationEscrow'
-  );
-}
 
 const CreateEscrowPaymentSchema = z.object({
   recipientId: z.string().min(1, 'Recipient ID is required'),
@@ -124,136 +100,18 @@ export const POST = withErrorHandling(async function POST(req: NextRequest) {
     );
   }
 
-  const { recipientId, amountUSD, reason, recipientWalletAddress } =
-    validation.data;
-
-  // Verify recipient exists and is not an actor
-  const recipient = await db.user.findUnique({
-    where: { id: recipientId },
-    select: {
-      id: true,
-      username: true,
-      displayName: true,
-      isActor: true,
-      walletAddress: true,
-    },
+  const { recipientId, amountUSD } = validation.data;
+  const result = await createEscrowPayment({
+    adminId,
+    ...validation.data,
   });
-
-  if (!recipient) {
+  if (!result.ok) {
     return NextResponse.json(
-      { error: 'Recipient user not found' },
-      { status: 404 }
+      { error: result.message },
+      { status: escrowErrorHttpStatus(result.code) }
     );
   }
-
-  if (recipient.isActor) {
-    return NextResponse.json(
-      { error: 'Cannot send escrow payment to NPCs/actors' },
-      { status: 400 }
-    );
-  }
-
-  // Validate recipient wallet address matches user's actual wallet
-  if (
-    recipient.walletAddress &&
-    recipientWalletAddress.toLowerCase() !==
-      recipient.walletAddress.toLowerCase()
-  ) {
-    return NextResponse.json(
-      {
-        error:
-          "Recipient wallet address does not match user's registered wallet address",
-      },
-      { status: 400 }
-    );
-  }
-
-  // Prevent self-payment
-  if (recipientId === adminId) {
-    return NextResponse.json(
-      { error: 'Cannot create escrow payment to yourself' },
-      { status: 400 }
-    );
-  }
-
-  // Convert USD to ETH (assuming $1 = 0.001 ETH, adjust as needed)
-  const ethEquivalent = amountUSD * 0.001;
-  const amountInWei = parseEther(ethEquivalent.toString()).toString();
-
-  // Get admin's wallet address (required for payment)
-  const adminWalletAddress = _adminUser.walletAddress;
-  if (!adminWalletAddress) {
-    return NextResponse.json(
-      {
-        error:
-          'Admin must have a connected wallet address to create escrow payments',
-      },
-      { status: 400 }
-    );
-  }
-
-  // Check for duplicate recent escrows BEFORE creating payment request (prevent spam and orphaned requests)
-  const recentDuplicate = await db.moderationEscrow.findFirst({
-    where: {
-      recipientId,
-      adminId,
-      amountUSD: amountUSD.toString(),
-      createdAt: {
-        gte: new Date(Date.now() - 5 * 60 * 1000), // Last 5 minutes
-      },
-      status: {
-        in: ['pending', 'paid'],
-      },
-    },
-  });
-
-  if (recentDuplicate) {
-    return NextResponse.json(
-      {
-        error:
-          'A similar escrow payment was created recently. Please wait before creating another.',
-      },
-      { status: 400 }
-    );
-  }
-
-  // Create X402 payment request
-  // Note: 'from' is admin's wallet (who sends), 'to' is treasury (escrow holder)
-  // The recipientWalletAddress is stored in metadata for refund purposes
-  const paymentRequest = await x402Manager.createPaymentRequest(
-    adminWalletAddress, // Admin sends the payment
-    PAYMENT_RECEIVER, // To treasury/escrow account
-    amountInWei,
-    'moderation_escrow',
-    {
-      adminId,
-      recipientId,
-      recipientWalletAddress, // Store recipient address for refunds
-      amountUSD,
-      reason: reason || null,
-    }
-  );
-
-  // Create escrow record in database
-  const expiresAt = new Date(paymentRequest.expiresAt);
-  const escrow = await db.moderationEscrow.create({
-    data: {
-      id: await generateSnowflakeId(),
-      recipientId,
-      adminId,
-      amountUSD: amountUSD.toString(),
-      amountWei: amountInWei,
-      status: 'pending',
-      reason: reason || null,
-      paymentRequestId: paymentRequest.requestId,
-      expiresAt,
-      updatedAt: new Date(),
-      metadata: {
-        recipientWalletAddress,
-        adminWalletAddress: adminWalletAddress,
-      },
-    },
-  });
+  const { escrow, paymentRequest } = result.value;
 
   logger.info(
     `Admin ${adminId} created escrow payment for user ${recipientId}`,
@@ -278,12 +136,6 @@ export const POST = withErrorHandling(async function POST(req: NextRequest) {
       paymentRequestId: escrow.paymentRequestId,
       expiresAt: toISO(escrow.expiresAt),
     },
-    paymentRequest: {
-      requestId: paymentRequest.requestId,
-      amount: paymentRequest.amount,
-      from: paymentRequest.from,
-      to: paymentRequest.to,
-      expiresAt: paymentRequest.expiresAt,
-    },
+    paymentRequest,
   });
 });

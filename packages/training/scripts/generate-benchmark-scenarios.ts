@@ -536,7 +536,9 @@ function generateScenario(
 
   // Generate ticks
   const ticks: Tick[] = [];
-  const currentState = { ...initialState };
+  // Deep copy: the tick loop mutates perp prices in place, which previously
+  // overwrote initialState.perpetualMarkets with final-tick prices.
+  const currentState = structuredClone(initialState);
 
   for (let tickNum = 0; tickNum < numTicks; tickNum++) {
     const tickTimestamp = startTimestamp + tickNum * tickInterval * 1000;
@@ -656,7 +658,8 @@ function generateScenario(
   const snapshot: BenchmarkGameSnapshot = {
     id: `scenario-${scenarioId}-v1`,
     version: '1.0.0',
-    createdAt: Date.now(),
+    // Deterministic so regenerating the committed fixtures is byte-identical.
+    createdAt: startTimestamp,
     duration: config.durationDays * 24 * 60 * 60,
     tickInterval,
     initialState,

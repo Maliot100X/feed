@@ -36,52 +36,34 @@ const WORKER_SHIFT = SEQUENCE_BITS; // 12
  * Snowflake ID Generator Class
  *
  * @description Generates unique, ordered IDs using the Snowflake algorithm.
- * Thread-safe with async queue for concurrent ID generation. Ensures IDs are
- * always increasing and unique across workers.
+ * Generation is synchronous (JavaScript runs it to completion without
+ * interleaving), so no queue or mutex is needed for in-process uniqueness.
+ * Cross-process uniqueness requires each process to use a distinct WORKER_ID.
  */
 class SnowflakeGenerator {
   private workerId: bigint;
   private sequence = 0n;
   private lastTimestamp = 0n;
-  private generating = false;
-  private queue: Array<{
-    resolve: (value: string) => void;
-    reject: (error: Error) => void;
-  }> = [];
 
   constructor(workerId = 0) {
-    if (workerId < 0 || workerId > Number(MAX_WORKER_ID)) {
-      throw new Error(`Worker ID must be between 0 and ${MAX_WORKER_ID}`);
+    if (
+      !Number.isInteger(workerId) ||
+      workerId < 0 ||
+      workerId > Number(MAX_WORKER_ID)
+    ) {
+      throw new Error(
+        `Worker ID must be an integer between 0 and ${MAX_WORKER_ID}`
+      );
     }
     this.workerId = BigInt(workerId);
   }
 
   /**
-   * Generate a new Snowflake ID (async with mutex for concurrency safety)
+   * Generate a new Snowflake ID.
+   * Rejects (without wedging later calls) if the clock moved backwards.
    */
   async generate(): Promise<string> {
-    return new Promise((resolve, reject) => {
-      this.queue.push({ resolve, reject });
-      this.processQueue();
-    });
-  }
-
-  /**
-   * Process the queue of ID generation requests
-   */
-  private processQueue(): void {
-    if (this.generating || this.queue.length === 0) {
-      return;
-    }
-
-    this.generating = true;
-    const request = this.queue.shift()!;
-
-    const id = this.generateSync();
-    request.resolve(id);
-    this.generating = false;
-    // Process next item in queue
-    queueMicrotask(() => this.processQueue());
+    return this.generateSync();
   }
 
   /**
@@ -89,6 +71,12 @@ class SnowflakeGenerator {
    */
   private generateSync(): string {
     let timestamp = BigInt(Date.now()) - EPOCH;
+
+    // Timestamp should never go backwards. Check before mutating state so a
+    // rollback leaves the generator usable once the clock recovers.
+    if (timestamp < this.lastTimestamp) {
+      throw new Error('Clock moved backwards. Refusing to generate ID.');
+    }
 
     // If same millisecond, increment sequence
     if (timestamp === this.lastTimestamp) {
@@ -101,11 +89,6 @@ class SnowflakeGenerator {
     } else {
       // New millisecond, reset sequence
       this.sequence = 0n;
-    }
-
-    // Timestamp should never go backwards
-    if (timestamp < this.lastTimestamp) {
-      throw new Error('Clock moved backwards. Refusing to generate ID.');
     }
 
     this.lastTimestamp = timestamp;
@@ -178,9 +161,7 @@ let instance: SnowflakeGenerator | null = null;
  */
 function getGenerator(): SnowflakeGenerator {
   if (!instance) {
-    const workerId = process.env.WORKER_ID
-      ? Number.parseInt(process.env.WORKER_ID, 10)
-      : 0;
+    const workerId = process.env.WORKER_ID ? Number(process.env.WORKER_ID) : 0;
     instance = new SnowflakeGenerator(workerId);
   }
   return instance;

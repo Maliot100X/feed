@@ -1,6 +1,6 @@
 'use client';
 
-import type { ProfileInfo } from '@babylon/shared';
+import type { ProfileInfo } from '@feed/shared';
 import {
   type Actor,
   cn,
@@ -11,7 +11,7 @@ import {
   logger,
   type Organization,
   POST_TYPES,
-} from '@babylon/shared';
+} from '@feed/shared';
 import { ArrowLeft, MessageCircle, Search } from 'lucide-react';
 import Link from 'next/link';
 import { useRouter, useSearchParams } from 'next/navigation';
@@ -998,7 +998,6 @@ export function ProfilePageClient({
                     )}
                     {actorInfo.type === 'user' && (
                       <OnChainBadge
-                        isRegistered={Boolean(actorInfo.nftTokenId)}
                         nftTokenId={actorInfo.nftTokenId ?? null}
                         size="md"
                       />

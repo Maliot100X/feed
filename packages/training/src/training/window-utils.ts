@@ -25,14 +25,14 @@ export function getCurrentWindowId(): string {
  * @param offset - How many hours ago (default: 1)
  */
 export function getPreviousWindowId(offset: number = 1): string {
-  const now = new Date();
-  const windowStart = new Date(
-    Math.floor(now.getTime() / (60 * 60 * 1000)) * (60 * 60 * 1000)
-  );
-  // Go back N hours
-  windowStart.setHours(windowStart.getHours() - offset);
+  const hourMs = 60 * 60 * 1000;
+  const currentWindowStartMs = Math.floor(Date.now() / hourMs) * hourMs;
+  // Subtract elapsed milliseconds (UTC); local setHours() shifts across DST.
+  const windowStart = new Date(currentWindowStartMs - offset * hourMs);
   return windowStart.toISOString().slice(0, 13) + ':00';
 }
+
+const WINDOW_ID_PATTERN = /^\d{4}-\d{2}-\d{2}T\d{2}:00$/;
 
 /**
  * Parse window ID to Date object
@@ -40,7 +40,27 @@ export function getPreviousWindowId(offset: number = 1): string {
  * @param windowId - Window ID string (YYYY-MM-DDTHH:00)
  */
 export function parseWindowId(windowId: string): Date {
-  return new Date(windowId);
+  // Window IDs are generated from UTC ISO strings. `new Date('YYYY-MM-DDTHH:00')`
+  // would parse them as *local* time, so append an explicit UTC offset.
+  if (!WINDOW_ID_PATTERN.test(windowId)) {
+    throw new Error(
+      `Invalid window ID "${windowId}" (expected YYYY-MM-DDTHH:00 in UTC)`
+    );
+  }
+  const date = new Date(`${windowId}:00Z`);
+  if (Number.isNaN(date.getTime())) {
+    throw new Error(`Invalid window ID "${windowId}"`);
+  }
+  return date;
+}
+
+function windowDurationMs(windowDurationHours: number): number {
+  if (!Number.isFinite(windowDurationHours) || windowDurationHours <= 0) {
+    throw new Error(
+      `windowDurationHours must be a positive number, received ${windowDurationHours}`
+    );
+  }
+  return windowDurationHours * 60 * 60 * 1000;
 }
 
 /**
@@ -88,7 +108,7 @@ export function generateWindowIds(
   windowDurationHours: number = 1
 ): string[] {
   const windows: string[] = [];
-  const windowMs = windowDurationHours * 60 * 60 * 1000;
+  const windowMs = windowDurationMs(windowDurationHours);
 
   // Round start time down to window boundary
   const currentWindowStart = new Date(

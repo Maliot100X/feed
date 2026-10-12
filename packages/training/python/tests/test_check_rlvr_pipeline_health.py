@@ -9,10 +9,12 @@ from pathlib import Path
 
 import pytest
 
-SCRIPT_PATH = Path(__file__).resolve().parent.parent / "scripts" / "check_rlvr_pipeline_health.py"
-
-if not SCRIPT_PATH.exists():
-    pytest.skip(f"script not found: {SCRIPT_PATH.name}", allow_module_level=True)
+SCRIPT_PATH = (
+    Path(__file__).resolve().parent.parent
+    / "scripts"
+    / "releases"
+    / "check_rlvr_pipeline_health.py"
+)
 
 
 def write_report(tmp_path: Path, phases: dict[str, object]) -> Path:

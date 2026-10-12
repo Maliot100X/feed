@@ -19,10 +19,11 @@ describe('normalizeNpcGroupMessageResponse', () => {
     ).toEqual({ message: 'watch this ticker quietly' });
   });
 
-  test('returns plain string payloads directly', () => {
-    expect(normalizeNpcGroupMessageResponse('just send the note')).toEqual({
-      message: 'just send the note',
-    });
+  test('rejects unstructured or truncated payloads', () => {
+    expect(normalizeNpcGroupMessageResponse('just send the note')).toBeNull();
+    expect(
+      normalizeNpcGroupMessageResponse('<response><message>cut off')
+    ).toBeNull();
   });
 
   test('rejects empty or non-object responses', () => {

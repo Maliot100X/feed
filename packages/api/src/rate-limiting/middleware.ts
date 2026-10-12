@@ -4,8 +4,8 @@
  * Provides helpers to apply rate limiting and duplicate detection to API routes
  */
 
-import type { AuthenticatedUser } from '@babylon/shared';
-import { logger } from '@babylon/shared';
+import type { AuthenticatedUser } from '@feed/shared';
+import { logger } from '@feed/shared';
 
 import type { NextRequest } from 'next/server';
 import { NextResponse } from 'next/server';
@@ -15,11 +15,7 @@ import {
   type DUPLICATE_DETECTION_CONFIGS,
 } from '../utils/duplicate-detector';
 import { getClientIp } from '../utils/ip-utils';
-import {
-  checkRateLimit,
-  checkRateLimitAsync,
-  RATE_LIMIT_CONFIGS,
-} from './user-rate-limiter';
+import { checkRateLimitAsync, RATE_LIMIT_CONFIGS } from './user-rate-limiter';
 
 function isRateLimitingDisabled() {
   return (
@@ -85,10 +81,10 @@ export function duplicateContentError(lastPostedAt?: Date) {
  * }
  * ```
  */
-export function applyRateLimit(
+export async function applyRateLimit(
   userId: string,
   config: (typeof RATE_LIMIT_CONFIGS)[keyof typeof RATE_LIMIT_CONFIGS]
-) {
+): Promise<{ allowed: boolean; retryAfter?: number; remaining?: number }> {
   if (isRateLimitingDisabled()) {
     return {
       allowed: true,
@@ -96,7 +92,7 @@ export function applyRateLimit(
     };
   }
 
-  return checkRateLimit(userId, config);
+  return checkRateLimitAsync(userId, config);
 }
 
 /**
@@ -137,18 +133,18 @@ export function applyDuplicateDetection(
  * if (errorResponse) return errorResponse;
  * ```
  */
-export function checkRateLimitAndDuplicates(
+export async function checkRateLimitAndDuplicates(
   userId: string,
   content: string | null,
   rateLimitConfig: (typeof RATE_LIMIT_CONFIGS)[keyof typeof RATE_LIMIT_CONFIGS],
   duplicateConfig?: (typeof DUPLICATE_DETECTION_CONFIGS)[keyof typeof DUPLICATE_DETECTION_CONFIGS]
-): NextResponse | null {
+): Promise<NextResponse | null> {
   if (isRateLimitingDisabled()) {
     return null;
   }
 
   // Check rate limit first
-  const rateLimitResult = checkRateLimit(userId, rateLimitConfig);
+  const rateLimitResult = await checkRateLimitAsync(userId, rateLimitConfig);
   if (!rateLimitResult.allowed) {
     logger.warn('Rate limit check failed', {
       userId,
@@ -226,6 +222,32 @@ export function addPublicReadHeaders(
     'Cache-Control',
     'public, s-maxage=5, stale-while-revalidate=10'
   );
+  return response;
+}
+
+/**
+ * Add rate limit headers plus `private, no-store` to a personalized read
+ * response (e.g. one containing the viewer's likes, follows or moderation
+ * filtering). Such responses must never be stored by a shared CDN cache.
+ */
+export function addPrivateReadHeaders(
+  response: NextResponse,
+  rateLimitInfo: {
+    limit: number;
+    remaining: number;
+    resetAt: Date;
+  }
+): NextResponse {
+  response.headers.set('X-RateLimit-Limit', rateLimitInfo.limit.toString());
+  response.headers.set(
+    'X-RateLimit-Remaining',
+    rateLimitInfo.remaining.toString()
+  );
+  response.headers.set(
+    'X-RateLimit-Reset',
+    rateLimitInfo.resetAt.toISOString()
+  );
+  response.headers.set('Cache-Control', 'private, no-store');
   return response;
 }
 

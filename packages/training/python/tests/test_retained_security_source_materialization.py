@@ -22,21 +22,13 @@ def load_script_module(module_name: str, script_path: Path):
     return module
 
 
-_required_scripts = [
-    Path(__file__).resolve().parent.parent / "scripts" / "scam_defense_exchange.py",
-    Path(__file__).resolve().parent.parent / "scripts" / "materialize_retained_security_sources.py",
-]
-for _s in _required_scripts:
-    if not _s.exists():
-        pytest.skip(f"script not found: {_s.name}", allow_module_level=True)
-
 load_script_module(
     "scam_defense_exchange",
     PYTHON_ROOT / "scripts" / "scam_defense_exchange.py",
 )
 materializer = load_script_module(
     "materialize_retained_security_sources",
-    PYTHON_ROOT / "scripts" / "materialize_retained_security_sources.py",
+    PYTHON_ROOT / "scripts" / "data-prep" / "materialize_retained_security_sources.py",
 )
 
 
@@ -187,7 +179,7 @@ def test_materializer_cli_logs_missing_registry(tmp_path: Path):
     proc = subprocess.run(
         [
             sys.executable,
-            str(PYTHON_ROOT / "scripts" / "materialize_retained_security_sources.py"),
+            str(PYTHON_ROOT / "scripts" / "data-prep" / "materialize_retained_security_sources.py"),
             "--source-registry",
             str(tmp_path / "missing.json"),
         ],

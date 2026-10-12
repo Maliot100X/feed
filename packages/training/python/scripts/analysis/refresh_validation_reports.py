@@ -16,7 +16,7 @@ import sys
 from pathlib import Path
 from typing import Any
 
-sys.path.insert(0, str(Path(__file__).parent.parent / "src" / "training"))
+sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "src" / "training"))
 
 from deterministic_eval import (
     ACTION_REASON_ASSISTANT_PREFIX,

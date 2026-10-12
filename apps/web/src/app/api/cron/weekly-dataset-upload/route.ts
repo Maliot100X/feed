@@ -37,7 +37,7 @@
  *
  * @example
  * ```typescript
- * // Called by Vercel Cron (weekly)
+ * // Called by a scheduler (weekly)
  * await fetch('/api/cron/weekly-dataset-upload', {
  *   method: 'POST',
  *   headers: { 'Authorization': `Bearer ${CRON_SECRET}` }
@@ -45,9 +45,9 @@
  * ```
  */
 
-import { verifyCronAuth, withErrorHandling } from '@babylon/api';
-import { logger } from '@babylon/shared';
-import { huggingFaceIntegration } from '@babylon/training';
+import { verifyCronAuth, withErrorHandling } from '@feed/api';
+import { logger } from '@feed/shared';
+import { huggingFaceIntegration } from '@feed/training';
 import type { NextRequest } from 'next/server';
 import { NextResponse } from 'next/server';
 

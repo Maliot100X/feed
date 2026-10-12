@@ -4,10 +4,11 @@ import {
   cn,
   DEFAULT_NOTIFICATION_DIGEST_SETTINGS,
   type NotificationDigestSettings,
-} from '@babylon/shared';
+} from '@feed/shared';
 import { useEffect, useState } from 'react';
 import { Switch } from '@/components/ui/switch';
 import { useAuth } from '@/hooks/useAuth';
+import { apiFetch } from '@/utils/api-fetch';
 
 type DigestFrequency = NotificationDigestSettings['frequency'];
 type DeliveryChannel = NotificationDigestSettings['deliveryChannel'];
@@ -32,7 +33,8 @@ const channelOptions: { value: DeliveryChannel; label: string }[] = [
  * - Tier 3 (feed signals) is part of the feed — not shown here
  */
 export function NotificationsTab() {
-  const { authenticated, getAccessToken } = useAuth();
+  const { authenticated, user } = useAuth();
+  const ownerId = authenticated ? (user?.id ?? null) : null;
   const [settings, setSettings] = useState<NotificationDigestSettings>(
     DEFAULT_NOTIFICATION_DIGEST_SETTINGS
   );
@@ -40,8 +42,10 @@ export function NotificationsTab() {
   const [isSaving, setIsSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
+  // Settings belong to the signed-in account: reload (and reset) on switch.
   useEffect(() => {
-    if (!authenticated) {
+    setSettings(DEFAULT_NOTIFICATION_DIGEST_SETTINGS);
+    if (!ownerId) {
       setIsLoading(false);
       return;
     }
@@ -51,30 +55,21 @@ export function NotificationsTab() {
     const loadSettings = async () => {
       setIsLoading(true);
       setError(null);
-
-      const token = await getAccessToken();
-      if (!token) {
-        if (!cancelled) {
-          setIsLoading(false);
-        }
-        return;
-      }
-
-      const response = await fetch('/api/notifications/digest-settings', {
-        headers: { Authorization: `Bearer ${token}` },
-      });
-      const payload = (await response.json().catch(() => ({}))) as {
-        settings?: NotificationDigestSettings;
-      };
-
-      if (!cancelled) {
+      try {
+        const response = await apiFetch('/api/notifications/digest-settings');
+        const payload = (await response.json().catch(() => ({}))) as {
+          settings?: NotificationDigestSettings;
+        };
+        if (cancelled) return;
         if (response.ok && payload.settings) {
           setSettings(payload.settings);
-          setError(null);
         } else {
           setError('Unable to load digest settings.');
         }
-        setIsLoading(false);
+      } catch {
+        if (!cancelled) setError('Unable to load digest settings.');
+      } finally {
+        if (!cancelled) setIsLoading(false);
       }
     };
 
@@ -83,44 +78,38 @@ export function NotificationsTab() {
     return () => {
       cancelled = true;
     };
-  }, [authenticated, getAccessToken]);
+  }, [ownerId]);
 
+  // Saves are serialized (controls are disabled while one is pending), so a
+  // failed earlier save can never roll back a newer selection.
   const saveSettings = async (nextSettings: NotificationDigestSettings) => {
+    if (isSaving) return;
     const previousSettings = settings;
     setSettings(nextSettings);
     setIsSaving(true);
     setError(null);
 
-    const token = await getAccessToken();
-    if (!token) {
+    try {
+      const response = await apiFetch('/api/notifications/digest-settings', {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(nextSettings),
+      });
+      const payload = (await response.json().catch(() => ({}))) as {
+        settings?: NotificationDigestSettings;
+      };
+      if (response.ok && payload.settings) {
+        setSettings(payload.settings);
+      } else {
+        setSettings(previousSettings);
+        setError('Unable to save digest settings.');
+      }
+    } catch {
       setSettings(previousSettings);
+      setError('Unable to save digest settings.');
+    } finally {
       setIsSaving(false);
-      setError('Unable to save digest settings.');
-      return;
     }
-
-    const response = await fetch('/api/notifications/digest-settings', {
-      method: 'PUT',
-      headers: {
-        Authorization: `Bearer ${token}`,
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify(nextSettings),
-    });
-
-    const payload = (await response.json().catch(() => ({}))) as {
-      settings?: NotificationDigestSettings;
-    };
-
-    if (response.ok && payload.settings) {
-      setSettings(payload.settings);
-      setError(null);
-    } else {
-      setSettings(previousSettings);
-      setError('Unable to save digest settings.');
-    }
-
-    setIsSaving(false);
   };
 
   if (isLoading) {
@@ -138,6 +127,7 @@ export function NotificationsTab() {
           </p>
         </div>
         <Switch
+          disabled={isSaving}
           checked={settings.digestEnabled}
           onCheckedChange={(digestEnabled) =>
             void saveSettings({ ...settings, digestEnabled })
@@ -166,6 +156,8 @@ export function NotificationsTab() {
                 <button
                   key={opt.value}
                   type="button"
+                  disabled={isSaving}
+                  aria-pressed={settings.frequency === opt.value}
                   onClick={() =>
                     void saveSettings({ ...settings, frequency: opt.value })
                   }
@@ -190,6 +182,8 @@ export function NotificationsTab() {
                 <button
                   key={opt.value}
                   type="button"
+                  disabled={isSaving}
+                  aria-pressed={settings.deliveryChannel === opt.value}
                   onClick={() =>
                     void saveSettings({
                       ...settings,

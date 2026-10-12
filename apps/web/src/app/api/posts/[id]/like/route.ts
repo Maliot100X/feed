@@ -64,14 +64,10 @@ import {
   RATE_LIMIT_CONFIGS,
   successResponse,
   withErrorHandling,
-} from '@babylon/api';
-import { and, count, db, eq, posts, reactions } from '@babylon/db';
-import { NPCInteractionTracker, parsePostId } from '@babylon/engine';
-import {
-  generateSnowflakeId,
-  logger,
-  PostIdParamSchema,
-} from '@babylon/shared';
+} from '@feed/api';
+import { and, count, db, eq, posts, reactions } from '@feed/db';
+import { NPCInteractionTracker } from '@feed/engine';
+import { generateSnowflakeId, logger, PostIdParamSchema } from '@feed/shared';
 import type { NextRequest } from 'next/server';
 import { trackServerEvent } from '@/lib/posthog/server';
 
@@ -89,7 +85,7 @@ export const POST = withErrorHandling(
     const { id: postId } = PostIdParamSchema.parse(await context.params);
 
     // Apply rate limiting (no duplicate detection needed - DB prevents duplicate likes)
-    const rateLimitError = checkRateLimitAndDuplicates(
+    const rateLimitError = await checkRateLimitAndDuplicates(
       user.userId,
       null,
       RATE_LIMIT_CONFIGS.LIKE_POST
@@ -107,39 +103,15 @@ export const POST = withErrorHandling(
 
     // Check if post exists first and is not in the future
     const now = new Date();
-    let [post] = await db
+    const [post] = await db
       .select()
       .from(posts)
       .where(eq(posts.id, postId))
       .limit(1);
 
-    // Don't allow liking future posts
-    if (post && post.timestamp > now) {
-      throw new NotFoundError('Post', postId);
-    }
-
-    if (!post) {
-      const parseResult = parsePostId(postId);
-      const { gameId, authorId, timestamp } = parseResult.metadata;
-
-      const [newPost] = await db
-        .insert(posts)
-        .values({
-          id: postId,
-          content: '[Game-generated post]',
-          authorId,
-          gameId,
-          timestamp,
-        })
-        .returning();
-      if (!newPost) {
-        throw new BusinessLogicError('Failed to create post', 'CREATE_FAILED');
-      }
-      post = newPost;
-    }
-
-    // Ensure post exists
-    if (!post) {
+    // Unknown or not-yet-published posts cannot be liked (and are never
+    // created from the ID).
+    if (!post || post.timestamp > now) {
       throw new NotFoundError('Post', postId);
     }
 

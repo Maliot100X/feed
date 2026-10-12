@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto';
-import { checkDatabaseHealth, db, queryMonitor } from '@babylon/db';
-import { logger } from '@babylon/shared';
+import { checkDatabaseHealth, db, queryMonitor } from '@feed/db';
+import { logger } from '@feed/shared';
 import type { CronJobStats } from '../monitoring/cron-metrics';
 import { cronMetrics } from '../monitoring/cron-metrics';
 import { getRedisClient, isRedisAvailable } from '../redis/client';
@@ -43,7 +43,8 @@ interface SystemLlmMetrics {
   callsLast24h: number;
   inputTokensLast24h: number;
   outputTokensLast24h: number;
-  errorsLastHour: number;
+  /** null: LLM call errors are not persisted, so no count is available. */
+  errorsLastHour: number | null;
 }
 
 interface SystemContentMetrics {
@@ -78,8 +79,8 @@ interface SystemTableInfo {
 
 interface SystemEnvironmentInfo {
   nodeEnv: string | null;
-  vercelEnv: string | null;
-  region: string | null;
+  deploymentEnv: string | null;
+  platform: string | null;
 }
 
 interface SystemPerformanceMetrics {
@@ -92,6 +93,7 @@ interface SystemPerformanceMetrics {
     p99DurationMs: number;
     status: SystemStatusLevel;
   };
+  /** null on Cloudflare Workers, which have no per-process memory metrics. */
   memory: {
     heapUsedMB: number;
     heapTotalMB: number;
@@ -99,10 +101,10 @@ interface SystemPerformanceMetrics {
     rssMB: number;
     usagePercent: number;
     status: SystemStatusLevel;
-  };
+  } | null;
   server: {
-    uptimeSeconds: number;
-    uptimeFormatted: string;
+    uptimeSeconds: number | null;
+    uptimeFormatted: string | null;
     env: string | null;
     pid: number;
   };
@@ -303,13 +305,16 @@ function withPersistedMetricsSnapshotJob(
     snapshotDurationMs: number;
   } | null
 ): ReturnType<typeof cronMetrics.getDashboardMetrics> {
-  if (!snapshot) {
+  // The cron may run in another isolate, so this process's in-memory metrics
+  // often have no record of it. Only then is the persisted snapshot used as
+  // evidence of its last success. Real in-memory history (including failures
+  // and alerts) is never replaced.
+  if (
+    !snapshot ||
+    dashboard.jobs.some((job) => job.jobName === 'metrics-snapshot')
+  ) {
     return dashboard;
   }
-
-  const existingIndex = dashboard.jobs.findIndex(
-    (job) => job.jobName === 'metrics-snapshot'
-  );
 
   const metricsSnapshotJob: CronJobStats = {
     jobName: 'metrics-snapshot',
@@ -326,16 +331,8 @@ function withPersistedMetricsSnapshotJob(
     consecutiveFailures: 0,
   };
 
-  const jobs =
-    existingIndex >= 0
-      ? dashboard.jobs.map((job, index) =>
-          index === existingIndex ? metricsSnapshotJob : job
-        )
-      : [...dashboard.jobs, metricsSnapshotJob];
-
-  const alerts = dashboard.alerts.filter(
-    (alert) => alert.jobName !== 'metrics-snapshot'
-  );
+  const jobs = [...dashboard.jobs, metricsSnapshotJob];
+  const alerts = dashboard.alerts;
   const totalExecutions = jobs.reduce(
     (sum, job) => sum + job.totalExecutions,
     0
@@ -578,20 +575,23 @@ function getQuerySubsystem(
 
 function getMemorySubsystem(
   input: BuildSystemStatusInput
-): SystemStatusSubsystem {
+): SystemStatusSubsystem[] {
   const memory = input.performance.memory;
+  if (!memory) return [];
 
-  return {
-    key: 'memory',
-    label: 'Server Memory',
-    status: memory.status,
-    summary: `${formatPercent(memory.usagePercent)} heap used`,
-    details: `${round(memory.heapUsedMB)}MB / ${round(memory.heapTotalMB)}MB heap · RSS ${round(memory.rssMB)}MB.`,
-    metric: {
-      label: 'Uptime',
-      value: input.performance.server.uptimeFormatted,
+  return [
+    {
+      key: 'memory',
+      label: 'Server Memory',
+      status: memory.status,
+      summary: `${formatPercent(memory.usagePercent)} heap used`,
+      details: `${round(memory.heapUsedMB)}MB / ${round(memory.heapTotalMB)}MB heap · RSS ${round(memory.rssMB)}MB.`,
+      metric: {
+        label: 'Uptime',
+        value: input.performance.server.uptimeFormatted ?? 'n/a',
+      },
     },
-  };
+  ];
 }
 
 export function buildSystemStatusSnapshot(
@@ -653,19 +653,27 @@ export function buildSystemStatusSnapshot(
     {
       key: 'llm',
       label: 'LLM Calls',
-      status: input.llm.errorsLastHour > 0 ? 'warning' : 'healthy',
+      status:
+        input.llm.errorsLastHour !== null && input.llm.errorsLastHour > 0
+          ? 'warning'
+          : 'healthy',
       summary:
-        input.llm.errorsLastHour > 0
-          ? `${formatCount(input.llm.errorsLastHour)} recent error${input.llm.errorsLastHour === 1 ? '' : 's'}`
-          : 'No recent LLM errors',
+        input.llm.errorsLastHour === null
+          ? 'LLM error counts are not tracked'
+          : input.llm.errorsLastHour > 0
+            ? `${formatCount(input.llm.errorsLastHour)} recent error${input.llm.errorsLastHour === 1 ? '' : 's'}`
+            : 'No recent LLM errors',
       details: `${formatCount(input.llm.callsLast24h)} calls in the last 24 hours.`,
       metric: {
         label: 'Errors last hour',
-        value: formatCount(input.llm.errorsLastHour),
+        value:
+          input.llm.errorsLastHour === null
+            ? 'n/a'
+            : formatCount(input.llm.errorsLastHour),
       },
     },
     getQuerySubsystem(input),
-    getMemorySubsystem(input),
+    ...getMemorySubsystem(input),
   ];
 
   const criticalIssues = subsystems
@@ -775,9 +783,14 @@ export async function getSystemStatusSnapshot(): Promise<SystemStatusSnapshot> {
     queryStats.totalQueries > 0
       ? (queryStats.slowQueries / queryStats.totalQueries) * 100
       : 0;
-  const memUsage = process.memoryUsage();
+  // Workers expose these methods under nodejs_compat but they throw there.
+  const hasProcessMetrics = process.env.DEPLOYMENT_PLATFORM !== 'cloudflare';
+  const memUsage = hasProcessMetrics ? process.memoryUsage() : null;
   const memoryUsagePercent =
-    memUsage.heapTotal > 0 ? (memUsage.heapUsed / memUsage.heapTotal) * 100 : 0;
+    memUsage && memUsage.heapTotal > 0
+      ? (memUsage.heapUsed / memUsage.heapTotal) * 100
+      : 0;
+  const uptimeSeconds = hasProcessMetrics ? process.uptime() : null;
 
   const performance: SystemPerformanceMetrics = {
     query: {
@@ -789,17 +802,20 @@ export async function getSystemStatusSnapshot(): Promise<SystemStatusSnapshot> {
       p99DurationMs: round(queryStats.p99Duration),
       status: getQueryStatus(slowRate),
     },
-    memory: {
-      heapUsedMB: round(memUsage.heapUsed / 1024 / 1024),
-      heapTotalMB: round(memUsage.heapTotal / 1024 / 1024),
-      externalMB: round(memUsage.external / 1024 / 1024),
-      rssMB: round(memUsage.rss / 1024 / 1024),
-      usagePercent: round(memoryUsagePercent),
-      status: getMemoryStatus(memoryUsagePercent),
-    },
+    memory: memUsage
+      ? {
+          heapUsedMB: round(memUsage.heapUsed / 1024 / 1024),
+          heapTotalMB: round(memUsage.heapTotal / 1024 / 1024),
+          externalMB: round(memUsage.external / 1024 / 1024),
+          rssMB: round(memUsage.rss / 1024 / 1024),
+          usagePercent: round(memoryUsagePercent),
+          status: getMemoryStatus(memoryUsagePercent),
+        }
+      : null,
     server: {
-      uptimeSeconds: Math.floor(process.uptime()),
-      uptimeFormatted: formatDuration(process.uptime()),
+      uptimeSeconds: uptimeSeconds === null ? null : Math.floor(uptimeSeconds),
+      uptimeFormatted:
+        uptimeSeconds === null ? null : formatDuration(uptimeSeconds),
       env: process.env.NODE_ENV ?? null,
       pid: process.pid,
     },
@@ -824,7 +840,7 @@ export async function getSystemStatusSnapshot(): Promise<SystemStatusSnapshot> {
         callsLast24h: 0,
         inputTokensLast24h: 0,
         outputTokensLast24h: 0,
-        errorsLastHour: 0,
+        errorsLastHour: null,
       },
       content: {
         lookaheadMinutes: 0,
@@ -844,8 +860,8 @@ export async function getSystemStatusSnapshot(): Promise<SystemStatusSnapshot> {
       },
       environment: {
         nodeEnv: process.env.NODE_ENV ?? null,
-        vercelEnv: process.env.VERCEL_ENV ?? null,
-        region: process.env.VERCEL_REGION ?? null,
+        deploymentEnv: process.env.DEPLOYMENT_ENV ?? null,
+        platform: process.env.DEPLOYMENT_PLATFORM ?? null,
       },
     });
   }
@@ -860,7 +876,6 @@ export async function getSystemStatusSnapshot(): Promise<SystemStatusSnapshot> {
     newUsersLastDay,
     newPostsLastHour,
     newPostsLastDay,
-    llmErrorCountResult,
     llmStats,
     tableSizes,
     outboxStats,
@@ -877,9 +892,6 @@ export async function getSystemStatusSnapshot(): Promise<SystemStatusSnapshot> {
     db.user.count({ where: { createdAt: { gte: oneDayAgo } } }),
     db.post.count({ where: { createdAt: { gte: oneHourAgo } } }),
     db.post.count({ where: { createdAt: { gte: oneDayAgo } } }),
-    db.$queryRaw<{ count: string }>`
-      SELECT 0::text as count
-    `,
     db.$queryRaw<{
       totalCalls: string;
       totalInputTokens: string;
@@ -948,9 +960,6 @@ export async function getSystemStatusSnapshot(): Promise<SystemStatusSnapshot> {
     latestMetricsSnapshot[0] ?? null
   );
 
-  const recentLlmErrorsCount = llmErrorCountResult[0]
-    ? Number(llmErrorCountResult[0].count)
-    : 0;
   const llmUsageRow = llmStats[0];
   const outboxPending = outboxStats[0] ? Number(outboxStats[0].pending) : 0;
   const outboxOldest = outboxStats[0]?.oldest ?? null;
@@ -1004,7 +1013,9 @@ export async function getSystemStatusSnapshot(): Promise<SystemStatusSnapshot> {
       outputTokensLast24h: llmUsageRow
         ? Number(llmUsageRow.totalOutputTokens)
         : 0,
-      errorsLastHour: recentLlmErrorsCount,
+      // LLM call errors are not persisted (llm_call_logs records successful
+      // calls only), so there is no honest count to report.
+      errorsLastHour: null,
     },
     content: {
       lookaheadMinutes,
@@ -1036,8 +1047,8 @@ export async function getSystemStatusSnapshot(): Promise<SystemStatusSnapshot> {
     },
     environment: {
       nodeEnv: process.env.NODE_ENV ?? null,
-      vercelEnv: process.env.VERCEL_ENV ?? null,
-      region: process.env.VERCEL_REGION ?? null,
+      deploymentEnv: process.env.DEPLOYMENT_ENV ?? null,
+      platform: process.env.DEPLOYMENT_PLATFORM ?? null,
     },
   });
 }
@@ -1050,18 +1061,28 @@ function cleanupExpiredAlertReservations(nowMs: number) {
   }
 }
 
-function getAlertFingerprint(snapshot: SystemStatusSnapshot): string {
+/**
+ * Stable identity of an incident: environment, overall status and which
+ * subsystems are critical. Human-readable summaries are excluded because they
+ * embed changing values (e.g. elapsed minutes) that would defeat throttling.
+ */
+export function getAlertFingerprint(snapshot: SystemStatusSnapshot): string {
   return createHash('sha256')
     .update(
       JSON.stringify({
         environment:
-          snapshot.environment.vercelEnv ?? snapshot.environment.nodeEnv,
+          snapshot.environment.deploymentEnv ?? snapshot.environment.nodeEnv,
         status: snapshot.status,
-        criticalIssues: snapshot.criticalIssues,
+        criticalSubsystems: snapshot.subsystems
+          .filter((subsystem) => subsystem.status === 'critical')
+          .map((subsystem) => subsystem.key)
+          .sort(),
       })
     )
     .digest('hex');
 }
+
+const DISCORD_ALERT_TIMEOUT_MS = 10_000;
 
 function getDiscordWebhookUrl(): string | null {
   const value = process.env.DISCORD_SYSTEM_ALERT_WEBHOOK_URL?.trim();
@@ -1127,9 +1148,11 @@ export function formatSystemStatusDiscordMessage(
   snapshot: SystemStatusSnapshot
 ): string {
   const environment =
-    snapshot.environment.vercelEnv ?? snapshot.environment.nodeEnv ?? 'unknown';
-  const region = snapshot.environment.region
-    ? `\nRegion: ${snapshot.environment.region}`
+    snapshot.environment.deploymentEnv ??
+    snapshot.environment.nodeEnv ??
+    'unknown';
+  const platform = snapshot.environment.platform
+    ? `\nPlatform: ${snapshot.environment.platform}`
     : '';
   const issueLines =
     snapshot.criticalIssues.length > 0
@@ -1143,8 +1166,8 @@ export function formatSystemStatusDiscordMessage(
           .join('\n');
 
   return [
-    `Babylon ${snapshot.status.toUpperCase()} system alert`,
-    `Environment: ${environment}${region}`,
+    `Feed ${snapshot.status.toUpperCase()} system alert`,
+    `Environment: ${environment}${platform}`,
     `Critical subsystems: ${snapshot.summary.criticalCount}/${snapshot.summary.total}`,
     issueLines.length > 0 ? issueLines : '- No issue details available',
   ].join('\n');
@@ -1179,6 +1202,7 @@ export async function sendDiscordSystemAlertIfNeeded(
         'Content-Type': 'application/json',
       },
       body: JSON.stringify(payload),
+      signal: AbortSignal.timeout(DISCORD_ALERT_TIMEOUT_MS),
     });
 
     if (!response.ok) {

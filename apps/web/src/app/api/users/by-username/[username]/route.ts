@@ -75,7 +75,7 @@ import {
   publicRateLimit,
   successResponse,
   withErrorHandling,
-} from '@babylon/api';
+} from '@feed/api';
 import {
   comments,
   count,
@@ -86,8 +86,8 @@ import {
   reactions,
   sql,
   users,
-} from '@babylon/db';
-import { logger, toISO, UsernameParamSchema } from '@babylon/shared';
+} from '@feed/db';
+import { logger, toISO, UsernameParamSchema } from '@feed/shared';
 import type { NextRequest } from 'next/server';
 
 /**
@@ -128,9 +128,7 @@ export const GET = withErrorHandling(
         reputationPoints: users.reputationPoints,
         referralCount: users.referralCount,
         referralCode: users.referralCode,
-        hasFarcaster: users.hasFarcaster,
         hasTwitter: users.hasTwitter,
-        farcasterUsername: users.farcasterUsername,
         twitterUsername: users.twitterUsername,
         usernameChangedAt: users.usernameChangedAt,
         createdAt: users.createdAt,
@@ -201,9 +199,7 @@ export const GET = withErrorHandling(
         reputationPoints: dbUser.reputationPoints,
         referralCount: dbUser.referralCount,
         referralCode: dbUser.referralCode,
-        hasFarcaster: dbUser.hasFarcaster,
         hasTwitter: dbUser.hasTwitter,
-        farcasterUsername: dbUser.farcasterUsername,
         twitterUsername: dbUser.twitterUsername,
         createdAt: toISO(dbUser.createdAt),
         stats: {

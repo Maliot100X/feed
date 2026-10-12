@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Materialize ClawBench workplace scenarios into Babylon source records,
+Materialize ClawBench workplace scenarios into Feed source records,
 conservative training examples, and a ScamBench-compatible augmentation bundle.
 """
 
@@ -18,8 +18,11 @@ from pathlib import Path
 from typing import Any
 
 SCRIPT_DIR = Path(__file__).resolve().parent
-if str(SCRIPT_DIR) not in sys.path:
-    sys.path.insert(0, str(SCRIPT_DIR))
+# Sibling helpers live next to this file; shared helpers (scam_defense_exchange)
+# live in the parent scripts/ directory.
+for _import_root in (SCRIPT_DIR, SCRIPT_DIR.parent):
+    if str(_import_root) not in sys.path:
+        sys.path.insert(0, str(_import_root))
 
 from scam_defense_exchange import (
     DECISION_JSON_SYSTEM_PROMPT,
@@ -29,9 +32,9 @@ from scam_defense_exchange import (
     build_user_prompt as build_exchange_user_prompt,
 )
 
-WORKSPACE_ROOT = Path(__file__).resolve().parents[5]
+WORKSPACE_ROOT = Path(__file__).resolve().parents[6]
 CLAWBENCH_ROOT = WORKSPACE_ROOT / "external-sources" / "clawbench"
-OUTPUT_ROOT = Path(__file__).resolve().parents[4] / "training-data" / "clawbench-materialized"
+OUTPUT_ROOT = Path(__file__).resolve().parents[5] / "training-data" / "clawbench-materialized"
 SYSTEM_PROMPT = DECISION_JSON_SYSTEM_PROMPT
 THEME_STATUS = {
     "workplace-assistant": "active",

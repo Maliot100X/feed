@@ -4,12 +4,11 @@
  * Tracks:
  * - Redis cache performance (hit/miss rates, latency)
  * - Database query performance (operations, CPU impact)
- * - Storage operations (MinIO/Vercel Blob)
+ * - Storage operations (MinIO/R2)
  * - Memory and CPU usage
- * - Vercel cache effectiveness
  */
 
-import { logger } from '@babylon/shared';
+import { logger } from '@feed/shared';
 
 interface CacheMetrics {
   hits: number;
@@ -50,11 +49,6 @@ interface DatabaseMetrics {
       cpuIntensive: boolean;
     }
   >;
-  connectionPoolStats: {
-    active: number;
-    idle: number;
-    waiting: number;
-  };
 }
 
 interface SystemMetrics {
@@ -72,16 +66,56 @@ interface PerformanceSnapshot {
   storage: StorageMetrics;
   database: DatabaseMetrics;
   system: SystemMetrics;
-  vercelCache?: {
-    hits: number;
-    misses: number;
-    hitRate: number;
-  };
 }
 
-class PerformanceMonitor {
+/** Maximum latency/duration samples retained per series. */
+const MAX_SAMPLES = 1000;
+
+function pushBounded(samples: number[], value: number): void {
+  samples.push(value);
+  if (samples.length > MAX_SAMPLES) {
+    samples.shift();
+  }
+}
+
+function average(samples: number[]): number {
+  return samples.length > 0
+    ? samples.reduce((a, b) => a + b, 0) / samples.length
+    : 0;
+}
+
+/**
+ * Workers expose `process.cpuUsage`/`memoryUsage` under nodejs_compat but throw
+ * ERR_METHOD_NOT_IMPLEMENTED; there is no per-process resource data to sample.
+ */
+function hasProcessMetrics(): boolean {
+  return (
+    typeof process !== 'undefined' &&
+    process.env.DEPLOYMENT_PLATFORM !== 'cloudflare'
+  );
+}
+
+export class PerformanceMonitor {
   private snapshots: PerformanceSnapshot[] = [];
   private readonly MAX_SNAPSHOTS = 1000;
+
+  /** Start of the current measurement window (construction or reset). */
+  private windowStartedAt: number;
+  /** CPU time and wall time at the previous CPU measurement. */
+  private lastCpu: { usageMicros: number; atMs: number } | null;
+
+  constructor(private readonly now: () => number = Date.now) {
+    this.windowStartedAt = now();
+    this.lastCpu = this.readCpu();
+  }
+
+  private readCpu(): { usageMicros: number; atMs: number } | null {
+    if (!hasProcessMetrics() || typeof process.cpuUsage !== 'function') {
+      return null;
+    }
+    const usage = process.cpuUsage();
+    return { usageMicros: usage.user + usage.system, atMs: this.now() };
+  }
 
   // Cache metrics
   private cacheHits = 0;
@@ -117,10 +151,6 @@ class PerformanceMonitor {
   private requestCount = 0;
   private activeRequests = 0;
 
-  // Vercel cache metrics
-  private vercelCacheHits = 0;
-  private vercelCacheMisses = 0;
-
   /**
    * Record a cache operation
    */
@@ -139,7 +169,7 @@ class PerformanceMonitor {
       } else {
         this.cacheMisses++;
       }
-      this.cacheLatencies.push(latencyMs);
+      pushBounded(this.cacheLatencies, latencyMs);
     } else if (operation === 'set' && bytes) {
       this.cacheBytesWritten += bytes;
     }
@@ -162,12 +192,12 @@ class PerformanceMonitor {
     switch (operation) {
       case 'upload':
         this.storageUploads++;
-        this.storageUploadLatencies.push(latencyMs);
+        pushBounded(this.storageUploadLatencies, latencyMs);
         if (bytes) this.storageBytesUp += bytes;
         break;
       case 'download':
         this.storageDownloads++;
-        this.storageDownloadLatencies.push(latencyMs);
+        pushBounded(this.storageDownloadLatencies, latencyMs);
         if (bytes) this.storageBytesDown += bytes;
         break;
       case 'delete':
@@ -192,7 +222,7 @@ class PerformanceMonitor {
       existing.count++;
       existing.totalDuration += durationMs;
       existing.maxDuration = Math.max(existing.maxDuration, durationMs);
-      existing.durations.push(durationMs);
+      pushBounded(existing.durations, durationMs);
       existing.cpuIntensive = existing.cpuIntensive || cpuIntensive;
     } else {
       this.dbOperations.set(key, {
@@ -218,28 +248,30 @@ class PerformanceMonitor {
   }
 
   /**
-   * Record Vercel cache hit/miss
+   * Take a performance snapshot and record it in the snapshot history.
    */
-  recordVercelCache(hit: boolean): void {
-    if (hit) {
-      this.vercelCacheHits++;
-    } else {
-      this.vercelCacheMisses++;
+  takeSnapshot(): PerformanceSnapshot {
+    const snapshot = this.computeSnapshot();
+    this.snapshots.push(snapshot);
+    if (this.snapshots.length > this.MAX_SNAPSHOTS) {
+      this.snapshots.shift();
     }
+    return snapshot;
   }
 
   /**
-   * Take a performance snapshot
+   * Compute current metrics without recording history.
+   *
+   * CPU usage is process CPU time (user + system) as a percentage of wall
+   * time since the previous computation; requests per second is the request
+   * count over the current measurement window.
    */
-  takeSnapshot(): PerformanceSnapshot {
+  computeSnapshot(): PerformanceSnapshot {
     // Check if process methods are available (not available in browser environments)
     const hasMemoryUsage =
-      typeof process !== 'undefined' &&
-      typeof process.memoryUsage === 'function';
-    const hasCpuUsage =
-      typeof process !== 'undefined' && typeof process.cpuUsage === 'function';
+      hasProcessMetrics() && typeof process.memoryUsage === 'function';
     const hasUptime =
-      typeof process !== 'undefined' && typeof process.uptime === 'function';
+      hasProcessMetrics() && typeof process.uptime === 'function';
 
     const memUsage = hasMemoryUsage
       ? process.memoryUsage()
@@ -281,20 +313,29 @@ class PerformanceMonitor {
     const p95Index = Math.floor(allDbDurations.length * 0.95);
     const p99Index = Math.floor(allDbDurations.length * 0.99);
 
-    // Calculate request rate
-    const timeWindowSeconds = Math.min(60, uptime);
-    const requestsPerSecond = this.requestCount / timeWindowSeconds;
+    const windowSeconds = (this.now() - this.windowStartedAt) / 1000;
+    const requestsPerSecond =
+      windowSeconds > 0 ? this.requestCount / windowSeconds : 0;
 
-    const snapshot: PerformanceSnapshot = {
-      timestamp: new Date(),
+    let cpuUsagePercent = 0;
+    const cpu = this.readCpu();
+    if (cpu && this.lastCpu) {
+      const wallMicros = (cpu.atMs - this.lastCpu.atMs) * 1000;
+      if (wallMicros > 0) {
+        cpuUsagePercent =
+          ((cpu.usageMicros - this.lastCpu.usageMicros) / wallMicros) * 100;
+      }
+    }
+    if (cpu) {
+      this.lastCpu = cpu;
+    }
+
+    return {
+      timestamp: new Date(this.now()),
       cache: {
         hits: this.cacheHits,
         misses: this.cacheMisses,
-        avgLatencyMs:
-          this.cacheLatencies.length > 0
-            ? this.cacheLatencies.reduce((a, b) => a + b, 0) /
-              this.cacheLatencies.length
-            : 0,
+        avgLatencyMs: average(this.cacheLatencies),
         operations: { ...this.cacheOps },
         bytesRead: this.cacheBytesRead,
         bytesWritten: this.cacheBytesWritten,
@@ -305,16 +346,8 @@ class PerformanceMonitor {
         deletes: this.storageDeletes,
         bytesUploaded: this.storageBytesUp,
         bytesDownloaded: this.storageBytesDown,
-        avgUploadLatencyMs:
-          this.storageUploadLatencies.length > 0
-            ? this.storageUploadLatencies.reduce((a, b) => a + b, 0) /
-              this.storageUploadLatencies.length
-            : 0,
-        avgDownloadLatencyMs:
-          this.storageDownloadLatencies.length > 0
-            ? this.storageDownloadLatencies.reduce((a, b) => a + b, 0) /
-              this.storageDownloadLatencies.length
-            : 0,
+        avgUploadLatencyMs: average(this.storageUploadLatencies),
+        avgDownloadLatencyMs: average(this.storageDownloadLatencies),
         errors: this.storageErrors,
       },
       database: {
@@ -325,14 +358,9 @@ class PerformanceMonitor {
         p95DurationMs: allDbDurations[p95Index] || 0,
         p99DurationMs: allDbDurations[p99Index] || 0,
         operationBreakdown: dbOperationBreakdown,
-        connectionPoolStats: {
-          active: 0, // Would need to hook into database for this
-          idle: 0,
-          waiting: 0,
-        },
       },
       system: {
-        cpuUsagePercent: hasCpuUsage ? process.cpuUsage().user / 1000000 : 0, // Convert to percentage, default to 0 in browser
+        cpuUsagePercent,
         memoryUsageMB: memUsage.heapUsed / 1024 / 1024,
         memoryUsagePercent:
           memUsage.heapTotal > 0
@@ -343,31 +371,13 @@ class PerformanceMonitor {
         requestsPerSecond,
       },
     };
-
-    // Add Vercel cache stats if available
-    if (this.vercelCacheHits + this.vercelCacheMisses > 0) {
-      const total = this.vercelCacheHits + this.vercelCacheMisses;
-      snapshot.vercelCache = {
-        hits: this.vercelCacheHits,
-        misses: this.vercelCacheMisses,
-        hitRate: this.vercelCacheHits / total,
-      };
-    }
-
-    // Store snapshot
-    this.snapshots.push(snapshot);
-    if (this.snapshots.length > this.MAX_SNAPSHOTS) {
-      this.snapshots.shift();
-    }
-
-    return snapshot;
   }
 
   /**
-   * Get performance statistics
+   * Get current performance statistics (does not record history)
    */
   getStats(): PerformanceSnapshot {
-    return this.takeSnapshot();
+    return this.computeSnapshot();
   }
 
   /**
@@ -395,7 +405,7 @@ class PerformanceMonitor {
     metric: number;
     threshold: number;
   }[] {
-    const snapshot = this.takeSnapshot();
+    const snapshot = this.computeSnapshot();
     const bottlenecks: ReturnType<PerformanceMonitor['identifyBottlenecks']> =
       [];
 
@@ -494,7 +504,7 @@ class PerformanceMonitor {
    */
   getRecommendations(): string[] {
     const recommendations: string[] = [];
-    const snapshot = this.takeSnapshot();
+    const snapshot = this.computeSnapshot();
     const bottlenecks = this.identifyBottlenecks();
 
     // Cache recommendations
@@ -583,10 +593,9 @@ class PerformanceMonitor {
     this.requestCount = 0;
     this.activeRequests = 0;
 
-    this.vercelCacheHits = 0;
-    this.vercelCacheMisses = 0;
-
     this.snapshots = [];
+    this.windowStartedAt = this.now();
+    this.lastCpu = this.readCpu();
 
     logger.info('Performance metrics reset', undefined, 'PerformanceMonitor');
   }
@@ -595,7 +604,7 @@ class PerformanceMonitor {
    * Log performance summary
    */
   logSummary(): void {
-    const snapshot = this.takeSnapshot();
+    const snapshot = this.computeSnapshot();
     const bottlenecks = this.identifyBottlenecks();
     const recommendations = this.getRecommendations();
 
@@ -649,9 +658,10 @@ class PerformanceMonitor {
 // Singleton instance
 export const performanceMonitor = new PerformanceMonitor();
 
-// Auto-snapshot every minute
+// Record a snapshot every minute. unref() so importing this module never
+// keeps a process alive.
 if (typeof setInterval !== 'undefined') {
   setInterval(() => {
     performanceMonitor.takeSnapshot();
-  }, 60000);
+  }, 60000).unref?.();
 }

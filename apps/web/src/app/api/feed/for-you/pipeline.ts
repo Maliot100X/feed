@@ -1,4 +1,4 @@
-import { getCacheOrFetch } from '@babylon/api';
+import { getCacheOrFetch } from '@feed/api';
 import {
   and,
   arcStates,
@@ -23,25 +23,29 @@ import {
   sql,
   userActorFollows,
   users,
-} from '@babylon/db';
+} from '@feed/db';
 import {
   dailyTopicService,
   deriveTopicFromText,
   StaticDataRegistry,
-} from '@babylon/engine';
+} from '@feed/engine';
 import type {
   ArcStateType,
   FeedEventAction,
   NarrativePost,
   NarrativeStory,
-} from '@babylon/shared';
-import { clamp, logger } from '@babylon/shared';
+} from '@feed/shared';
+import { clamp, logger } from '@feed/shared';
 import { compareFeedStories } from '@/app/api/feed/feed-cursor';
 import {
   calculateArcStateMultiplier,
   calculateResolutionBoost,
   calculateStoryScore,
 } from '@/app/api/feed/narrative/scoring';
+import {
+  filterStoriesForViewer,
+  loadViewerExcludedAuthorIds,
+} from '../_lib/viewer-moderation';
 import { dedupeQuestionMarketRows } from '../questionMarketRows';
 import {
   loadDiscoveryForYouCandidatePosts,
@@ -528,7 +532,10 @@ async function loadBaseCandidates(): Promise<BaseForYouResult> {
         timestamp: posts.timestamp,
       })
       .from(posts)
-      .where(inArray(posts.id, repostOriginalIds));
+      // Deleted originals must not be rendered inside reposts.
+      .where(
+        and(inArray(posts.id, repostOriginalIds), isNull(posts.deletedAt))
+      );
 
     const originalAuthorIds = [
       ...new Set(originalRows.map((row) => row.authorId)),
@@ -921,10 +928,7 @@ async function loadBaseCandidates(): Promise<BaseForYouResult> {
         noShares: markets.noShares,
       })
       .from(questions)
-      .innerJoin(
-        markets,
-        sql`lower(trim(${markets.question})) = lower(trim(${questions.text}))`
-      )
+      .innerJoin(markets, eq(markets.id, questions.marketId))
       .where(inArray(questions.questionNumber, storyQuestionNumbers))
       .orderBy(desc(markets.createdAt));
 
@@ -966,10 +970,7 @@ async function loadBaseCandidates(): Promise<BaseForYouResult> {
     })
     .from(questions)
     .leftJoin(arcStates, eq(arcStates.questionId, questions.id))
-    .innerJoin(
-      markets,
-      sql`lower(trim(${markets.question})) = lower(trim(${questions.text}))`
-    )
+    .innerJoin(markets, eq(markets.id, questions.marketId))
     .where(
       and(
         eq(questions.status, 'active'),
@@ -1051,10 +1052,7 @@ async function loadBaseCandidates(): Promise<BaseForYouResult> {
       topicLabel: questions.topicLabel,
     })
     .from(questions)
-    .innerJoin(
-      markets,
-      sql`lower(trim(${markets.question})) = lower(trim(${questions.text}))`
-    )
+    .innerJoin(markets, eq(markets.id, questions.marketId))
     .where(
       and(
         eq(questions.status, 'resolved'),
@@ -1286,7 +1284,7 @@ export async function buildForYouFeed(userId?: string | null) {
   const currentTopic = await dailyTopicService.getCurrentTopic();
 
   const baseResult = await getCacheOrFetch<BaseForYouResult>(
-    'feed:for-you:v2:base',
+    'feed:for-you:v3:base',
     () => loadBaseCandidates(),
     { namespace: 'feed', ttl: BASE_CACHE_TTL_S }
   );
@@ -1642,11 +1640,20 @@ export async function buildForYouFeed(userId?: string | null) {
   const MAX_STORIES = 200;
   const allStories = [...rankedStories, ...discoveryStories];
 
+  // Base and discovery candidates are global caches: apply the viewer's
+  // block/mute policy before paging.
+  const visibleStories = userId
+    ? filterStoriesForViewer(
+        allStories,
+        await loadViewerExcludedAuthorIds(userId)
+      )
+    : allStories;
+
   return {
     stories:
-      allStories.length > MAX_STORIES
-        ? allStories.slice(0, MAX_STORIES)
-        : allStories,
+      visibleStories.length > MAX_STORIES
+        ? visibleStories.slice(0, MAX_STORIES)
+        : visibleStories,
     generatedAt: baseResult.generatedAt,
   };
 }

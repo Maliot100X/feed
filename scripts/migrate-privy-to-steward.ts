@@ -90,8 +90,6 @@ interface PrivyUser {
 
 interface EmaillessUser {
   privyId: string;
-  farcasterFid: number | null;
-  farcasterUsername: string | null;
   twitterUsername: string | null;
   telegramId: string | null;
   telegramUsername: string | null;
@@ -145,16 +143,6 @@ function getUserEmail(user: PrivyUser): string | null {
   return emailAccount?.email ?? null;
 }
 
-function getFarcasterFid(user: PrivyUser): number | null {
-  const fc = user.linked_accounts.find((a) => a.type === 'farcaster');
-  return fc ? Number((fc as { fid?: number }).fid ?? 0) || null : null;
-}
-function getFarcasterUsername(user: PrivyUser): string | null {
-  const fc = user.linked_accounts.find((a) => a.type === 'farcaster');
-  return fc
-    ? String((fc as { username?: string }).username ?? '') || null
-    : null;
-}
 function getTwitterUsername(user: PrivyUser): string | null {
   const tw = user.linked_accounts.find((a) => a.type === 'twitter_oauth');
   return tw
@@ -252,8 +240,6 @@ console.info('\n📄 Phase C: Writing email-less user manifest...');
 
 const emaillessManifest: EmaillessUser[] = withoutEmail.map((u) => ({
   privyId: u.id,
-  farcasterFid: getFarcasterFid(u),
-  farcasterUsername: getFarcasterUsername(u),
   twitterUsername: getTwitterUsername(u),
   telegramId: getTelegramId(u),
   telegramUsername: getTelegramUsername(u),

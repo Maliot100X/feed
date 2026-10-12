@@ -7,11 +7,13 @@
 
 import { logger } from './logger';
 
-// Basic profanity and abuse detection (expandable)
+// Basic profanity and abuse detection (expandable).
+// No `g` flag: these are used with `.test`, which would retain lastIndex
+// between calls and make repeated checks alternate verdicts.
 const BLOCKED_PATTERNS = [
-  /\b(fuck|shit|bitch|asshole|cunt|nigger|nigga|faggot|retard)\b/gi,
-  /(kill yourself|kys|suicide)/gi,
-  /(hack|exploit|ddos|dos attack)/gi,
+  /\b(fuck|shit|bitch|asshole|cunt|nigger|nigga|faggot|retard)\b/i,
+  /(kill yourself|kys|suicide)/i,
+  /(hack|exploit|ddos|dos attack)/i,
 ];
 
 // Prompt injection attempts

@@ -4,7 +4,8 @@
   "globalEnv": [
     "NODE_ENV",
     "CI",
-    "VERCEL",
+    "DEPLOYMENT_PLATFORM",
+    "DEPLOYMENT_ENV",
     "SENTRY_AUTH_TOKEN",
     "NEXT_PUBLIC_*"
   ],

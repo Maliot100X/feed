@@ -86,7 +86,7 @@
  * @see {@link /lib/onboarding/types} Onboarding types
  */
 
-import type { JsonValue } from '@babylon/api';
+import type { JsonValue } from '@feed/api';
 import {
   authenticate,
   ConflictError,
@@ -99,7 +99,7 @@ import {
   successResponse,
   TradingBalanceFundingService,
   withErrorHandling,
-} from '@babylon/api';
+} from '@feed/api';
 import {
   and,
   db,
@@ -112,16 +112,16 @@ import {
   users,
   withRetry,
   withTransaction,
-} from '@babylon/db';
-import { UserAlphaGroupAssignmentService } from '@babylon/engine';
-import type { OnboardingProfilePayload } from '@babylon/shared';
+} from '@feed/db';
+import { UserAlphaGroupAssignmentService } from '@feed/engine';
+import type { OnboardingProfilePayload } from '@feed/shared';
 import {
   generateSnowflakeId,
   logger,
   OnboardingProfileSchema,
   POINTS,
   toISO,
-} from '@babylon/shared';
+} from '@feed/shared';
 import type { NextRequest } from 'next/server';
 import { z } from 'zod';
 import { trackServerEvent } from '@/lib/posthog/server';
@@ -170,10 +170,6 @@ export const POST = withErrorHandling(async (request: NextRequest) => {
 
   // Capture and hash IP address for self-referral detection
   const registrationIpHash = getHashedClientIp(request.headers);
-
-  // Phase 2: Privy identity token replaced by Steward. Social usernames come
-  // from the user's profile payload or are populated at social login time.
-  let identityFarcasterUsername: string | undefined;
   let identityTwitterUsername: string | undefined;
   const adminEmailResult = {
     adminEmail: null as string | null,
@@ -182,7 +178,6 @@ export const POST = withErrorHandling(async (request: NextRequest) => {
 
   // Check for imported social data from onboarding flow
   const importedTwitter = parsedProfile.importedFrom === 'twitter';
-  const importedFarcaster = parsedProfile.importedFrom === 'farcaster';
 
   // Wrap transaction with retry logic for connection errors
   const result = await withRetry(
@@ -308,16 +303,6 @@ export const POST = withErrorHandling(async (request: NextRequest) => {
             `Username "${parsedProfile.username}" is already used as a referral code by another user`,
             'User.referralCode'
           );
-        }
-
-        // Handle Farcaster from Privy identity or onboarding import
-        if (identityFarcasterUsername || importedFarcaster) {
-          baseUserData.hasFarcaster = true;
-          baseUserData.farcasterUsername =
-            parsedProfile.farcasterUsername ?? identityFarcasterUsername;
-          if (parsedProfile.farcasterFid) {
-            baseUserData.farcasterFid = parsedProfile.farcasterFid;
-          }
         }
 
         // Handle Twitter from Privy identity or onboarding import
@@ -505,7 +490,6 @@ export const POST = withErrorHandling(async (request: NextRequest) => {
 
   // Award reputation for social account linking.
   const reputationBreakdown = {
-    farcaster: 0,
     twitter: 0,
     wallet: 0,
     profile: 0,
@@ -597,27 +581,6 @@ export const POST = withErrorHandling(async (request: NextRequest) => {
       );
     }
   }
-
-  if (identityFarcasterUsername || importedFarcaster) {
-    const farcasterUsername =
-      parsedProfile.farcasterUsername ?? identityFarcasterUsername;
-    if (farcasterUsername) {
-      const pointsResult = await ReputationService.awardFarcasterLink(
-        result.user.id,
-        farcasterUsername
-      );
-      reputationBreakdown.farcaster = pointsResult.reputationAwarded;
-      logger.info(
-        'Awarded Farcaster link reputation',
-        {
-          userId: result.user.id,
-          username: farcasterUsername,
-          reputation: pointsResult.reputationAwarded,
-        },
-        'POST /api/users/signup'
-      );
-    }
-  }
   if (identityTwitterUsername || importedTwitter) {
     const twitterUsername =
       parsedProfile.twitterUsername ?? identityTwitterUsername;
@@ -662,7 +625,6 @@ export const POST = withErrorHandling(async (request: NextRequest) => {
       hasReferrer: Boolean(result.referrerId),
       reputationBreakdown,
       totalReputationAwarded,
-      hasFarcaster: result.user.hasFarcaster,
       hasTwitter: result.user.hasTwitter,
     },
     'POST /api/users/signup'
@@ -674,7 +636,6 @@ export const POST = withErrorHandling(async (request: NextRequest) => {
   await trackServerEvent(result.user.id, 'signup_completed', {
     username: result.user.username,
     hasReferrer: Boolean(result.referrerId),
-    hasFarcaster: result.user.hasFarcaster,
     hasTwitter: result.user.hasTwitter,
     hasProfileImage: result.user.hasProfileImage,
     hasBio: result.user.hasBio,
@@ -779,9 +740,7 @@ export const POST = withErrorHandling(async (request: NextRequest) => {
       referredBy: result.user.referredBy,
       reputationPoints: result.user.reputationPoints,
       pointsAwardedForProfile: result.user.pointsAwardedForProfile,
-      hasFarcaster: result.user.hasFarcaster,
       hasTwitter: result.user.hasTwitter,
-      farcasterUsername: result.user.farcasterUsername,
       twitterUsername: result.user.twitterUsername,
       createdAt: toISO(result.user.createdAt),
       updatedAt: toISO(result.user.updatedAt),

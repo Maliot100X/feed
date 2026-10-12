@@ -4,6 +4,7 @@
  * Handles agents responding to direct messages autonomously
  */
 
+import type { IAgentRuntime } from '@elizaos/core';
 import {
   and,
   chatParticipants,
@@ -14,8 +15,7 @@ import {
   messages,
   ne,
   users,
-} from '@babylon/db';
-import type { IAgentRuntime } from '@elizaos/core';
+} from '@feed/db';
 import { callGroqDirect } from '../llm/direct-groq';
 import { getAgentConfig } from '../shared/agent-config';
 import { logger } from '../shared/logger';
@@ -36,7 +36,8 @@ export class AutonomousDMService {
    */
   async respondToDMs(
     agentUserId: string,
-    _runtime: IAgentRuntime
+    _runtime: IAgentRuntime,
+    planningContext?: string
   ): Promise<number> {
     // Resolve agent context (NPC vs USER_CONTROLLED)
     const { displayName: agentDisplayName } =
@@ -69,7 +70,11 @@ export class AutonomousDMService {
 
     for (const chatParticipant of dmChatsRaw) {
       const chat = chatParticipant.chat;
-      if (!chat || chat.isGroup) continue; // Skip group chats
+      if (!chat)
+        throw new Error(
+          `Missing chat ${chatParticipant.chatId} for participant`
+        );
+      if (chat.isGroup) continue;
 
       // Skip DMs with the owner - owner should use Agents chat instead
       // Directly check if owner is a participant (more reliable than checking arbitrary other participant)
@@ -115,21 +120,23 @@ export class AutonomousDMService {
       // Get conversation context
       const allMessages = await db.message.findMany({
         where: { chatId: chat.id },
-        orderBy: { createdAt: 'asc' },
+        orderBy: { createdAt: 'desc' },
         take: 10,
       });
 
+      // A response already newer than their last message must not be sent again.
+      if (allMessages[0]?.senderId === agentUserId) continue;
+      allMessages.reverse();
       const latestMessage = unreadMessages[0];
       if (!latestMessage) continue;
 
       // Generate response
-      const prompt = `${config?.systemPrompt ?? 'You are an AI agent on Babylon.'}
+      const prompt = `${config?.systemPrompt ?? 'You are an AI agent on Feed.'}
 
 You are ${agentDisplayName} in a direct message conversation.
 
 Recent conversation:
 ${allMessages
-  .slice(-5)
   .map((m) => `${m.senderId === agentUserId ? 'You' : 'Them'}: ${m.content}`)
   .join('\n')}
 
@@ -146,7 +153,10 @@ Generate ONLY the response text, nothing else.`;
       // Use small model (llama-3.1-8b-instant) for fast DM responses
       const responseContent = await callGroqDirect({
         prompt,
-        system: config?.systemPrompt ?? undefined,
+        system:
+          [config?.systemPrompt, planningContext]
+            .filter(Boolean)
+            .join('\n\n') || undefined,
         modelSize: 'small', // Free tier: Frequent operation, use fast model
         runtime: _runtime, // Pass runtime to access W&B trained models AND trajectory context
         temperature: 0.8,
@@ -157,9 +167,8 @@ Generate ONLY the response text, nothing else.`;
 
       const cleanContent = responseContent.trim().replace(/^["']|["']$/g, '');
 
-      if (!cleanContent || cleanContent.length < 5) {
-        continue;
-      }
+      if (!cleanContent || cleanContent.length < 5)
+        throw new Error('DM response is empty or too short');
 
       // Create response message
       const result = await executeDirectMessage({
@@ -174,7 +183,7 @@ Generate ONLY the response text, nothing else.`;
           undefined,
           'AutonomousDM'
         );
-        continue;
+        throw new Error(`Failed to create DM response: ${result.error}`);
       }
 
       responsesCreated++;

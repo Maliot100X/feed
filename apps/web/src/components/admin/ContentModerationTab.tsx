@@ -18,7 +18,7 @@
  */
 'use client';
 
-import { cn, formatDateTime } from '@babylon/shared';
+import { cn, formatDateTime } from '@feed/shared';
 import {
   AlertTriangle,
   Check,
@@ -28,11 +28,11 @@ import {
   MessageSquare,
   RefreshCw,
 } from 'lucide-react';
-import { useCallback, useEffect, useState, useTransition } from 'react';
+import { useCallback, useEffect, useRef, useState, useTransition } from 'react';
 import { toast } from 'sonner';
 import { Avatar } from '@/components/shared/Avatar';
 import { Skeleton } from '@/components/shared/Skeleton';
-import { apiUrl } from '@/utils/api-url';
+import { apiFetch } from '@/utils/api-fetch';
 
 type ContentType = 'all' | 'posts' | 'comments';
 
@@ -116,8 +116,13 @@ export function ContentModerationTab() {
     []
   );
 
+  // Only the latest request (current filter) may commit results.
+  const requestSeqRef = useRef(0);
+
   const fetchQueue = useCallback(
     (showRefreshing = false) => {
+      const seq = ++requestSeqRef.current;
+      const isCurrent = () => seq === requestSeqRef.current;
       const fetchLogic = async () => {
         setError(null);
         const params = new URLSearchParams();
@@ -125,8 +130,9 @@ export function ContentModerationTab() {
 
         let response: Response;
         try {
-          response = await fetch(apiUrl(`/api/admin/content-queue?${params}`));
+          response = await apiFetch(`/api/admin/content-queue?${params}`);
         } catch {
+          if (!isCurrent()) return;
           setError({
             type: 'network',
             message: 'Network error. Check your connection.',
@@ -134,6 +140,7 @@ export function ContentModerationTab() {
           setLoading(false);
           return;
         }
+        if (!isCurrent()) return;
 
         if (!response.ok) {
           const errorData = await response.json().catch(() => ({}));
@@ -147,8 +154,16 @@ export function ContentModerationTab() {
           return;
         }
 
-        const result = await response.json();
-        setData(result);
+        const result = await response.json().catch(() => null);
+        if (!isCurrent()) return;
+        if (result === null) {
+          setError({
+            type: 'unknown',
+            message: 'Received an invalid response from the server.',
+          });
+        } else {
+          setData(result);
+        }
         setLoading(false);
       };
 
@@ -178,8 +193,8 @@ export function ContentModerationTab() {
     startActioning(async () => {
       let response: Response;
       try {
-        response = await fetch(
-          apiUrl(`/api/admin/content-queue/${selectedItem.id}`),
+        response = await apiFetch(
+          `/api/admin/content-queue/${encodeURIComponent(selectedItem.id)}`,
           {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
@@ -387,7 +402,12 @@ export function ContentModerationTab() {
             {(['all', 'posts', 'comments'] as const).map((t) => (
               <button
                 key={t}
+                type="button"
+                aria-pressed={contentType === t}
                 onClick={() => {
+                  // Re-selecting the active filter triggers no refetch, so
+                  // it must not enter the loading state.
+                  if (t === contentType) return;
                   setContentType(t);
                   setLoading(true);
                 }}

@@ -5,7 +5,6 @@
  * Allows coordinator to know who the user's agents are and help with @mentions.
  */
 
-import { and, chatParticipants, db, eq, users } from '@babylon/db';
 import type {
   IAgentRuntime,
   Memory,
@@ -13,6 +12,7 @@ import type {
   ProviderResult,
   State,
 } from '@elizaos/core';
+import { and, chatParticipants, db, eq, users } from '@feed/db';
 
 /** Team member info */
 interface TeamMember {

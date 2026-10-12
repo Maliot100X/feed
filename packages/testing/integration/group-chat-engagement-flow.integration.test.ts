@@ -19,12 +19,9 @@ import {
   expect,
   test,
 } from 'bun:test';
-import { db } from '@babylon/db';
-import {
-  NPCGroupDynamicsService,
-  NPCInteractionTracker,
-} from '@babylon/engine';
-import { generateSnowflakeId } from '@babylon/shared';
+import { db } from '@feed/db';
+import { NPCGroupDynamicsService, NPCInteractionTracker } from '@feed/engine';
+import { generateSnowflakeId } from '@feed/shared';
 
 // Test data cleanup tracking
 const testIds = {

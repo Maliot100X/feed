@@ -1,28 +1,21 @@
 /**
  * GET /feed/breaking-news/rss — RSS 2.0 feed of breaking news (world events, org updates, actor posts).
  *
- * WHY internal fetch: Same as /feed/rss — we call the existing breaking-news widget API and convert
- * to RSS so all aggregation and RLS logic stays in one place. Limit 20 keeps the feed focused.
+ * Same as /feed/rss — reuses the breaking-news widget handler in-process
+ * (anonymously, since RSS output is publicly cached) and converts it to RSS.
+ * Limit 20 keeps the feed focused.
  */
 
-import { publicRateLimit } from '@babylon/api';
+import { publicRateLimit } from '@feed/api';
 import type { NextRequest } from 'next/server';
+import { GET as getBreakingNews } from '@/app/api/feed/widgets/breaking-news/route';
+import { loadAnonymousJson } from '@/lib/http/in-process';
 import {
   buildRssXml,
   getRssCacheHeaders,
   type RssChannel,
   type RssItem,
 } from '@/lib/rss';
-
-/** WHY: Absolute origin needed for RSS item links (see feed/rss/route). */
-function getOrigin(request: NextRequest): string {
-  const forwardedHost = request.headers.get('x-forwarded-host');
-  const forwardedProto = request.headers.get('x-forwarded-proto');
-  if (forwardedHost && forwardedProto) {
-    return `${forwardedProto}://${forwardedHost}`;
-  }
-  return new URL(request.url).origin;
-}
 
 interface BreakingNewsItem {
   id: string;
@@ -31,43 +24,34 @@ interface BreakingNewsItem {
   fullDescription?: string;
   timestamp: string;
   relatedQuestion?: number;
-  relatedActorId?: string;
-  relatedOrganizationId?: string;
+  relatedPostId?: string;
 }
 
 export async function GET(request: NextRequest) {
   const { error } = await publicRateLimit(request);
   if (error) return error;
 
-  const origin = getOrigin(request);
+  const origin = new URL(request.url).origin;
   const limit = 20;
 
-  const res = await fetch(
-    `${origin}/api/feed/widgets/breaking-news?limit=${limit}`,
-    {
-      cache: 'no-store',
-      headers: { cookie: request.headers.get('cookie') ?? '' },
-    }
+  const data = await loadAnonymousJson<{ news?: BreakingNewsItem[] }>(
+    getBreakingNews,
+    new URL(`/api/feed/widgets/breaking-news?limit=${limit}`, origin)
   );
 
-  if (!res.ok) {
+  if (!data) {
     return new Response('Breaking news feed temporarily unavailable', {
       status: 502,
     });
   }
 
-  const data = (await res.json()) as {
-    success?: boolean;
-    news?: BreakingNewsItem[];
-  };
-
   const news = data.news ?? [];
   const items: RssItem[] = news.map((item) => {
-    // WHY: Posts have relatedActorId and id = post id → link to /post/{id}. World events have no relatedActorId → link to /feed.
-    const link =
-      item.relatedActorId && item.id
-        ? `${origin}/post/${item.id}`
-        : `${origin}/feed`;
+    // Only actual posts have a post page; world events and price updates
+    // (which may also carry relatedActorId) link to the feed.
+    const link = item.relatedPostId
+      ? `${origin}/post/${encodeURIComponent(item.relatedPostId)}`
+      : `${origin}/feed`;
     return {
       title: item.title,
       link,
@@ -77,9 +61,9 @@ export async function GET(request: NextRequest) {
   });
 
   const channel: RssChannel = {
-    title: 'Babylon Breaking News',
+    title: 'Feed Breaking News',
     link: `${origin}/feed`,
-    description: 'World events, price updates, and posts from Babylon',
+    description: 'World events, price updates, and posts from Feed',
     siteUrl: origin,
   };
 

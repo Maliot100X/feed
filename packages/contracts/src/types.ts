@@ -2,7 +2,7 @@
  * Smart Contract Type Definitions
  *
  * Complete TypeScript interfaces for blockchain contract interactions.
- * These types provide type safety when interacting with Babylon's smart contracts.
+ * These types provide type safety when interacting with Feed's smart contracts.
  *
  * @packageDocumentation
  */
@@ -16,9 +16,9 @@ export interface IdentityRegistryContract {
   /** Get the token ID for a registered agent address */
   getTokenId(address: string): Promise<bigint>;
   /** Get the owner address of a token ID */
-  ownerOf(tokenId: number): Promise<string>;
+  ownerOf(tokenId: bigint): Promise<string>;
   /** Get the complete profile for an agent token */
-  getAgentProfile(tokenId: number): Promise<AgentProfileResult>;
+  getAgentProfile(tokenId: bigint): Promise<AgentProfileResult>;
   /** Check if an address is registered as an agent */
   isRegistered(address: string): Promise<boolean>;
   /** Get all active agent token IDs */
@@ -36,11 +36,11 @@ export interface IdentityRegistryContract {
  */
 export interface ReputationSystemContract {
   /** Get reputation metrics for an agent token */
-  getReputation(tokenId: number): Promise<ReputationResult>;
+  getReputation(tokenId: bigint): Promise<ReputationResult>;
   /** Get the total number of feedback entries for an agent */
-  getFeedbackCount(tokenId: number): Promise<bigint>;
+  getFeedbackCount(tokenId: bigint): Promise<bigint>;
   /** Get a specific feedback entry by index */
-  getFeedback(tokenId: number, index: number): Promise<FeedbackResult>;
+  getFeedback(tokenId: bigint, index: bigint): Promise<FeedbackResult>;
   /** Get agent token IDs with minimum reputation score */
   getAgentsByMinScore(minScore: number): Promise<bigint[]>;
 }
@@ -91,8 +91,8 @@ export type ReputationResult = [
 export interface FeedbackResult {
   /** Address of the user who submitted the feedback */
   from: string;
-  /** Rating value (int8 from contract, mapped to number) */
-  rating: number;
+  /** Rating value (int8 from contract, -5 to +5; ethers v6 returns bigint) */
+  rating: bigint;
   /** Feedback comment text */
   comment: string;
   /** Block timestamp when feedback was submitted */
@@ -102,11 +102,11 @@ export interface FeedbackResult {
 /**
  * Contract addresses for a deployment environment.
  *
- * Contains addresses for all deployed Babylon smart contracts on a specific network.
+ * Contains addresses for all deployed Feed smart contracts on a specific network.
  *
  * Architecture:
  * - Diamond: Upgradeable proxy with facets for prediction markets, perps, etc.
- * - BabylonGameOracle: The game IS the prediction oracle (IPredictionOracle)
+ * - FeedGameOracle: The game IS the prediction oracle (IPredictionOracle)
  * - GameOracleFacet: Bridges oracle outcomes to Diamond markets
  */
 export interface DeploymentContracts {
@@ -120,7 +120,7 @@ export interface DeploymentContracts {
   predictionMarketFacet: string;
   /** Oracle facet address (Chainlink/Mock) */
   oracleFacet: string;
-  /** GameOracle facet address (bridges BabylonGameOracle to Diamond) */
+  /** GameOracle facet address (bridges FeedGameOracle to Diamond) */
   gameOracleFacet?: string;
   /** LiquidityPool facet address */
   liquidityPoolFacet: string;
@@ -134,8 +134,8 @@ export interface DeploymentContracts {
   identityRegistry: string;
   /** ERC-8004 Reputation System address */
   reputationSystem: string;
-  /** Babylon Game Oracle address - THE GAME IS THE PREDICTION ORACLE */
-  babylonOracle?: string;
+  /** Feed Game Oracle address - THE GAME IS THE PREDICTION ORACLE */
+  feedOracle?: string;
   /** Ban Manager address (optional) */
   banManager?: string;
   /** Chainlink Oracle mock address (testnet only) */
@@ -198,6 +198,6 @@ export interface FeedbackSubmittedEvent {
   tokenId: bigint;
   /** Address submitting the feedback */
   from: string;
-  /** Rating value (typically -1 to 1) */
-  rating: number;
+  /** Rating value (int8 from contract, -5 to +5; ethers v6 returns bigint) */
+  rating: bigint;
 }

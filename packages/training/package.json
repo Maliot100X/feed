@@ -1,8 +1,8 @@
 {
-  "name": "@babylon/training",
+  "name": "@feed/training",
   "version": "0.1.0",
   "private": true,
-  "description": "Babylon Training Pipeline - RL training, benchmarking, and HuggingFace integration",
+  "description": "Feed Training Pipeline - RL training, benchmarking, and HuggingFace integration",
   "main": "./src/index.ts",
   "types": "./src/index.ts",
   "exports": {
@@ -23,19 +23,19 @@
     "benchmark:scenarios": "bun run scripts/generate-benchmark-scenarios.ts",
     "assess": "bun run scripts/assess-training-data.ts",
     "e2e": "bun run scripts/e2e-training-test.ts",
-    "export-rubrics": "bun run scripts/export-rubrics.ts",
-    "research-report": "bun run scripts/generate-research-report.ts"
+    "export-rubrics": "bun run scripts/export-rubrics.ts"
   },
   "dependencies": {
     "@huggingface/hub": "^2.6.12",
-    "@vercel/blob": "2.3.2",
     "ethers": "^6.16.0",
-    "uuid": "^11.1.0"
+    "uuid": "^11.1.0",
+    "@opennextjs/cloudflare": "1.20.10",
+    "@aws-sdk/client-s3": "3.1019.0"
   },
   "peerDependencies": {
-    "@babylon/core": "workspace:*",
-    "@babylon/db": "workspace:*",
-    "@babylon/shared": "workspace:*",
+    "@feed/core": "workspace:*",
+    "@feed/db": "workspace:*",
+    "@feed/shared": "workspace:*",
     "@elizaos/core": "2.0.0-alpha.109",
     "drizzle-orm": "^0.44.7"
   },

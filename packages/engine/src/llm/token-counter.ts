@@ -2,7 +2,7 @@
  * Token counter utilities (sync-only)
  *
  * These helpers are used by engine-side batching logic (e.g. MarketDecisionEngine)
- * without depending on `@babylon/api` (to avoid circular dependencies).
+ * without depending on `@feed/api` (to avoid circular dependencies).
  */
 
 /**
@@ -17,10 +17,12 @@ export function countTokensSync(text: string): number {
 /**
  * Model-specific INPUT CONTEXT token limits.
  *
- * Note: Output limits are separate from input limits on modern models.
+ * Context windows include both input and generated output tokens.
  */
 const MODEL_TOKEN_LIMITS: Record<string, number> = {
   // OpenAI (input context)
+  'qwen3-32b': 32768,
+  'gpt-6-luna': 1050000,
   'gpt-5.1': 128000,
   'gpt-5-nano': 128000,
   'gpt-5-mini': 128000,
@@ -76,24 +78,37 @@ const MODEL_TOKEN_LIMITS: Record<string, number> = {
   'claude-opus-4-1-20250805': 200000,
 };
 
-function getModelTokenLimit(model: string): number {
+export function getModelTokenLimit(model: string): number {
   return MODEL_TOKEN_LIMITS[model] || 8192; // Conservative default
 }
 
 /**
  * Calculate safe context limit with safety margin.
  *
- * Input and output are separate limits on modern models, so the default safety
- * margin is minimal (2%).
+ * Reserve output tokens inside the combined context window before batching.
  */
 export function getSafeContextLimit(
   model: string,
-  _outputTokens = 8000, // Kept for API compatibility, but input/output are separate
+  outputTokens = 8000,
   safetyMargin = 0.02
 ): number {
-  const inputLimit = getModelTokenLimit(model);
-  const safeLimit = Math.floor(inputLimit * (1 - safetyMargin));
-  return Math.max(1000, safeLimit);
+  const contextLimit = getModelTokenLimit(model);
+  if (
+    !Number.isSafeInteger(outputTokens) ||
+    outputTokens < 0 ||
+    !Number.isFinite(safetyMargin) ||
+    safetyMargin < 0 ||
+    safetyMargin >= 1
+  ) {
+    throw new Error('Invalid model token budget');
+  }
+  const available =
+    Math.floor(contextLimit * (1 - safetyMargin)) - outputTokens;
+  if (available <= 0)
+    throw new Error(
+      `No input context remains for ${model} after reserving ${outputTokens} output tokens`
+    );
+  return available;
 }
 
 /**

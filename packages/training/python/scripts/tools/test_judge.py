@@ -14,10 +14,11 @@ import sys
 from pathlib import Path
 
 # Add python directory to path
-sys.path.insert(0, str(Path(__file__).parent.parent))
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+TRAINING_PACKAGE_ROOT = Path(__file__).resolve().parents[3]
 
 from src.data_bridge.reader import JsonTrajectoryReader
-from src.models import BabylonTrajectory
+from src.models import FeedTrajectory
 from src.training.quality_utils import calculate_detailed_tick_quality
 from src.training.rewards import (
     TrajectoryRewardInputs,
@@ -30,7 +31,7 @@ logging.basicConfig(level=logging.INFO, format="%(message)s")
 logger = logging.getLogger("TheJudge")
 
 
-def evaluate_trajectory(traj: BabylonTrajectory):
+def evaluate_trajectory(traj: FeedTrajectory):
     print(f"\n--- Judging Trajectory: {traj.trajectory_id} ---")
 
     # 1. Financials
@@ -106,22 +107,17 @@ def evaluate_trajectory(traj: BabylonTrajectory):
 
 def main():
     # Look for trajectory data in the training package output directory
-    source_dir = Path(__file__).parent.parent.parent / "training-data-output" / "trajectories"
+    source_dir = TRAINING_PACKAGE_ROOT / "training-data-output" / "trajectories"
     if not source_dir.exists():
         # Fallback to engine output if training output doesn't exist
         source_dir = (
-            Path(__file__).parent.parent.parent.parent
-            / "engine"
-            / "training-data-output"
-            / "trajectories"
+            TRAINING_PACKAGE_ROOT.parent / "engine" / "training-data-output" / "trajectories"
         )
 
     # Validate that at least one path exists
     if not source_dir.exists():
         logger.error("No trajectory data found. Checked paths:")
-        logger.error(
-            f"  - {Path(__file__).parent.parent.parent / 'training-data-output' / 'trajectories'}"
-        )
+        logger.error(f"  - {TRAINING_PACKAGE_ROOT / 'training-data-output' / 'trajectories'}")
         logger.error(f"  - {source_dir}")
         logger.error(
             "Run 'make tier4-generate' or 'bun run packages/engine/examples/generate-training-data.ts' first."
@@ -145,7 +141,7 @@ def main():
                     raw["steps"] = json.loads(raw["stepsJson"])
 
                 try:
-                    traj = BabylonTrajectory.model_validate(raw)
+                    traj = FeedTrajectory.model_validate(raw)
                     evaluate_trajectory(traj)
                     count += 1
                     if count >= 5:

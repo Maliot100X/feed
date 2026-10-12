@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Audit a local Babylon trust corpus.
+Audit a local Feed trust corpus.
 
 This script recursively scans a local export root, dedupes trajectories by
 trajectory id, and produces a quality report suitable for deciding whether the
@@ -20,7 +20,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-sys.path.insert(0, str(Path(__file__).parent.parent))
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from src.data_bridge.reader import (
     IGNORED_EXPORT_FILES,
@@ -30,7 +30,7 @@ from src.data_bridge.reader import (
     discover_local_export_files,
 )
 
-HF_EXPORT_SCRIPT = Path(__file__).resolve().parent / "hf" / "trajectories_to_hf_dataset.py"
+HF_EXPORT_SCRIPT = Path(__file__).resolve().parents[1] / "hf" / "trajectories_to_hf_dataset.py"
 
 TRUST_RELEVANT_ACTIONS = {
     "DM",
@@ -63,7 +63,7 @@ EXPECTED_MODEL_SIZES = {"0.5b", "1.5b", "3b", "7b", "14b", "30b"}
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Audit a local Babylon trust corpus")
+    parser = argparse.ArgumentParser(description="Audit a local Feed trust corpus")
     parser.add_argument("--source-dir", required=True, help="Local export root")
     parser.add_argument(
         "--output",

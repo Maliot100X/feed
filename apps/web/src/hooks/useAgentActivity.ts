@@ -5,7 +5,7 @@
  * Provides a unified interface for displaying agent activity in the UI.
  */
 
-import { logger } from '@babylon/shared';
+import { logger } from '@feed/shared';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { type Channel, useSSEChannel } from './useSSE';
 
@@ -189,14 +189,18 @@ export function useAgentActivity(
   const MAX_SEEN_IDS = 500;
   const seenActivityIds = useRef(new Set<string>());
 
-  // Clear seen IDs when agentId changes to prevent stale data
-  const prevAgentIdRef = useRef(agentId);
+  // A different agent or type filter is a different feed: drop the previous
+  // feed's fetched and realtime activities (not just the seen IDs).
+  const feedKey = `${agentId ?? 'all'}:${type}`;
+  const feedKeyRef = useRef(feedKey);
   useEffect(() => {
-    if (prevAgentIdRef.current !== agentId) {
-      seenActivityIds.current.clear();
-      prevAgentIdRef.current = agentId;
-    }
-  }, [agentId]);
+    if (feedKeyRef.current === feedKey) return;
+    feedKeyRef.current = feedKey;
+    seenActivityIds.current.clear();
+    setFetchedActivities([]);
+    setRealtimeActivities([]);
+    setHasMore(false);
+  }, [feedKey]);
 
   // Build the API URL
   const apiUrl = useMemo(() => {
@@ -212,11 +216,14 @@ export function useAgentActivity(
   // Fetch function
   const fetchActivities = useCallback(async () => {
     setError(null);
+    const requestKey = feedKeyRef.current;
     const response = await fetch(apiUrl);
     if (!response.ok) {
       throw new Error(`Failed to fetch activity: ${response.statusText}`);
     }
     const data: AgentActivityResponse = await response.json();
+    // Drop responses for a feed (agent/type) that is no longer shown.
+    if (requestKey !== feedKeyRef.current) return;
 
     // Update seen IDs (cap size to prevent memory leak).
     // Pre-evict to make room for incoming activities, then add all at once.
@@ -278,6 +285,11 @@ export function useAgentActivity(
         data: AgentActivity['data'];
       };
 
+      // Respect the type filter for realtime events too.
+      if (type !== 'all' && activity.type !== type) {
+        return;
+      }
+
       // Validate required fields exist (including timestamp to prevent Invalid Date)
       if (
         !activity.type ||
@@ -327,7 +339,7 @@ export function useAgentActivity(
 
       setRealtimeActivities((prev) => [newActivity, ...prev].slice(0, limit));
     },
-    [limit]
+    [limit, type]
   );
 
   // Subscribe to agent SSE channel

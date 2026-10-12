@@ -1,12 +1,6 @@
 name: Benchmark Suite
 
 on:
-  # Run after training workflow completes
-  workflow_run:
-    workflows: ["Babylon RL Training"]
-    types:
-      - completed
-
   # Manual trigger with options
   workflow_dispatch:
     inputs:
@@ -56,8 +50,6 @@ concurrency:
 
 permissions:
   contents: read
-  issues: write
-  pull-requests: write
 
 jobs:
   benchmark:
@@ -136,37 +128,6 @@ jobs:
           path: benchmark-results/ci-${{ github.run_id }}/
           retention-days: 30
 
-      - name: Post summary to PR
-        # Only runs when triggered by workflow_run from a PR
-        if: github.event_name == 'workflow_run' && github.event.workflow_run.event == 'pull_request' && steps.scenarios.outputs.skip != 'true'
-        uses: actions/github-script@v7
-        with:
-          script: |
-            const fs = require('fs');
-            const path = require('path');
-            
-            const outputDir = '${{ steps.benchmark.outputs.output_dir }}';
-            const reportPath = path.join(outputDir, 'report.txt');
-            
-            // Get PR number from workflow_run event
-            const prs = context.payload.workflow_run?.pull_requests || [];
-            if (prs.length === 0) {
-              console.log('No associated PR found for workflow_run');
-              return;
-            }
-            const prNumber = prs[0].number;
-            
-            if (fs.existsSync(reportPath)) {
-              const report = fs.readFileSync(reportPath, 'utf8');
-              
-              await github.rest.issues.createComment({
-                owner: context.repo.owner,
-                repo: context.repo.repo,
-                issue_number: prNumber,
-                body: `## 📊 Benchmark Results\n\n\`\`\`\n${report}\n\`\`\``
-              });
-            }
-
       - name: Check benchmark verdict
         if: steps.scenarios.outputs.skip != 'true'
         run: |
@@ -186,28 +147,12 @@ jobs:
               echo "::warning::Benchmark shows mixed results - continue training"
             fi
           else
-            echo "::warning::No benchmark report found"
+            echo "::error::No benchmark report found at $REPORT_JSON"
+            exit 1
           fi
 
-      - name: Skip notice
+      - name: Fail when scenario fixtures are missing
         if: steps.scenarios.outputs.skip == 'true'
-        run: echo "Benchmark suite skipped because no scenario fixtures are available."
-
-  notify:
-    name: Notify on Failure
-    runs-on: ubuntu-latest
-    needs: benchmark
-    if: failure()
-
-    steps:
-      - name: Post failure notification
-        uses: actions/github-script@v7
-        with:
-          script: |
-            const { owner, repo } = context.repo;
-            
-            // TODO: Implement real notification - create issue, post to Slack/Discord, etc.
-            // For now, just log the failure context
-            console.log('Benchmark failed - would notify team here');
-            console.log(`Run ID: ${context.runId}`);
-            console.log(`Ref: ${context.ref}`);
+        run: |
+          echo "::error::No benchmark scenario fixtures found; the benchmark did not run."
+          exit 1

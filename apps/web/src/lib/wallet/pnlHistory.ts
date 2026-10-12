@@ -1,5 +1,6 @@
 import 'server-only';
 
+import { calculatePredictionPositionSnapshot } from '@feed/core/markets/prediction';
 import {
   and,
   asc,
@@ -14,16 +15,15 @@ import {
   positions,
   userPnLSnapshots,
   users,
-} from '@babylon/db';
-import { FEE_CONFIG } from '@babylon/engine/config/fees';
-import { toNumber } from '@babylon/engine/portfolio-valuation';
+} from '@feed/db';
+import { FEE_CONFIG } from '@feed/engine/config/fees';
+import { toNumber } from '@feed/engine/portfolio-valuation';
 import { sql } from 'drizzle-orm';
 import type {
   PnlHistoryPoint,
   PnlHistoryRange,
   UserPnlMetrics,
 } from './pnl-history-types';
-import { calculatePredictionPositionSnapshot } from './predictionPositionSnapshot';
 
 export type {
   PnlHistoryPoint,
@@ -188,8 +188,10 @@ export function buildScopedPnlHistoryPoints(params: {
   const lastPoint = points[points.length - 1];
   const lastDownsampled = downsampled[downsampled.length - 1];
 
+  // Always end on the latest point, replacing the last sample so the result
+  // never exceeds maxPoints.
   if (lastPoint && lastDownsampled?.time !== lastPoint.time) {
-    downsampled.push(lastPoint);
+    downsampled[downsampled.length - 1] = lastPoint;
   }
 
   return downsampled;
@@ -199,10 +201,7 @@ export function buildScopedPnlHistoryPoints(params: {
  * Compute canonical current P&L metrics for the requested users.
  */
 export async function loadCurrentUserPnlMetrics(
-  targetUserIds?: string[],
-  options: {
-    onPredictionPricingError?: 'fallback' | 'throw';
-  } = {}
+  targetUserIds?: string[]
 ): Promise<Map<string, UserPnlMetrics>> {
   const userFilter =
     targetUserIds && targetUserIds.length > 0
@@ -301,12 +300,10 @@ export async function loadCurrentUserPnlMetrics(
       const snapshot = calculatePredictionPositionSnapshot({
         shares: toNumber(row.shares),
         avgPrice: toNumber(row.avgPrice),
-        sideKey: row.side ? 'yes' : 'no',
+        side: row.side ? 'yes' : 'no',
         yesShares: toNumber(row.yesShares),
         noShares: toNumber(row.noShares),
         feeRate: FEE_CONFIG.TRADING_FEE_RATE,
-        logContext: 'wallet/pnlHistory',
-        onSellPreviewError: options.onPredictionPricingError ?? 'fallback',
       });
 
       metrics.unrealizedPnL += snapshot.unrealizedPnL;
@@ -349,9 +346,7 @@ export async function loadScopedPnlHistoryPoints(params: {
     )
     .orderBy(asc(userPnLSnapshots.snapshotAt));
 
-  const liveMetricsByUserId = await loadCurrentUserPnlMetrics(scopeUserIds, {
-    onPredictionPricingError: 'fallback',
-  });
+  const liveMetricsByUserId = await loadCurrentUserPnlMetrics(scopeUserIds);
 
   return buildScopedPnlHistoryPoints({
     liveMetricsByUserId,
@@ -402,9 +397,7 @@ export async function snapshotAllUserPnlMetrics(
     return 0;
   }
 
-  const metricsByUserId = await loadCurrentUserPnlMetrics(targetUserIds, {
-    onPredictionPricingError: 'throw',
-  });
+  const metricsByUserId = await loadCurrentUserPnlMetrics(targetUserIds);
   const snapshotRows = Array.from(metricsByUserId.values()).map((metrics) => ({
     id: `${metrics.userId}:${normalizedSnapshotAt.toISOString()}:pnl`,
     userId: metrics.userId,

@@ -16,7 +16,7 @@
  * @packageDocumentation
  */
 
-import { db } from '@babylon/db';
+import { db } from '@feed/db';
 import { createDecipheriv } from 'crypto';
 import { logger } from '../shared/logger';
 import type { AgentCard } from '../types/agent-registry';
@@ -31,9 +31,12 @@ export { TrustLevel } from '../types/agent-registry';
  * @internal
  */
 const getEncryptionKey = () => {
+  if (process.env.AGENT_ENCRYPTION_KEY) return process.env.AGENT_ENCRYPTION_KEY;
   if (process.env.CRON_SECRET) return process.env.CRON_SECRET;
   if (process.env.NODE_ENV === 'production') {
-    throw new Error('CRON_SECRET must be set in production');
+    throw new Error(
+      'AGENT_ENCRYPTION_KEY or CRON_SECRET must be set in production'
+    );
   }
   return 'dev-key-change-in-production-32-chars!!';
 };

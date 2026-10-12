@@ -59,16 +59,16 @@ const BASE_REQUIRED_RULES: ValidationRule[] = [
     keys: ['DATABASE_URL'],
   },
   {
-    id: 'privy-app-id',
-    description: 'Privy application identifier',
+    id: 'steward-api-url',
+    description: 'Steward public API URL',
     kind: 'oneOf',
-    keys: ['NEXT_PUBLIC_PRIVY_APP_ID', 'PRIVY_APP_ID'],
+    keys: ['NEXT_PUBLIC_STEWARD_API_URL'],
   },
   {
-    id: 'privy-app-secret',
-    description: 'Privy backend secret',
+    id: 'steward-backend',
+    description: 'Steward server authentication',
     kind: 'allOf',
-    keys: ['PRIVY_APP_SECRET'],
+    keys: ['STEWARD_API_URL', 'STEWARD_JWT_SECRET', 'STEWARD_TENANT_API_KEY'],
   },
   {
     id: 'cron-secret',
@@ -80,7 +80,13 @@ const BASE_REQUIRED_RULES: ValidationRule[] = [
     id: 'llm-provider-key',
     description: 'At least one LLM provider API key',
     kind: 'oneOf',
-    keys: ['GROQ_API_KEY', 'OPENAI_API_KEY', 'ANTHROPIC_API_KEY'],
+    keys: [
+      'SURPLUS_API_KEY',
+      'ELIZACLOUD_API_KEY',
+      'GROQ_API_KEY',
+      'OPENAI_API_KEY',
+      'ANTHROPIC_API_KEY',
+    ],
   },
 ];
 
@@ -99,7 +105,7 @@ const CONDITIONAL_RULES: ValidationRule[] = [
     keys: [
       'AGENT0_RPC_URL',
       'AGENT0_PRIVATE_KEY',
-      'BABYLON_GAME_WALLET_ADDRESS',
+      'FEED_GAME_WALLET_ADDRESS',
       'AGENT0_SUBGRAPH_URL',
     ],
     when: ({ env }) => isEnabled(env.AGENT0_ENABLED),
@@ -110,13 +116,6 @@ const CONDITIONAL_RULES: ValidationRule[] = [
     kind: 'oneOf',
     keys: ['PINATA_JWT', 'FILECOIN_PRIVATE_KEY', 'AGENT0_IPFS_API'],
     when: ({ env }) => isEnabled(env.AGENT0_ENABLED),
-  },
-  {
-    id: 'nft-chat-gating',
-    description: 'NFT chat gating dependencies when NFT chat gating is enabled',
-    kind: 'allOf',
-    keys: ['NFT_CONTRACT_ADDRESS', 'NFT_INDEXER_GRAPHQL_URL'],
-    when: ({ env }) => isEnabled(env.NFT_CHAT_GATING_ENABLED),
   },
   {
     id: 'public-app-url',
@@ -138,8 +137,8 @@ const DEPRECATED_ENV_VARS: DeprecatedEnvVar[] = [
     message: 'Deprecated alias. Use NEXT_PUBLIC_POSTHOG_PROJECT_ID.',
   },
   {
-    key: 'BABYLON_GAME_WALLET',
-    message: 'Legacy alias. Use BABYLON_GAME_WALLET_ADDRESS.',
+    key: 'FEED_GAME_WALLET',
+    message: 'Legacy alias. Use FEED_GAME_WALLET_ADDRESS.',
   },
 ];
 
@@ -195,10 +194,8 @@ export function deriveProfile(
   if (deploymentEnv === 'mainnet') return 'production';
   if (deploymentEnv === 'testnet') return 'staging';
   if (deploymentEnv === 'localnet') return 'local';
-
-  const vercelEnv = env.VERCEL_ENV?.toLowerCase().trim();
-  if (vercelEnv === 'production') return 'production';
-  if (vercelEnv === 'preview') return 'staging';
+  if (deploymentEnv === 'production') return 'production';
+  if (deploymentEnv === 'staging') return 'staging';
 
   const nodeEnv = env.NODE_ENV?.toLowerCase().trim();
   if (nodeEnv === 'production') return 'production';
@@ -412,7 +409,7 @@ function getDefaultEnvFiles(profile: ValidationProfile): string[] {
 }
 
 function printHelp(): void {
-  console.info('Validate Babylon environment variables');
+  console.info('Validate Feed environment variables');
   console.info('');
   console.info('Usage:');
   console.info(

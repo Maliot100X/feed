@@ -13,10 +13,10 @@
  * - Works with any Redis server via standard protocol
  */
 
-import { logger } from '@babylon/shared';
+import { logger } from '@feed/shared';
 import { getRedisClient, isRedisAvailable } from '../redis';
 
-const CACHE_BIGINT_MARKER = '__babylonCacheBigInt__';
+const CACHE_BIGINT_MARKER = '__feedCacheBigInt__';
 
 function cacheJsonReplacer(_key: string, value: unknown): unknown {
   if (typeof value === 'bigint') {
@@ -54,8 +54,27 @@ export function parseCacheValue<T>(value: string): T {
  */
 export interface CacheOptions {
   ttl?: number; // Time to live in seconds
-  compress?: boolean; // Compress large objects (not currently implemented)
   namespace?: string; // Cache key prefix
+}
+
+/**
+ * Largest serialized payload sent to Redis (bytes). Upstash enforces a 10MB
+ * request limit; larger values are not cached at all.
+ */
+const MAX_REDIS_PAYLOAD_BYTES = 8 * 1024 * 1024;
+
+/**
+ * Convert a Redis glob pattern (`*`, `?`) into an anchored RegExp so memory
+ * invalidation matches exactly the keys Redis SCAN MATCH would.
+ */
+export function cacheGlobToRegExp(pattern: string): RegExp {
+  let source = '';
+  for (const char of pattern) {
+    if (char === '*') source += '.*';
+    else if (char === '?') source += '.';
+    else source += char.replace(/[.+^${}()|[\]\\]/g, '\\$&');
+  }
+  return new RegExp(`^${source}$`);
 }
 
 /**
@@ -125,7 +144,6 @@ export const CACHE_KEYS = {
   ACTIVE_MARKETS: 'markets:active', // Active markets for idempotency checks
   TRENDING_TAGS: 'trending:tags',
   WIDGET: 'widget',
-  NFT_OWNERSHIP: 'nft:ownership',
 } as const;
 
 /**
@@ -189,7 +207,6 @@ export const DEFAULT_TTLS = {
   USER: 300, // 5 minutes
   TRENDING_TAGS: 300, // 5 minutes
   WIDGET: 300, // 5 minutes
-  NFT_OWNERSHIP: 60, // 1 minute (NFT ownership can change, shorter TTL for security)
 
   // Rarely changing data - long TTL
   ACTOR: 3600, // 1 hour
@@ -260,8 +277,9 @@ function cleanMemoryCache(): void {
   toDelete.forEach((key) => memoryCache.delete(key));
 }
 
-// Clean memory cache every minute
-setInterval(cleanMemoryCache, 60000);
+// Clean memory cache every minute. unref() so importing this module never
+// keeps a process alive.
+setInterval(cleanMemoryCache, 60000).unref?.();
 
 /**
  * Get value from cache
@@ -354,27 +372,22 @@ export async function setCache<T>(
   const serialized = serializeCacheValue(value);
   const client = getRedisClient();
 
-  // Upstash free/standard tier enforces a 10MB max request size.
-  // Fall back to in-memory cache for oversized payloads instead of crashing.
-  const MAX_REDIS_PAYLOAD_BYTES = 8 * 1024 * 1024; // 8MB with safety margin
-
   if (client) {
-    if (serialized.length > MAX_REDIS_PAYLOAD_BYTES) {
+    const sizeBytes = Buffer.byteLength(serialized, 'utf8');
+    if (sizeBytes > MAX_REDIS_PAYLOAD_BYTES) {
+      // Reads go to Redis whenever a client exists, so a memory copy would be
+      // unreachable. Skip caching and drop any stale Redis value instead.
       logger.warn(
-        'Cache payload too large for Redis, falling back to memory cache',
-        {
-          key: fullKey,
-          sizeBytes: serialized.length,
-          maxBytes: MAX_REDIS_PAYLOAD_BYTES,
-        },
+        'Cache payload too large for Redis, not caching',
+        { key: fullKey, sizeBytes, maxBytes: MAX_REDIS_PAYLOAD_BYTES },
         'CacheService'
       );
-      // Fall through to in-memory cache below
-    } else {
-      await client.set(fullKey, serialized, 'EX', ttl);
-      logger.debug('Cache set (Redis)', { key: fullKey, ttl }, 'CacheService');
+      await client.del(fullKey);
       return;
     }
+    await client.set(fullKey, serialized, 'EX', ttl);
+    logger.debug('Cache set (Redis)', { key: fullKey, ttl }, 'CacheService');
+    return;
   }
 
   const expiresAt = Date.now() + ttl * 1000;
@@ -461,9 +474,10 @@ export async function invalidateCachePattern(
     }
   }
 
-  // Invalidate in memory cache
+  // Invalidate in memory cache using the same namespace-aware glob as Redis
+  const matcher = cacheGlobToRegExp(fullPattern);
   const memoryKeys = Array.from(memoryCache.keys()).filter((key) =>
-    key.includes(pattern)
+    matcher.test(key)
   );
   memoryKeys.forEach((key) => memoryCache.delete(key));
 
@@ -537,7 +551,13 @@ export async function getCacheOrFetch<T>(
           { key: fullKey, error: parseError },
           'CacheService'
         );
-        void client.del(fullKey);
+        client.del(fullKey).catch((delError: Error) => {
+          logger.warn(
+            'Failed to delete corrupted cache entry',
+            { key: fullKey, error: delError.message },
+            'CacheService'
+          );
+        });
         cached = null;
         remainingTtl = 0;
       }
@@ -747,31 +767,37 @@ export async function setCacheBatch<T>(
 
   const client = getRedisClient();
   if (client) {
-    try {
-      // Use pipeline for batch set
-      const pipeline = client.pipeline();
-
-      for (const [key, value] of entriesArray) {
-        const fullKey = options.namespace ? `${options.namespace}:${key}` : key;
-        const serialized = serializeCacheValue(value);
-        pipeline.set(fullKey, serialized, 'EX', ttl);
+    // Reads go to Redis whenever a client exists, so failures here are logged
+    // (caching is best-effort) rather than written to an unreachable memory
+    // fallback.
+    const pipeline = client.pipeline();
+    for (const [key, value] of entriesArray) {
+      const fullKey = options.namespace ? `${options.namespace}:${key}` : key;
+      const serialized = serializeCacheValue(value);
+      if (Buffer.byteLength(serialized, 'utf8') > MAX_REDIS_PAYLOAD_BYTES) {
+        pipeline.del(fullKey);
+        continue;
       }
-
-      await pipeline.exec();
-
-      logger.debug(
-        'Batch cache set (Redis)',
-        { count: entriesArray.length, ttl },
-        'CacheService'
-      );
-      return;
-    } catch (error) {
-      logger.warn(
-        'Batch cache set failed, falling back to memory',
-        { error },
-        'CacheService'
-      );
+      pipeline.set(fullKey, serialized, 'EX', ttl);
     }
+
+    try {
+      const results = await pipeline.exec();
+      const failures =
+        results === null
+          ? entriesArray.length
+          : results.filter(([cmdErr]) => cmdErr !== null).length;
+      if (failures > 0) {
+        logger.warn(
+          'Batch cache set had failed commands',
+          { failures, count: entriesArray.length },
+          'CacheService'
+        );
+      }
+    } catch (error) {
+      logger.warn('Batch cache set failed', { error }, 'CacheService');
+    }
+    return;
   }
 
   // In-memory fallback

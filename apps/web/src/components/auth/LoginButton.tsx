@@ -1,13 +1,13 @@
 'use client';
 
-import { cn } from '@babylon/shared';
-import { Wallet } from 'lucide-react';
+import { cn } from '@feed/shared';
+import { LogIn } from 'lucide-react';
 import { useAuth } from '@/hooks/useAuth';
 
 /**
  * Login button component for wallet connection.
  *
- * Displays a "Connect Wallet" button that triggers the authentication
+ * Displays a "Log in" button that triggers the authentication
  * flow when clicked. Automatically disables when auth is not ready.
  * Uses Steward for wallet connection.
  *
@@ -34,8 +34,8 @@ export function LoginButton() {
         'text-[15px] leading-5'
       )}
     >
-      <Wallet className="h-5 w-5" />
-      <span>Connect Wallet</span>
+      <LogIn className="h-5 w-5" />
+      <span>Log in</span>
     </button>
   );
 }

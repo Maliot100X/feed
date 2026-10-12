@@ -5,6 +5,7 @@
  * for agent decision making.
  */
 
+import { maxSafeBuy } from '@feed/core/markets/prediction/client';
 import {
   actorRelationships,
   actorState,
@@ -23,7 +24,6 @@ import {
   getRawDrizzle,
   groups,
   gte,
-  ilike,
   inArray,
   isNull,
   lte,
@@ -39,8 +39,8 @@ import {
   sql,
   users,
   worldEvents,
-} from '@babylon/db';
-import { StaticDataRegistry } from '@babylon/engine';
+} from '@feed/db';
+import { StaticDataRegistry } from '@feed/engine';
 import { logger } from '../../shared/logger';
 import type {
   AgentMemoryEntry,
@@ -58,6 +58,7 @@ import type {
   RelationshipContext,
   WorldEventContext,
 } from '../templates/multi-step-decision';
+import { requireContextNumber } from './context-validation';
 import { getPredictionMarketPrices } from './prediction-pricing';
 import { formatTimeHeld, getTimeAgo } from './time-helpers';
 
@@ -79,8 +80,16 @@ export async function getPredictionMarkets(): Promise<
     .limit(8);
 
   return activeMarkets.map((m) => {
-    const yesShares = Number(m.yesShares || 1);
-    const noShares = Number(m.noShares || 1);
+    const yesShares = requireContextNumber(
+      m.yesShares,
+      `market ${m.id} yesShares`,
+      0
+    );
+    const noShares = requireContextNumber(
+      m.noShares,
+      `market ${m.id} noShares`,
+      0
+    );
     const { yesPrice, noPrice } = getPredictionMarketPrices(
       yesShares,
       noShares
@@ -92,7 +101,8 @@ export async function getPredictionMarkets(): Promise<
       yesPrice,
       noPrice,
       volume: yesShares + noShares,
-      endDate: m.endDate?.toISOString().split('T')[0] ?? 'Unknown',
+      maxSafeBet: maxSafeBuy(yesShares, noShares),
+      endDate: m.endDate.toISOString(),
     };
   });
 }
@@ -109,8 +119,16 @@ export async function getPerpMarkets(): Promise<PerpMarketContext[]> {
     if (!staticOrg || staticOrg.type !== 'company' || !staticOrg.ticker)
       continue;
 
-    const currentPrice = state.currentPrice ?? staticOrg.initialPrice ?? 100;
-    const initialPrice = staticOrg.initialPrice ?? 100;
+    const currentPrice = requireContextNumber(
+      state.currentPrice,
+      `perp ${staticOrg.ticker} currentPrice`,
+      Number.MIN_VALUE
+    );
+    const initialPrice = requireContextNumber(
+      staticOrg.initialPrice,
+      `perp ${staticOrg.ticker} initialPrice`,
+      Number.MIN_VALUE
+    );
     const changePercent = ((currentPrice - initialPrice) / initialPrice) * 100;
 
     result.push({
@@ -150,8 +168,7 @@ export async function getAgentPositions(agentUserId: string): Promise<{
     .from(positions)
     .where(
       and(eq(positions.userId, agentUserId), eq(positions.status, 'active'))
-    )
-    .limit(10);
+    );
 
   // Get market data for positions (question + current prices)
   const marketIds = predPositions
@@ -172,8 +189,16 @@ export async function getAgentPositions(agentUserId: string): Promise<{
       .from(markets)
       .where(inArray(markets.id, marketIds));
     for (const m of marketsData) {
-      const yesShares = Number(m.yesShares || 1);
-      const noShares = Number(m.noShares || 1);
+      const yesShares = requireContextNumber(
+        m.yesShares,
+        `market ${m.id} yesShares`,
+        0
+      );
+      const noShares = requireContextNumber(
+        m.noShares,
+        `market ${m.id} noShares`,
+        0
+      );
       const { yesPrice, noPrice } = getPredictionMarketPrices(
         yesShares,
         noShares
@@ -191,16 +216,25 @@ export async function getAgentPositions(agentUserId: string): Promise<{
   const MIN_SHARES_THRESHOLD = 0.01;
 
   const predictions: PredictionPositionContext[] = predPositions
-    .filter((p) => p.marketId && Number(p.shares || 0) > MIN_SHARES_THRESHOLD)
+    .filter((p) => {
+      if (!p.marketId)
+        throw new Error('Active prediction position is missing marketId');
+      return (
+        requireContextNumber(p.shares, `position ${p.marketId} shares`, 0) >
+        MIN_SHARES_THRESHOLD
+      );
+    })
     .map((p) => {
       const market = marketData.get(p.marketId as string);
-      const avgPrice = Number(p.avgPrice || 0.5);
+      if (!market)
+        throw new Error(`Missing market for active position ${p.marketId}`);
+      const avgPrice = requireContextNumber(
+        p.avgPrice,
+        `position ${p.marketId} avgPrice`,
+        Number.MIN_VALUE
+      );
       const isYes = p.side === true;
-      const currentPrice = market
-        ? isYes
-          ? market.yesPrice
-          : market.noPrice
-        : avgPrice;
+      const currentPrice = isYes ? market.yesPrice : market.noPrice;
       const pnlPercent =
         avgPrice > 0 ? ((currentPrice - avgPrice) / avgPrice) * 100 : 0;
       const timeHeldMs = p.createdAt
@@ -209,9 +243,13 @@ export async function getAgentPositions(agentUserId: string): Promise<{
 
       return {
         marketId: p.marketId as string,
-        question: market?.question ?? 'Unknown',
+        question: market.question,
         side: isYes ? 'YES' : 'NO',
-        shares: Number(p.shares || 0),
+        shares: requireContextNumber(
+          p.shares,
+          `position ${p.marketId} shares`,
+          0
+        ),
         avgPrice,
         currentPrice,
         pnlPercent,
@@ -235,16 +273,26 @@ export async function getAgentPositions(agentUserId: string): Promise<{
     .from(perpPositions)
     .where(
       and(eq(perpPositions.userId, agentUserId), isNull(perpPositions.closedAt))
-    )
-    .limit(10);
+    );
 
   const perps: PerpPositionContext[] = perpPositionsList.map((p) => {
-    const entryPrice = Number(p.entryPrice || 100);
-    const currentPrice = Number(p.currentPrice || entryPrice);
+    const entryPrice = requireContextNumber(
+      p.entryPrice,
+      `position ${p.ticker} entryPrice`,
+      Number.MIN_VALUE
+    );
+    const currentPrice = requireContextNumber(
+      p.currentPrice,
+      `position ${p.ticker} currentPrice`,
+      Number.MIN_VALUE
+    );
     const timeHeldMs = p.openedAt ? now - new Date(p.openedAt).getTime() : 0;
 
     // Calculate P&L percent based on side
-    let pnlPercent = Number(p.unrealizedPnLPercent || 0);
+    let pnlPercent = requireContextNumber(
+      p.unrealizedPnLPercent,
+      `position ${p.ticker} unrealizedPnLPercent`
+    );
     if (pnlPercent === 0 && entryPrice > 0) {
       const priceChange = currentPrice - entryPrice;
       const isLong = p.side === 'long';
@@ -254,8 +302,11 @@ export async function getAgentPositions(agentUserId: string): Promise<{
     return {
       ticker: p.ticker,
       side: p.side,
-      size: Number(p.size || 0),
-      pnl: Number(p.unrealizedPnL || 0),
+      size: requireContextNumber(p.size, `position ${p.ticker} size`, 0),
+      pnl: requireContextNumber(
+        p.unrealizedPnL,
+        `position ${p.ticker} unrealizedPnL`
+      ),
       pnlPercent,
       entryPrice,
       currentPrice,
@@ -330,7 +381,7 @@ export async function getAgentGroupChats(
       },
       'ContextGatherers'
     );
-    return [];
+    throw error;
   }
 }
 
@@ -343,9 +394,8 @@ export async function resolveGroupChatByName(
   agentUserId: string,
   groupName: string
 ): Promise<string | null> {
-  // Sanitize input to prevent ilike pattern injection
-  const sanitized = groupName.replace(/[%_\\]/g, '').trim();
-  if (sanitized.length < 2) return null;
+  const exactName = groupName.trim();
+  if (!exactName) throw new Error('Group name is required');
 
   const results = await db
     .select({ chatId: chats.id })
@@ -355,12 +405,15 @@ export async function resolveGroupChatByName(
     .where(
       and(
         eq(chatParticipants.userId, agentUserId),
+        eq(chatParticipants.isActive, true),
         eq(chats.isGroup, true),
-        ilike(groups.name, `%${sanitized}%`)
+        sql`lower(${groups.name}) = lower(${exactName})`
       )
     )
-    .limit(1);
+    .limit(2);
 
+  if (results.length > 1)
+    throw new Error(`Ambiguous group name: ${exactName}; use a chat ID`);
   return results[0]?.chatId ?? null;
 }
 
@@ -454,7 +507,7 @@ export async function getAgentOwnPosts(
       },
       'ContextGatherers'
     );
-    return [];
+    throw error;
   }
 }
 
@@ -700,7 +753,7 @@ export async function getMarketTrends(): Promise<MarketTrendContext[]> {
       { error: error instanceof Error ? error.message : String(error) },
       'ContextGatherers'
     );
-    return [];
+    throw error;
   }
 }
 
@@ -756,7 +809,7 @@ export async function getRelationships(
       },
       'ContextGatherers'
     );
-    return [];
+    throw error;
   }
 }
 
@@ -809,10 +862,10 @@ export async function getWorldEventsContext(
 
     return events.map((e) => ({
       type: e.eventType,
-      description: e.description.slice(0, 300),
+      description: e.description,
       timestamp: e.timestamp.toISOString(),
       actors: e.actors ?? [],
-      relatedQuestion: e.relatedQuestion ?? undefined,
+      relatedQuestion: isNpc ? (e.relatedQuestion ?? undefined) : undefined,
       // Strip signal direction for non-NPCs — no insider info
       pointsToward: isNpc ? (e.pointsToward ?? undefined) : undefined,
       isRelevantToAgent:
@@ -826,7 +879,7 @@ export async function getWorldEventsContext(
       { error: error instanceof Error ? error.message : String(error) },
       'ContextGatherers'
     );
-    return [];
+    throw error;
   }
 }
 
@@ -851,7 +904,7 @@ export async function getMoodState(
       .where(eq(actorState.id, agentUserId))
       .limit(1);
 
-    if (!state) return null;
+    if (!state) throw new Error(`Missing actorState for NPC ${agentUserId}`);
 
     const moodValue = Number(state.currentMood ?? 0);
     const moodLabel =
@@ -872,7 +925,7 @@ export async function getMoodState(
       },
       'ContextGatherers'
     );
-    return null;
+    throw error;
   }
 }
 
@@ -889,7 +942,7 @@ export async function getGroupChatIntel(
   agentUserId: string
 ): Promise<GroupChatIntel[]> {
   try {
-    const { sharedChatContextService } = await import('@babylon/engine');
+    const { sharedChatContextService } = await import('@feed/engine');
     const contexts =
       await sharedChatContextService.getRelevantGroupContextForUser(
         agentUserId,
@@ -920,7 +973,7 @@ export async function getGroupChatIntel(
       },
       'ContextGatherers'
     );
-    return [];
+    throw error;
   }
 }
 
@@ -977,7 +1030,7 @@ export async function getAgentTradeHistory(
       },
       'ContextGatherers'
     );
-    return [];
+    throw error;
   }
 }
 
@@ -1007,7 +1060,7 @@ export async function getAgentSocialGraph(
       },
       'ContextGatherers'
     );
-    return [];
+    throw error;
   }
 }
 

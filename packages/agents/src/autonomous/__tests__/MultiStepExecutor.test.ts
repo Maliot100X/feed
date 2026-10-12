@@ -11,11 +11,11 @@ describe('normalizeDecisionAction', () => {
     expect(normalizeDecisionAction('reply_chat')).toBe('REPLY_CHAT');
   });
 
-  test('selects the first valid action from combined labels', () => {
-    expect(normalizeDecisionAction('TRADE | REPLY_CHAT')).toBe('TRADE');
+  test('does not select an action from ambiguous labels', () => {
+    expect(normalizeDecisionAction('TRADE | REPLY_CHAT')).not.toBe('TRADE');
     expect(
       normalizeDecisionAction('TRADE | REPLY_COMMENT | GROUP_MESSAGE | FINISH')
-    ).toBe('TRADE');
+    ).not.toBe('TRADE');
   });
 
   test('normalizes whitespace and hyphenated labels', () => {
@@ -23,10 +23,10 @@ describe('normalizeDecisionAction', () => {
     expect(normalizeDecisionAction('reply-chat')).toBe('REPLY_CHAT');
   });
 
-  test('rescues short action aliases and unique prefixes', () => {
-    expect(normalizeDecisionAction('TR')).toBe('TRADE');
-    expect(normalizeDecisionAction('trad')).toBe('TRADE');
-    expect(normalizeDecisionAction('POS')).toBe('POST');
+  test('does not invent actions from incomplete labels', () => {
+    expect(normalizeDecisionAction('TR')).toBe('TR');
+    expect(normalizeDecisionAction('trad')).toBe('TRAD');
+    expect(normalizeDecisionAction('POS')).toBe('POS');
   });
 });
 
@@ -86,7 +86,7 @@ describe('normalizeTradeDecisionParameters', () => {
     });
   });
 
-  test('converts mislabeled prediction-style perp trades to perp semantics', () => {
+  test('does not convert a prediction trade into a perp trade', () => {
     expect(
       normalizeTradeDecisionParameters(
         {
@@ -97,9 +97,9 @@ describe('normalizeTradeDecisionParameters', () => {
         context as never
       )
     ).toMatchObject({
-      marketType: 'perp',
-      marketId: 'NVDAI',
-      side: 'open_long',
+      marketType: 'prediction',
+      marketId: 'NVDAI: NVIDAI @ $1650.00',
+      side: 'buy_yes',
     });
   });
 
@@ -120,7 +120,7 @@ describe('normalizeTradeDecisionParameters', () => {
     });
   });
 
-  test('rescues slightly hallucinated numeric market ids when there is a unique near match', () => {
+  test('does not redirect hallucinated market ids to a nearby market', () => {
     expect(
       normalizeTradeDecisionParameters(
         {
@@ -132,7 +132,7 @@ describe('normalizeTradeDecisionParameters', () => {
       )
     ).toMatchObject({
       marketType: 'prediction',
-      marketId: '123456',
+      marketId: '123458',
       side: 'buy_yes',
     });
   });
@@ -153,7 +153,7 @@ describe('normalizeTradeDecisionParameters', () => {
     });
   });
 
-  test('reconciles sell side to the held prediction position side', () => {
+  test('never switches an explicit sell side to another holding', () => {
     expect(
       normalizeTradeDecisionParameters(
         {
@@ -166,7 +166,7 @@ describe('normalizeTradeDecisionParameters', () => {
     ).toMatchObject({
       marketType: 'prediction',
       marketId: '123456',
-      side: 'sell_no',
+      side: 'sell_yes',
     });
   });
 
@@ -192,7 +192,7 @@ describe('normalizeTradeDecisionParameters', () => {
       normalizeTradeDecisionParameters(
         {
           marketType: 'prediction',
-          marketId: 123458,
+          marketId: 123456,
           side: 'buy_yes',
         },
         context as never
@@ -248,7 +248,7 @@ describe('normalizeSocialDecisionParameters', () => {
     ],
   } as const;
 
-  test('fills comment targets from feed context when placeholder ids are provided', () => {
+  test('does not invent comment targets for placeholder ids', () => {
     expect(
       normalizeSocialDecisionParameters(
         'COMMENT',
@@ -260,8 +260,7 @@ describe('normalizeSocialDecisionParameters', () => {
         context as never,
         'agent-1'
       )
-    ).toMatchObject({
-      postId: 'post-1',
+    ).toEqual({
       content: 'hello',
     });
   });
@@ -285,7 +284,7 @@ describe('normalizeSocialDecisionParameters', () => {
     });
   });
 
-  test('fills DM and reply-chat ids from available context', () => {
+  test('does not invent DM recipients or reply chats', () => {
     expect(
       normalizeSocialDecisionParameters(
         'DM',
@@ -296,8 +295,7 @@ describe('normalizeSocialDecisionParameters', () => {
         context as never,
         'agent-1'
       )
-    ).toMatchObject({
-      recipientId: 'user-1',
+    ).toEqual({
       content: 'ping',
     });
 
@@ -311,8 +309,7 @@ describe('normalizeSocialDecisionParameters', () => {
         context as never,
         'agent-1'
       )
-    ).toMatchObject({
-      chatId: 'chat-1',
+    ).toEqual({
       content: 'pong',
     });
   });
@@ -404,47 +401,25 @@ describe('getDecisionValidationError', () => {
       )
     ).toContain('already reposted');
   });
+});
 
-  test('builds a deterministic fallback action when parsing fails before any action', () => {
+describe('tick success reflects execution outcomes', () => {
+  test('valid inactivity succeeds but a failed action never does', () => {
+    const executor = new MultiStepExecutor();
+    expect(executor['aggregateResults']([], Date.now()).success).toBe(true);
     expect(
-      // biome-ignore lint/suspicious/noExplicitAny: accessing private method in test
-      (executor as any).buildFallbackDecision(
-        {
-          predictionMarkets: [],
-          perpMarkets: [],
-          agentPositions: { predictions: [], perps: [] },
-          recentPosts: [
-            {
-              id: 'post-2',
-              authorId: 'user-2',
-              authorName: 'beta',
-              content: 'fresh post',
-              commentCount: 0,
-              likeCount: 0,
-              repostCount: 0,
-              timeAgo: '1m',
-            },
-          ],
-          pendingCommentReplies: [
-            {
-              id: 'comment-2',
-              postId: 'post-2',
-            },
-          ],
-          pendingChatMessages: [],
-          groupChats: [],
-          openPositions: 0,
-        },
-        ['commenting'],
-        'agent-1'
-      )
-    ).toMatchObject({
-      action: 'REPLY_COMMENT',
-      isFinish: false,
-      parameters: {
-        commentId: 'comment-2',
-        postId: 'post-2',
-      },
-    });
+      executor['aggregateResults'](
+        [
+          {
+            actionType: 'TRADE',
+            success: false,
+            parameters: {},
+            summary: 'Rejected',
+            timestamp: Date.now(),
+          },
+        ],
+        Date.now()
+      ).success
+    ).toBe(false);
   });
 });

@@ -6,7 +6,7 @@
  */
 
 import { describe, expect, test } from 'bun:test';
-import { GameFeedbackSchema } from '@babylon/shared';
+import { GameFeedbackSchema } from '@feed/shared';
 
 describe('Game Feedback Validation Schema', () => {
   // ============================================
@@ -18,7 +18,7 @@ describe('Game Feedback Validation Schema', () => {
         feedbackType: 'bug',
         description: 'This is a valid bug description',
         stepsToReproduce: '1. Do this\n2. See that',
-        screenshotUrl: 'https://test.public.blob.vercel-storage.com/image.png',
+        screenshotUrl: 'https://feed.fun/media/uploads/image.png',
       };
       const result = GameFeedbackSchema.safeParse(input);
       expect(result.success).toBe(true);
@@ -300,7 +300,7 @@ describe('Game Feedback Validation Schema', () => {
         feedbackType: 'bug',
         description: 'Valid bug description',
         stepsToReproduce: 'Steps',
-        screenshotUrl: 'https://test.public.blob.vercel-storage.com/image.png',
+        screenshotUrl: 'https://staging.feed.fun/media/uploads/image.png',
       };
       const result = GameFeedbackSchema.safeParse(input);
       expect(result.success).toBe(true);
@@ -315,6 +315,17 @@ describe('Game Feedback Validation Schema', () => {
       };
       const result = GameFeedbackSchema.safeParse(input);
       expect(result.success).toBe(true);
+    });
+
+    test('lookalike domain is rejected', () => {
+      const input = {
+        feedbackType: 'bug',
+        description: 'Valid bug description',
+        stepsToReproduce: 'Steps',
+        screenshotUrl: 'https://evilfeed.fun/media/image.png',
+      };
+      const result = GameFeedbackSchema.safeParse(input);
+      expect(result.success).toBe(false);
     });
 
     test('invalid URL is rejected', () => {

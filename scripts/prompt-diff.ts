@@ -142,12 +142,17 @@ async function loadFromGit(spec: string): Promise<string> {
     stdout: 'pipe',
     stderr: 'pipe',
   });
-  const exitCode = await proc.exited;
+  // Drain both pipes while waiting: a large file fills the stdout pipe and
+  // `git show` would block forever if we awaited exit first.
+  const [exitCode, stdout, stderr] = await Promise.all([
+    proc.exited,
+    new Response(proc.stdout).text(),
+    new Response(proc.stderr).text(),
+  ]);
   if (exitCode !== 0) {
-    const err = await new Response(proc.stderr).text();
-    throw new Error(`git show ${ref}:${filePath} failed: ${err.trim()}`);
+    throw new Error(`git show ${ref}:${filePath} failed: ${stderr.trim()}`);
   }
-  return new Response(proc.stdout).text();
+  return stdout;
 }
 
 /** Dynamically import a prompt module and find the PromptDefinition export. */

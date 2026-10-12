@@ -1,22 +1,25 @@
 /**
  * Interaction Store - Manages social interactions with optimistic updates
- * Handles: likes, comments, shares, and favorites with real-time polling
+ * Handles: likes, comments and shares.
+ *
+ * Mutations never throw: on failure they roll back their own optimistic
+ * change, record an error under the operation's key, and report the outcome
+ * (boolean / null) so callers only run success side effects on success.
+ * Writes are never retried automatically.
  */
 
 import type {
   CommentData,
   CommentInteraction,
   CommentWithReplies,
-  FavoriteProfile,
   InteractionError,
-  PendingInteraction,
   PostInteraction,
-} from '@babylon/shared';
-import { retryIfRetryable } from '@babylon/shared';
+} from '@feed/shared';
+import { extractErrorMessage } from '@feed/shared';
 import { create } from 'zustand';
 import { persist } from 'zustand/middleware';
-import { getAuthToken } from '@/lib/auth';
-import { apiUrl } from '@/utils/api-url';
+import { readApiErrorMessage } from '@/utils/api-error';
+import { apiFetch } from '@/utils/api-fetch';
 
 interface RepostPost {
   id: string;
@@ -38,12 +41,16 @@ interface RepostPost {
   quoteComment?: string | null;
 }
 
+interface ShareResult {
+  shareCount: number;
+  isShared: boolean;
+  repostPost?: RepostPost;
+}
+
 interface InteractionStoreState {
   // State maps
   postInteractions: Map<string, PostInteraction>;
   commentInteractions: Map<string, CommentInteraction>;
-  favoritedProfiles: Set<string>;
-  pendingInteractions: Map<string, PendingInteraction>;
 
   // Loading states
   loadingStates: Map<string, boolean>;
@@ -53,9 +60,9 @@ interface InteractionStoreState {
 }
 
 interface InteractionStoreActions {
-  // Like actions
-  toggleLike: (postId: string) => Promise<void>;
-  toggleCommentLike: (commentId: string) => Promise<void>;
+  // Like actions — resolve true when the server committed the toggle
+  toggleLike: (postId: string) => Promise<boolean>;
+  toggleCommentLike: (commentId: string) => Promise<boolean>;
 
   // Comment actions
   addComment: (
@@ -63,26 +70,27 @@ interface InteractionStoreActions {
     content: string,
     parentId?: string
   ) => Promise<CommentData | null>;
-  editComment: (commentId: string, content: string) => Promise<void>;
-  deleteComment: (commentId: string, postId?: string) => Promise<void>;
+  editComment: (commentId: string, content: string) => Promise<boolean>;
+  deleteComment: (commentId: string, postId?: string) => Promise<boolean>;
   loadComments: (postId: string) => Promise<CommentWithReplies[]>;
 
-  // Share actions
+  // Share actions — resolve null when the toggle failed
   toggleShare: (
     postId: string,
     comment?: string
-  ) => Promise<{ repostPost?: RepostPost } | void>;
+  ) => Promise<ShareResult | null>;
 
-  // Favorite actions
-  toggleFavorite: (profileId: string) => Promise<void>;
-  loadFavorites: () => Promise<FavoriteProfile[]>;
+  /**
+   * Merge authoritative server interaction data for a post. Skipped while a
+   * mutation for that post is in flight (its own result is authoritative).
+   */
+  syncPostInteraction: (interaction: PostInteraction) => void;
 
   // Utility actions
   clearError: (id: string) => void;
   resetStore: () => void;
   getPostInteraction: (postId: string) => PostInteraction | null;
   getCommentInteraction: (commentId: string) => CommentInteraction | null;
-  isFavorited: (profileId: string) => boolean;
   setLoading: (id: string, loading: boolean) => void;
   setError: (id: string, error: InteractionError) => void;
 }
@@ -93,406 +101,368 @@ type InteractionStore = InteractionStoreState & InteractionStoreActions;
 type PersistedInteractionState = {
   postInteractions: Array<[string, PostInteraction]>;
   commentInteractions: Array<[string, CommentInteraction]>;
-  favoritedProfiles: string[];
 };
 
-async function apiCall<T>(url: string, options: RequestInit = {}): Promise<T> {
-  return retryIfRetryable(
-    async () => {
-      const token = getAuthToken();
-
-      const headers: Record<string, string> = {
-        'Content-Type': 'application/json',
-        ...(options.headers as Record<string, string>),
-      };
-
-      if (token) {
-        headers['Authorization'] = `Bearer ${token}`;
-      }
-
-      const response = await fetch(apiUrl(url), {
-        ...options,
-        headers,
-      });
-
-      return await response.json();
-    },
-    {
-      maxAttempts: 3,
-      initialDelayMs: 1000,
-    }
-  );
+class InteractionRequestError extends Error {
+  constructor(
+    message: string,
+    readonly status: number | null
+  ) {
+    super(message);
+    this.name = 'InteractionRequestError';
+  }
 }
+
+/**
+ * Single attempt, authenticated JSON request. Throws InteractionRequestError
+ * for network failures and non-2xx responses (with the server's message).
+ */
+async function requestJson<T>(url: string, init: RequestInit = {}): Promise<T> {
+  let response: Response;
+  try {
+    response = await apiFetch(url, {
+      ...init,
+      headers: { 'Content-Type': 'application/json', ...init.headers },
+    });
+  } catch (error) {
+    throw new InteractionRequestError(extractErrorMessage(error), null);
+  }
+  if (!response.ok) {
+    throw new InteractionRequestError(
+      await readApiErrorMessage(response, 'Request failed'),
+      response.status
+    );
+  }
+  return (await response.json()) as T;
+}
+
+function toInteractionError(error: unknown): InteractionError {
+  if (error instanceof InteractionRequestError) {
+    return {
+      code:
+        error.status === null
+          ? 'NETWORK_ERROR'
+          : error.status === 401
+            ? 'UNAUTHORIZED'
+            : error.status === 404
+              ? 'NOT_FOUND'
+              : 'UNKNOWN',
+      message: error.message,
+    };
+  }
+  return { code: 'UNKNOWN', message: extractErrorMessage(error) };
+}
+
+const emptyPostInteraction = (postId: string): PostInteraction => ({
+  postId,
+  likeCount: 0,
+  commentCount: 0,
+  shareCount: 0,
+  isLiked: false,
+  isShared: false,
+});
+
+const emptyCommentInteraction = (commentId: string): CommentInteraction => ({
+  commentId,
+  likeCount: 0,
+  replyCount: 0,
+  isLiked: false,
+});
 
 export const useInteractionStore = create<InteractionStore>()(
   persist(
-    (set, get) => ({
-      // Initial state
-      postInteractions: new Map(),
-      commentInteractions: new Map(),
-      favoritedProfiles: new Set(),
-      pendingInteractions: new Map(),
-      loadingStates: new Map(),
-      errors: new Map(),
-
-      // Like actions
-      toggleLike: async (postId: string) => {
-        const { postInteractions, setLoading } = get();
-        const currentInteraction = postInteractions.get(postId) || {
-          postId,
-          likeCount: 0,
-          commentCount: 0,
-          shareCount: 0,
-          isLiked: false,
-          isShared: false,
-        };
-
-        const wasLiked = currentInteraction.isLiked;
-        const optimisticCount = wasLiked
-          ? currentInteraction.likeCount - 1
-          : currentInteraction.likeCount + 1;
-
-        // Optimistic update
-        const optimisticInteraction: PostInteraction = {
-          ...currentInteraction,
-          isLiked: !wasLiked,
-          likeCount: Math.max(0, optimisticCount),
-        };
-
-        set((state) => ({
-          postInteractions: new Map(state.postInteractions).set(
-            postId,
-            optimisticInteraction
-          ),
-        }));
-
-        setLoading(postId, true);
-
-        const method = wasLiked ? 'DELETE' : 'POST';
-        const response = await apiCall<{
-          data: { likeCount: number; isLiked: boolean };
-        }>(`/api/posts/${postId}/like`, { method });
-
-        set((state) => ({
-          postInteractions: new Map(state.postInteractions).set(postId, {
-            ...currentInteraction,
-            likeCount: response.data.likeCount,
-            isLiked: response.data.isLiked,
-          }),
-        }));
-
-        setLoading(postId, false);
-      },
-
-      toggleCommentLike: async (commentId: string) => {
-        const { commentInteractions, setLoading } = get();
-        const currentInteraction = commentInteractions.get(commentId) || {
-          commentId,
-          likeCount: 0,
-          replyCount: 0,
-          isLiked: false,
-        };
-
-        const wasLiked = currentInteraction.isLiked;
-        const optimisticCount = wasLiked
-          ? currentInteraction.likeCount - 1
-          : currentInteraction.likeCount + 1;
-
-        // Optimistic update
-        const optimisticInteraction: CommentInteraction = {
-          ...currentInteraction,
-          isLiked: !wasLiked,
-          likeCount: Math.max(0, optimisticCount),
-        };
-
-        set((state) => ({
-          commentInteractions: new Map(state.commentInteractions).set(
-            commentId,
-            optimisticInteraction
-          ),
-        }));
-
-        setLoading(commentId, true);
-
-        const method = wasLiked ? 'DELETE' : 'POST';
-        const response = await apiCall<{
-          data: { likeCount: number; isLiked: boolean };
-        }>(`/api/comments/${commentId}/like`, { method });
-
-        set((state) => ({
-          commentInteractions: new Map(state.commentInteractions).set(
-            commentId,
-            {
-              ...currentInteraction,
-              likeCount: response.data.likeCount,
-              isLiked: response.data.isLiked,
-            }
-          ),
-        }));
-
-        setLoading(commentId, false);
-      },
-
-      // Comment actions
-      addComment: async (
-        postId: string,
-        content: string,
-        parentId?: string
-      ) => {
-        const { setLoading, postInteractions } = get();
-        const loadingKey = `comment-${postId}-${parentId || 'root'}`;
-
-        setLoading(loadingKey, true);
-
-        const response = await apiCall<CommentData>(
-          `/api/posts/${postId}/comments`,
-          {
-            method: 'POST',
-            body: JSON.stringify({ content, parentCommentId: parentId }),
-          }
-        );
-
-        if (!parentId) {
-          const currentInteraction = postInteractions.get(postId);
-          if (currentInteraction) {
-            set((state) => ({
-              postInteractions: new Map(state.postInteractions).set(postId, {
-                ...currentInteraction,
-                commentCount: currentInteraction.commentCount + 1,
-              }),
-            }));
-          }
-        }
-
-        setLoading(loadingKey, false);
-        return response;
-      },
-
-      editComment: async (commentId: string, content: string) => {
-        const { setLoading } = get();
-        const loadingKey = `edit-comment-${commentId}`;
-
-        setLoading(loadingKey, true);
-
-        await apiCall(`/api/comments/${commentId}`, {
-          method: 'PATCH',
-          body: JSON.stringify({ content }),
-        });
-
-        setLoading(loadingKey, false);
-      },
-
-      deleteComment: async (commentId: string, postId?: string) => {
-        const { setLoading, postInteractions } = get();
-        const loadingKey = `delete-comment-${commentId}`;
-
-        setLoading(loadingKey, true);
-
-        await apiCall(`/api/comments/${commentId}`, {
-          method: 'DELETE',
-        });
-
-        if (postId) {
-          const currentInteraction = postInteractions.get(postId);
-          if (currentInteraction && currentInteraction.commentCount > 0) {
-            set((state) => ({
-              postInteractions: new Map(state.postInteractions).set(postId, {
-                ...currentInteraction,
-                commentCount: currentInteraction.commentCount - 1,
-              }),
-            }));
-          }
-        }
-
-        setLoading(loadingKey, false);
-      },
-
-      loadComments: async (postId: string) => {
-        const { clearError, setError, setLoading } = get();
-        const loadingKey = `load-comments-${postId}`;
-
-        setLoading(loadingKey, true);
-
-        try {
-          const response = await apiCall<{
-            data?: { comments?: CommentWithReplies[] };
-          }>(`/api/posts/${postId}/comments`);
-
-          if (Array.isArray(response.data?.comments)) {
-            clearError(loadingKey);
-            return response.data.comments;
-          }
-
-          setError(loadingKey, {
-            code: 'UNKNOWN',
-            message: 'Unable to load comments right now.',
-          });
-          return [];
-        } catch {
-          setError(loadingKey, {
-            code: 'NETWORK_ERROR',
-            message: 'Unable to load comments right now.',
-          });
-          return [];
-        } finally {
-          setLoading(loadingKey, false);
-        }
-      },
-
-      // Share actions
-      toggleShare: async (postId: string, comment?: string) => {
-        const { postInteractions, setLoading } = get();
-        const currentInteraction = postInteractions.get(postId) || {
-          postId,
-          likeCount: 0,
-          commentCount: 0,
-          shareCount: 0,
-          isLiked: false,
-          isShared: false,
-        };
-
-        const wasShared = currentInteraction.isShared;
-        const optimisticCount = wasShared
-          ? currentInteraction.shareCount - 1
-          : currentInteraction.shareCount + 1;
-
-        const optimisticInteraction: PostInteraction = {
-          ...currentInteraction,
-          isShared: !wasShared,
-          shareCount: Math.max(0, optimisticCount),
-        };
-
-        set((state) => ({
-          postInteractions: new Map(state.postInteractions).set(
-            postId,
-            optimisticInteraction
-          ),
-        }));
-
-        setLoading(`share-${postId}`, true);
-
-        const method = wasShared ? 'DELETE' : 'POST';
-        const body = comment ? JSON.stringify({ comment }) : JSON.stringify({});
-        const response = await apiCall<{
-          data: {
-            shareCount: number;
-            isShared: boolean;
-            repostPost?: RepostPost;
+    (set, get) => {
+      /** Merge fields into the *current* post interaction (never a stale snapshot). */
+      const patchPost = (postId: string, patch: Partial<PostInteraction>) =>
+        set((state) => {
+          const current =
+            state.postInteractions.get(postId) ?? emptyPostInteraction(postId);
+          return {
+            postInteractions: new Map(state.postInteractions).set(postId, {
+              ...current,
+              ...patch,
+            }),
           };
-        }>(`/api/posts/${postId}/share`, {
-          method,
-          ...(method === 'POST' && { body }),
         });
 
-        set((state) => ({
-          postInteractions: new Map(state.postInteractions).set(postId, {
-            ...currentInteraction,
-            shareCount: response.data.shareCount,
-            isShared: response.data.isShared,
-          }),
-        }));
+      const patchComment = (
+        commentId: string,
+        patch: Partial<CommentInteraction>
+      ) =>
+        set((state) => {
+          const current =
+            state.commentInteractions.get(commentId) ??
+            emptyCommentInteraction(commentId);
+          return {
+            commentInteractions: new Map(state.commentInteractions).set(
+              commentId,
+              { ...current, ...patch }
+            ),
+          };
+        });
 
-        setLoading(`share-${postId}`, false);
-
-        // Return response data (includes repostPost for optimistic UI)
-        return response.data;
-      },
-
-      // Favorite actions (uses follow API)
-      toggleFavorite: async (profileId: string) => {
-        const { favoritedProfiles, setLoading } = get();
-        const wasFavorited = favoritedProfiles.has(profileId);
-
-        const newFavorites = new Set(favoritedProfiles);
-        if (wasFavorited) {
-          newFavorites.delete(profileId);
-        } else {
-          newFavorites.add(profileId);
+      /** Run a request with loading/error bookkeeping under `key`. */
+      const run = async <T>(
+        key: string,
+        request: () => Promise<T>
+      ): Promise<{ ok: true; value: T } | { ok: false }> => {
+        const { setLoading, setError, clearError } = get();
+        setLoading(key, true);
+        try {
+          const value = await request();
+          clearError(key);
+          return { ok: true, value };
+        } catch (error) {
+          setError(key, toInteractionError(error));
+          return { ok: false };
+        } finally {
+          setLoading(key, false);
         }
+      };
 
-        set({ favoritedProfiles: newFavorites });
-        setLoading(`favorite-${profileId}`, true);
+      return {
+        // Initial state
+        postInteractions: new Map(),
+        commentInteractions: new Map(),
+        loadingStates: new Map(),
+        errors: new Map(),
 
-        const method = wasFavorited ? 'DELETE' : 'POST';
-        const encodedProfileId = encodeURIComponent(profileId);
-        await apiCall(`/api/users/${encodedProfileId}/follow`, { method });
-
-        setLoading(`favorite-${profileId}`, false);
-      },
-
-      loadFavorites: async () => {
-        const { setLoading } = get();
-
-        setLoading('favorites', true);
-
-        const response = await apiCall<{
-          data: { profiles: FavoriteProfile[] };
-        }>('/api/profiles/favorites');
-
-        const favoriteIds = new Set(response.data.profiles.map((p) => p.id));
-        set({ favoritedProfiles: favoriteIds });
-
-        setLoading('favorites', false);
-        return response.data.profiles;
-      },
-
-      // Utility actions
-      clearError: (id: string) => {
-        set((state) => {
-          const newErrors = new Map(state.errors);
-          newErrors.delete(id);
-          return { errors: newErrors };
-        });
-      },
-
-      resetStore: () => {
-        set({
-          postInteractions: new Map(),
-          commentInteractions: new Map(),
-          favoritedProfiles: new Set(),
-          pendingInteractions: new Map(),
-          loadingStates: new Map(),
-          errors: new Map(),
-        });
-      },
-
-      getPostInteraction: (postId: string) => {
-        return get().postInteractions.get(postId) || null;
-      },
-
-      getCommentInteraction: (commentId: string) => {
-        return get().commentInteractions.get(commentId) || null;
-      },
-
-      isFavorited: (profileId: string) => {
-        return get().favoritedProfiles.has(profileId);
-      },
-
-      setLoading: (id: string, loading: boolean) => {
-        set((state) => {
-          const newLoadingStates = new Map(state.loadingStates);
-          if (loading) {
-            newLoadingStates.set(id, true);
-          } else {
-            newLoadingStates.delete(id);
+        syncPostInteraction: (interaction: PostInteraction) => {
+          const { postId } = interaction;
+          if (get().loadingStates.get(postId)) return;
+          if (get().loadingStates.get(`share-${postId}`)) return;
+          const current = get().postInteractions.get(postId);
+          if (
+            current &&
+            current.likeCount === interaction.likeCount &&
+            current.commentCount === interaction.commentCount &&
+            current.shareCount === interaction.shareCount &&
+            current.isLiked === interaction.isLiked &&
+            current.isShared === interaction.isShared
+          ) {
+            return;
           }
-          return { loadingStates: newLoadingStates };
-        });
-      },
+          patchPost(postId, interaction);
+        },
 
-      setError: (id: string, error: InteractionError) => {
-        set((state) => ({
-          errors: new Map(state.errors).set(id, error),
-        }));
-      },
-    }),
+        toggleLike: async (postId: string) => {
+          const current =
+            get().postInteractions.get(postId) ?? emptyPostInteraction(postId);
+          const wasLiked = current.isLiked;
+          patchPost(postId, {
+            isLiked: !wasLiked,
+            likeCount: Math.max(0, current.likeCount + (wasLiked ? -1 : 1)),
+          });
+
+          const result = await run(postId, () =>
+            requestJson<{ data: { likeCount: number; isLiked: boolean } }>(
+              `/api/posts/${encodeURIComponent(postId)}/like`,
+              { method: wasLiked ? 'DELETE' : 'POST' }
+            )
+          );
+          if (!result.ok) {
+            patchPost(postId, {
+              isLiked: current.isLiked,
+              likeCount: current.likeCount,
+            });
+            return false;
+          }
+          patchPost(postId, {
+            likeCount: result.value.data.likeCount,
+            isLiked: result.value.data.isLiked,
+          });
+          return true;
+        },
+
+        toggleCommentLike: async (commentId: string) => {
+          const current =
+            get().commentInteractions.get(commentId) ??
+            emptyCommentInteraction(commentId);
+          const wasLiked = current.isLiked;
+          patchComment(commentId, {
+            isLiked: !wasLiked,
+            likeCount: Math.max(0, current.likeCount + (wasLiked ? -1 : 1)),
+          });
+
+          const result = await run(commentId, () =>
+            requestJson<{ data: { likeCount: number; isLiked: boolean } }>(
+              `/api/comments/${encodeURIComponent(commentId)}/like`,
+              { method: wasLiked ? 'DELETE' : 'POST' }
+            )
+          );
+          if (!result.ok) {
+            patchComment(commentId, {
+              isLiked: current.isLiked,
+              likeCount: current.likeCount,
+            });
+            return false;
+          }
+          patchComment(commentId, {
+            likeCount: result.value.data.likeCount,
+            isLiked: result.value.data.isLiked,
+          });
+          return true;
+        },
+
+        addComment: async (
+          postId: string,
+          content: string,
+          parentId?: string
+        ) => {
+          const result = await run(
+            `comment-${postId}-${parentId || 'root'}`,
+            () =>
+              requestJson<CommentData>(
+                `/api/posts/${encodeURIComponent(postId)}/comments`,
+                {
+                  method: 'POST',
+                  body: JSON.stringify({ content, parentCommentId: parentId }),
+                }
+              )
+          );
+          if (!result.ok) return null;
+
+          if (!parentId) {
+            const current = get().postInteractions.get(postId);
+            if (current) {
+              patchPost(postId, { commentCount: current.commentCount + 1 });
+            }
+          }
+          return result.value;
+        },
+
+        editComment: async (commentId: string, content: string) => {
+          const result = await run(`edit-comment-${commentId}`, () =>
+            requestJson(`/api/comments/${encodeURIComponent(commentId)}`, {
+              method: 'PATCH',
+              body: JSON.stringify({ content }),
+            })
+          );
+          return result.ok;
+        },
+
+        deleteComment: async (commentId: string, postId?: string) => {
+          const result = await run(`delete-comment-${commentId}`, () =>
+            requestJson(`/api/comments/${encodeURIComponent(commentId)}`, {
+              method: 'DELETE',
+            })
+          );
+          if (!result.ok) return false;
+
+          if (postId) {
+            const current = get().postInteractions.get(postId);
+            if (current && current.commentCount > 0) {
+              patchPost(postId, { commentCount: current.commentCount - 1 });
+            }
+          }
+          return true;
+        },
+
+        loadComments: async (postId: string) => {
+          const result = await run(`load-comments-${postId}`, () =>
+            requestJson<{ data?: { comments?: CommentWithReplies[] } }>(
+              `/api/posts/${encodeURIComponent(postId)}/comments`
+            )
+          );
+          if (!result.ok) return [];
+          const comments = result.value.data?.comments;
+          if (!Array.isArray(comments)) {
+            get().setError(`load-comments-${postId}`, {
+              code: 'UNKNOWN',
+              message: 'Unable to load comments right now.',
+            });
+            return [];
+          }
+          return comments;
+        },
+
+        toggleShare: async (postId: string, comment?: string) => {
+          const current =
+            get().postInteractions.get(postId) ?? emptyPostInteraction(postId);
+          const wasShared = current.isShared;
+          patchPost(postId, {
+            isShared: !wasShared,
+            shareCount: Math.max(0, current.shareCount + (wasShared ? -1 : 1)),
+          });
+
+          const method = wasShared ? 'DELETE' : 'POST';
+          const result = await run(`share-${postId}`, () =>
+            requestJson<{ data: ShareResult }>(
+              `/api/posts/${encodeURIComponent(postId)}/share`,
+              {
+                method,
+                ...(method === 'POST' && {
+                  body: JSON.stringify(comment ? { comment } : {}),
+                }),
+              }
+            )
+          );
+          if (!result.ok) {
+            patchPost(postId, {
+              isShared: current.isShared,
+              shareCount: current.shareCount,
+            });
+            return null;
+          }
+          patchPost(postId, {
+            shareCount: result.value.data.shareCount,
+            isShared: result.value.data.isShared,
+          });
+          // Includes repostPost for optimistic UI
+          return result.value.data;
+        },
+
+        // Utility actions
+        clearError: (id: string) => {
+          set((state) => {
+            const newErrors = new Map(state.errors);
+            newErrors.delete(id);
+            return { errors: newErrors };
+          });
+        },
+
+        resetStore: () => {
+          set({
+            postInteractions: new Map(),
+            commentInteractions: new Map(),
+            loadingStates: new Map(),
+            errors: new Map(),
+          });
+        },
+
+        getPostInteraction: (postId: string) => {
+          return get().postInteractions.get(postId) || null;
+        },
+
+        getCommentInteraction: (commentId: string) => {
+          return get().commentInteractions.get(commentId) || null;
+        },
+
+        setLoading: (id: string, loading: boolean) => {
+          set((state) => {
+            const newLoadingStates = new Map(state.loadingStates);
+            if (loading) {
+              newLoadingStates.set(id, true);
+            } else {
+              newLoadingStates.delete(id);
+            }
+            return { loadingStates: newLoadingStates };
+          });
+        },
+
+        setError: (id: string, error: InteractionError) => {
+          set((state) => ({
+            errors: new Map(state.errors).set(id, error),
+          }));
+        },
+      };
+    },
     {
-      name: 'babylon-interactions',
+      name: 'feed-interactions',
       // Custom serialization for Maps and Sets
       partialize: (state: InteractionStore): PersistedInteractionState => ({
         postInteractions: Array.from(state.postInteractions.entries()),
         commentInteractions: Array.from(state.commentInteractions.entries()),
-        favoritedProfiles: Array.from(state.favoritedProfiles),
       }),
       // Custom deserialization to convert arrays back to Maps and Sets
       merge: (persistedState: unknown, currentState: InteractionStore) => {
@@ -502,14 +472,12 @@ export const useInteractionStore = create<InteractionStore>()(
           | undefined) || {
           postInteractions: undefined,
           commentInteractions: undefined,
-          favoritedProfiles: undefined,
         };
 
         return {
           ...currentState,
           postInteractions: new Map(persisted?.postInteractions || []),
           commentInteractions: new Map(persisted?.commentInteractions || []),
-          favoritedProfiles: new Set(persisted?.favoritedProfiles || []),
         };
       },
     }

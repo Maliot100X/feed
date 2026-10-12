@@ -5,7 +5,6 @@
  * Uses agentService.updateAgent() for proper logging and cache management.
  */
 
-import { agentLogs, db, eq, userAgentConfigs, users } from '@babylon/db';
 import type {
   Action,
   ActionResult,
@@ -14,6 +13,7 @@ import type {
   Memory,
   State,
 } from '@elizaos/core';
+import { agentLogs, db, eq, userAgentConfigs, users } from '@feed/db';
 import { logger } from '../../../../shared/logger';
 import { generateSnowflakeId } from '../../../../shared/snowflake';
 import type {

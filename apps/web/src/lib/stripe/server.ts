@@ -105,9 +105,9 @@ export function validatePurchaseAmount(amountUSD: number): {
  * users to malicious sites after checkout.
  */
 const ALLOWED_REDIRECT_ORIGINS = [
-  'https://babylon.market',
-  'https://www.babylon.market',
-  'https://staging.babylon.market',
+  'https://feed.fun',
+  'https://www.feed.fun',
+  'https://staging.feed.fun',
   'http://localhost:3000',
   'http://localhost:3001',
 ];
@@ -123,8 +123,7 @@ const ALLOWED_REDIRECT_ORIGINS = [
  * 1. Explicit override via STRIPE_REDIRECT_BASE_URL (for local dev/staging)
  * 2. Request origin (if in allowlist)
  * 3. NEXT_PUBLIC_APP_URL
- * 4. VERCEL_URL
- * 5. Fallback to localhost
+ * 4. Fallback to localhost
  */
 export function getBaseUrl(requestOrigin?: string): string {
   // Allow explicit override for local development or specific environments
@@ -137,21 +136,9 @@ export function getBaseUrl(requestOrigin?: string): string {
     return requestOrigin;
   }
 
-  // Also allow Vercel preview URLs if they match the origin
-  if (requestOrigin && process.env.VERCEL_URL) {
-    const vercelUrl = `https://${process.env.VERCEL_URL}`;
-    if (requestOrigin === vercelUrl) {
-      return requestOrigin;
-    }
-  }
-
   // Fall back to configured app URL
   if (process.env.NEXT_PUBLIC_APP_URL) {
     return process.env.NEXT_PUBLIC_APP_URL;
-  }
-
-  if (process.env.VERCEL_URL) {
-    return `https://${process.env.VERCEL_URL}`;
   }
 
   return 'http://localhost:3000';

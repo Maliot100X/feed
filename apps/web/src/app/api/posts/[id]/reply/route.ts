@@ -102,23 +102,24 @@ import {
   BusinessLogicError,
   checkProgress,
   ensureUserForAuth,
+  NotFoundError,
   successResponse,
   withErrorHandling,
-} from '@babylon/api';
-import { comments, db, eq, posts, users } from '@babylon/db';
+} from '@feed/api';
+import { comments, db, eq, posts, users } from '@feed/db';
 import {
   FollowingMechanics,
   GroupChatService,
   MessageQualityChecker,
   parsePostId,
   ReplyRateLimiter,
-} from '@babylon/engine';
+} from '@feed/engine';
 import {
   generateSnowflakeId,
   logger,
   PostIdParamSchema,
   ReplyToPostSchema,
-} from '@babylon/shared';
+} from '@feed/shared';
 import type { NextRequest } from 'next/server';
 import { ensureEngineServices } from '@/lib/engine/ensure-engine-services';
 import { POST as createCommentPOST } from '../comments/route';
@@ -153,7 +154,29 @@ export const POST = withErrorHandling(
     const body = await request.json();
     const { content, marketId, sentiment } = ReplyToPostSchema.parse(body);
 
-    const { gameId, authorId: npcId, timestamp } = parseResult.metadata;
+    // The reply target must be an existing, published, non-deleted post; its
+    // stored author (not the ID text) decides whose rate limit applies.
+    const [targetPost] = await db
+      .select({
+        id: posts.id,
+        authorId: posts.authorId,
+        timestamp: posts.timestamp,
+        deletedAt: posts.deletedAt,
+      })
+      .from(posts)
+      .where(eq(posts.id, postId))
+      .limit(1);
+
+    if (!targetPost || targetPost.timestamp > new Date()) {
+      throw new NotFoundError('Post', postId);
+    }
+    if (targetPost.deletedAt) {
+      throw new BusinessLogicError(
+        'Cannot reply to deleted post',
+        'POST_DELETED'
+      );
+    }
+    const npcId = targetPost.authorId;
 
     const displayName = user.walletAddress
       ? `${user.walletAddress.slice(0, 6)}...${user.walletAddress.slice(-4)}`
@@ -188,23 +211,6 @@ export const POST = withErrorHandling(
         qualityResult.errors.join('; '),
         'QUALITY_CHECK_FAILED'
       );
-    }
-
-    // 6. Ensure post exists (check first, then upsert)
-    const [existingPost] = await db
-      .select({ id: posts.id })
-      .from(posts)
-      .where(eq(posts.id, postId))
-      .limit(1);
-
-    if (!existingPost) {
-      await db.insert(posts).values({
-        id: postId,
-        content: '[Game-generated post]',
-        authorId: npcId,
-        gameId,
-        timestamp,
-      });
     }
 
     // 7. Create comment
@@ -314,7 +320,15 @@ export const POST = withErrorHandling(
       'POST /api/posts/[id]/reply'
     );
 
-    void checkProgress(user.userId, { type: 'comment_created' });
+    void checkProgress(canonicalUserId, { type: 'comment_created' }).catch(
+      (error: unknown) => {
+        logger.warn(
+          'Progress check after reply failed',
+          { postId, error: String(error) },
+          'POST /api/posts/[id]/reply'
+        );
+      }
+    );
 
     return successResponse(
       {

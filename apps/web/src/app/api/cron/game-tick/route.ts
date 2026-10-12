@@ -6,7 +6,7 @@
  *
  * @description
  * Scheduled cron job that generates game content including posts, events, market
- * updates, and reputation syncs. Runs every minute via Vercel Cron. Uses generation
+ * updates, and reputation syncs. Runs every minute via the Cloudflare cron Worker. Uses generation
  * locks to prevent concurrent execution. Max execution time: 300s.
  *
  * @openapi
@@ -56,26 +56,24 @@ import {
   successResponse,
   verifyCronAuth,
   withErrorHandling,
-} from '@babylon/api';
-import { asSystem } from '@babylon/db';
+} from '@feed/api';
+import { asSystem } from '@feed/db';
 import {
-  BabylonLLMClient,
   bootstrapGameIfNeeded,
   checkLookaheadStatus,
   executeGameTick,
+  FeedLLMClient,
   generateAheadIfNeeded,
   StaticDataRegistry,
   WorldStateSnapshotService,
-} from '@babylon/engine';
-import { logger, toISOOrNull } from '@babylon/shared';
+} from '@feed/engine';
+import { logger, toISOOrNull } from '@feed/shared';
 import type { NextRequest } from 'next/server';
 import {
   isInternalCronSchedulerEnabled,
   triggerScheduledCrons,
 } from '@/lib/cron-scheduler';
 import { ensureEngineServices } from '@/lib/engine/ensure-engine-services';
-
-export const maxDuration = 800;
 
 /**
  * POST /api/cron/game-tick
@@ -339,7 +337,7 @@ export const POST = withErrorHandling(async (request: NextRequest) => {
     );
 
     // Use game tick LLM client
-    const llmClient = BabylonLLMClient.forGameTick();
+    const llmClient = FeedLLMClient.forGameTick();
     const lookaheadResult = await generateAheadIfNeeded(llmClient, 15);
 
     logger.info(
@@ -429,27 +427,22 @@ export const POST = withErrorHandling(async (request: NextRequest) => {
   }
 });
 
-// GET endpoint for Vercel Cron (some cron services use GET)
+// GET endpoint for the Cloudflare cron Worker (dispatches GET requests)
 /**
  * GET /api/cron/game-tick
  *
  * Health check endpoint for game tick cron job. Returns current game state and generation status.
- * Allows Vercel Cron requests identified by user-agent or special headers.
+ * Requires `Authorization: Bearer <CRON_SECRET>` (sent by the Cloudflare cron Worker).
  *
  * @param request - Next.js request
  * @returns Game tick status and current game state information
  */
 export const GET = withErrorHandling(async (request: NextRequest) => {
-  // Security: Verify cron authorization (allows Vercel Cron user-agent)
-  if (
-    !verifyCronAuth(request, {
-      jobName: 'GameTickCron',
-      allowVercelCronUserAgent: true,
-    })
-  ) {
+  // Security: Verify cron authorization (CRON_SECRET bearer token)
+  if (!verifyCronAuth(request, { jobName: 'GameTickCron' })) {
     logger.warn('Unauthorized GET request to cron endpoint', undefined, 'Cron');
     throw new AuthorizationError(
-      'Use POST for cron execution. This endpoint is triggered by Vercel Cron',
+      'Unauthorized cron request',
       'cron',
       'execute'
     );

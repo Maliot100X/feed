@@ -10,7 +10,8 @@
  *   all     - Show all status (default)
  */
 
-import { getAgentLLMStatus } from '@babylon/agents/llm';
+import { execFileSync } from 'node:child_process';
+import { getAgentLLMStatus } from '@feed/agents/llm';
 import {
   actorState,
   checkDatabaseHealth,
@@ -26,9 +27,8 @@ import {
   posts,
   questions,
   worldEvents,
-} from '@babylon/db';
-import { StaticDataRegistry } from '@babylon/engine';
-import { execSync } from 'child_process';
+} from '@feed/db';
+import { StaticDataRegistry } from '@feed/engine';
 import { ethers } from 'ethers';
 import { parseArgs, wantsHelp } from '../lib/args.js';
 import { logger } from '../lib/logger.js';
@@ -38,7 +38,7 @@ function printHelp(): void {
 System Status
 
 USAGE:
-  babylon status [target]
+  feed status [target]
 
 TARGETS:
   game      Game status (running/paused, tick info)
@@ -48,9 +48,9 @@ TARGETS:
   all       Show all status (default)
 
 EXAMPLES:
-  babylon status           Show all status
-  babylon status game      Game status only
-  babylon status llm       LLM provider status
+  feed status           Show all status
+  feed status game      Game status only
+  feed status llm       LLM provider status
 `);
 }
 
@@ -125,7 +125,7 @@ async function checkGameStatus(): Promise<void> {
     );
 
     if (!game.isRunning) {
-      console.log('\n💡 To start: babylon game start');
+      console.log('\n💡 To start: feed game start');
     }
   } else {
     logger.warn('No game state found');
@@ -164,13 +164,11 @@ async function checkWalletStatus(): Promise<void> {
   logger.header('💳 Wallet Status');
 
   const gamePrivateKey =
-    process.env.BABYLON_GAME_PRIVATE_KEY || process.env.DEPLOYER_PRIVATE_KEY;
-  const gameWalletAddress = process.env.BABYLON_GAME_WALLET_ADDRESS;
+    process.env.FEED_GAME_PRIVATE_KEY || process.env.DEPLOYER_PRIVATE_KEY;
+  const gameWalletAddress = process.env.FEED_GAME_WALLET_ADDRESS;
 
   if (!gamePrivateKey || !gameWalletAddress) {
-    logger.fail(
-      'Missing BABYLON_GAME_PRIVATE_KEY or BABYLON_GAME_WALLET_ADDRESS'
-    );
+    logger.fail('Missing FEED_GAME_PRIVATE_KEY or FEED_GAME_WALLET_ADDRESS');
     return;
   }
 
@@ -268,10 +266,10 @@ async function checkAgent0Status(): Promise<void> {
   console.log(`  AGENT0_ENABLED: ${process.env.AGENT0_ENABLED || 'not set'}`);
   console.log(`  AGENT0_NETWORK: ${process.env.AGENT0_NETWORK || 'not set'}`);
   console.log(
-    `  BABYLON_REGISTRY_REGISTERED: ${process.env.BABYLON_REGISTRY_REGISTERED || 'not set'}`
+    `  FEED_REGISTRY_REGISTERED: ${process.env.FEED_REGISTRY_REGISTERED || 'not set'}`
   );
   console.log(
-    `  BABYLON_GAME_WALLET_ADDRESS: ${process.env.BABYLON_GAME_WALLET_ADDRESS || 'not set'}`
+    `  FEED_GAME_WALLET_ADDRESS: ${process.env.FEED_GAME_WALLET_ADDRESS || 'not set'}`
   );
   console.log(
     `  PINATA_JWT: ${process.env.PINATA_JWT ? '✅ Set' : '❌ Not set'}`
@@ -313,8 +311,18 @@ async function checkAgent0Status(): Promise<void> {
       console.log(`   Token ID: ${tokenId}`);
 
       try {
-        const owner = execSync(
-          `cast call ${registryAddress} "ownerOf(uint256)(address)" ${tokenId} --rpc-url ${rpcUrl}`,
+        // Pass values as argv (no shell) so env-provided RPC URLs and addresses
+        // cannot inject shell syntax.
+        const owner = execFileSync(
+          'cast',
+          [
+            'call',
+            registryAddress,
+            'ownerOf(uint256)(address)',
+            String(tokenId),
+            '--rpc-url',
+            rpcUrl,
+          ],
           { encoding: 'utf-8' }
         ).trim();
 
@@ -323,15 +331,23 @@ async function checkAgent0Status(): Promise<void> {
 
         if (
           owner.toLowerCase() ===
-          process.env.BABYLON_GAME_WALLET_ADDRESS?.toLowerCase()
+          process.env.FEED_GAME_WALLET_ADDRESS?.toLowerCase()
         ) {
-          logger.success('Owner matches BABYLON_GAME_WALLET_ADDRESS');
+          logger.success('Owner matches FEED_GAME_WALLET_ADDRESS');
         } else {
-          logger.warn('Owner does NOT match BABYLON_GAME_WALLET_ADDRESS');
+          logger.warn('Owner does NOT match FEED_GAME_WALLET_ADDRESS');
         }
 
-        const tokenURI = execSync(
-          `cast call ${registryAddress} "tokenURI(uint256)(string)" ${tokenId} --rpc-url ${rpcUrl}`,
+        const tokenURI = execFileSync(
+          'cast',
+          [
+            'call',
+            registryAddress,
+            'tokenURI(uint256)(string)',
+            String(tokenId),
+            '--rpc-url',
+            rpcUrl,
+          ],
           { encoding: 'utf-8' }
         )
           .trim()

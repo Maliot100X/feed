@@ -11,22 +11,21 @@
  *   validate  - Validate actor data integrity
  */
 
-import type { JsonValue } from '@babylon/db';
+import type { JsonValue } from '@feed/db';
 import {
   and,
   closeDatabase,
   db,
-  generateSnowflakeId as dbGenerateSnowflakeId,
   desc,
   eq,
   gameConfigs,
   games,
+  generateSnowflakeId,
   isNull,
   posts,
-} from '@babylon/db';
-import type { GameHistory, GroupMessage } from '@babylon/engine';
-import { GameGenerator, loadActorsData } from '@babylon/engine';
-import { nanoid } from 'nanoid';
+} from '@feed/db';
+import type { GameHistory, GroupMessage } from '@feed/engine';
+import { GameGenerator, loadActorsData } from '@feed/engine';
 import { getFlag, parseArgs, wantsHelp } from '../lib/args.js';
 import { logger } from '../lib/logger.js';
 
@@ -35,7 +34,7 @@ function printHelp(): void {
 Game Commands
 
 USAGE:
-  babylon game <command> [options]
+  feed game <command> [options]
 
 COMMANDS:
   start       Start the continuous game
@@ -48,22 +47,12 @@ OPTIONS (generate):
   -v, --verbose    Enable detailed logging
 
 EXAMPLES:
-  babylon game start              Start the game
-  babylon game pause              Pause the game
-  babylon game status             Check if game is running
-  babylon game generate           Generate new game content
-  babylon game validate           Validate actor affiliations
+  feed game start              Start the game
+  feed game pause              Pause the game
+  feed game status             Check if game is running
+  feed game generate           Generate new game content
+  feed game validate           Validate actor affiliations
 `);
-}
-
-/**
- * Generates a unique snowflake ID for game entities.
- *
- * @returns A 21-character nanoid string
- * @internal
- */
-async function generateSnowflakeId(): Promise<string> {
-  return nanoid(21);
 }
 
 /**
@@ -86,7 +75,7 @@ async function controlGame(action: 'start' | 'pause'): Promise<void> {
   let game = result[0];
 
   if (!game) {
-    const gameId = await dbGenerateSnowflakeId();
+    const gameId = await generateSnowflakeId();
     const created = await db
       .insert(games)
       .values({
@@ -143,7 +132,7 @@ async function showGameStatus(): Promise<void> {
 
   if (!game) {
     console.log('No continuous game found.');
-    console.log('\nCreate one with: babylon game start');
+    console.log('\nCreate one with: feed game start');
     return;
   }
 
@@ -165,7 +154,7 @@ async function showGameStatus(): Promise<void> {
   }
 
   if (!game.isRunning) {
-    console.log('\n💡 To start the game: babylon game start');
+    console.log('\n💡 To start the game: feed game start');
   }
 }
 
@@ -299,7 +288,7 @@ async function validateActorsData(): Promise<void> {
 async function generateGame(args: ReturnType<typeof parseArgs>): Promise<void> {
   const verbose = getFlag(args, 'verbose', 'v');
 
-  logger.header('Babylon Game Generator');
+  logger.header('Feed Game Generator');
 
   // Validate actors
   logger.step('Validating actors...');
@@ -359,11 +348,9 @@ async function generateGame(args: ReturnType<typeof parseArgs>): Promise<void> {
   let gameNumber = 1;
 
   if (existingGames.length > 0) {
-    for (
-      let i = Math.max(0, existingGames.length - 2);
-      i < existingGames.length;
-      i++
-    ) {
+    // existingGames is newest-first: load the two most recent games, oldest of
+    // the pair first, numbering games chronologically (oldest = 1).
+    for (let i = Math.min(2, existingGames.length) - 1; i >= 0; i--) {
       const gameData = existingGames[i];
       if (!gameData) continue;
 
@@ -377,7 +364,12 @@ async function generateGame(args: ReturnType<typeof parseArgs>): Promise<void> {
       if (historyConfig?.value) {
         history.push(validateGameHistory(historyConfig.value));
       } else {
-        history.push(await generateMinimalGameHistory(gameData.id, i + 1));
+        history.push(
+          await generateMinimalGameHistory(
+            gameData.id,
+            existingGames.length - i
+          )
+        );
       }
     }
 
@@ -481,7 +473,7 @@ async function runSimulation(
   _args: ReturnType<typeof parseArgs>
 ): Promise<void> {
   throw new Error(
-    'Game simulation is not available in this CLI. Use "babylon game generate" or the training/benchmark tooling instead.'
+    'Game simulation is not available in this CLI. Use "feed game generate" or the training/benchmark tooling instead.'
   );
 }
 

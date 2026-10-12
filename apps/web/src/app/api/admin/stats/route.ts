@@ -67,10 +67,10 @@ import {
   requireAdmin,
   successResponse,
   withErrorHandling,
-} from '@babylon/api';
-import { db } from '@babylon/db';
-import { StaticDataRegistry } from '@babylon/engine';
-import { logger } from '@babylon/shared';
+} from '@feed/api';
+import { db } from '@feed/db';
+import { StaticDataRegistry } from '@feed/engine';
+import { logger } from '@feed/shared';
 import type { NextRequest } from 'next/server';
 
 export const GET = withErrorHandling(async (request: NextRequest) => {
@@ -78,7 +78,7 @@ export const GET = withErrorHandling(async (request: NextRequest) => {
   const admin = await requireAdmin(request);
 
   // Apply rate limiting to prevent abuse of expensive stats queries
-  const rateLimitResult = applyRateLimit(
+  const rateLimitResult = await applyRateLimit(
     admin.userId,
     RATE_LIMIT_CONFIGS.ADMIN_STATS
   );
@@ -228,7 +228,6 @@ export const GET = withErrorHandling(async (request: NextRequest) => {
       profileImageUrl: true,
       walletAddress: true,
       createdAt: true,
-      hasFarcaster: true,
       hasTwitter: true,
     },
   });

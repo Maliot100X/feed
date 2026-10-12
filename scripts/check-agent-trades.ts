@@ -5,9 +5,9 @@
  * Uses safe parameterized queries via Drizzle ORM
  */
 
-import { db } from '@babylon/db';
-import { agentTrades, users } from '@babylon/db/schema';
-import { getTimeAgo } from '@babylon/shared';
+import { db } from '@feed/db';
+import { agentTrades, users } from '@feed/db/schema';
+import { getTimeAgo } from '@feed/shared';
 import { desc, eq, sql } from 'drizzle-orm';
 
 async function checkAgentTrades() {
@@ -74,8 +74,12 @@ async function checkAgentTrades() {
         uniqueAgents: sql<number>`count(distinct ${agentTrades.agentUserId})::int`,
         tradesLast24h: sql<number>`count(*) filter (where ${agentTrades.executedAt} > now() - interval '24 hours')::int`,
         tradesLastHour: sql<number>`count(*) filter (where ${agentTrades.executedAt} > now() - interval '1 hour')::int`,
-        avgTradeAmount: sql<number>`avg(${agentTrades.amount})`,
-        totalVolume: sql<number>`sum(${agentTrades.amount})`,
+        avgTradeAmount: sql<number | null>`avg(${agentTrades.amount})`.mapWith(
+          Number
+        ),
+        totalVolume: sql<number | null>`sum(${agentTrades.amount})`.mapWith(
+          Number
+        ),
       })
       .from(agentTrades)
       .leftJoin(users, eq(agentTrades.agentUserId, users.id))
@@ -100,8 +104,12 @@ async function checkAgentTrades() {
         username: users.username,
         displayName: users.displayName,
         tradeCount: sql<number>`count(*)::int`,
-        lastTradeAt: sql<Date>`max(${agentTrades.executedAt})`,
-        totalVolume: sql<number>`sum(${agentTrades.amount})`,
+        lastTradeAt: sql<Date>`max(${agentTrades.executedAt})`.mapWith(
+          (value: string) => new Date(value)
+        ),
+        totalVolume: sql<number | null>`sum(${agentTrades.amount})`.mapWith(
+          Number
+        ),
       })
       .from(agentTrades)
       .leftJoin(users, eq(agentTrades.agentUserId, users.id))

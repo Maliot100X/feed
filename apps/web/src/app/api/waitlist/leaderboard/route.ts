@@ -94,9 +94,10 @@ import {
   successResponse,
   WaitlistService,
   withErrorHandling,
-} from '@babylon/api';
-import { logger } from '@babylon/shared';
+} from '@feed/api';
+import { logger } from '@feed/shared';
 import type { NextRequest } from 'next/server';
+import { z } from 'zod';
 
 type LeaderboardResponse = {
   leaderboard: Awaited<ReturnType<typeof WaitlistService.getTopWaitlistUsers>>;
@@ -108,6 +109,13 @@ type LeaderboardResponse = {
 };
 
 const CACHE_KEY_NAMESPACE = 'waitlist:leaderboard';
+/** The leaderboard only ever shows the top N users. */
+const MAX_LEADERBOARD_USERS = 100;
+
+const LeaderboardQuerySchema = z.object({
+  page: z.coerce.number().int().min(1).default(1),
+  limit: z.coerce.number().int().min(1).max(MAX_LEADERBOARD_USERS).default(10),
+});
 // Increased cache to 5 minutes to reduce data transfer costs
 const CACHE_TTL_MS = Number(
   process.env.WAITLIST_LEADERBOARD_CACHE_MS ?? 300_000
@@ -117,14 +125,10 @@ const STALE_SECONDS = CACHE_TTL_SECONDS * 3;
 
 export const GET = withErrorHandling(async (request: NextRequest) => {
   const { searchParams } = new URL(request.url);
-  const page = Math.max(
-    1,
-    Number.parseInt(searchParams.get('page') || '1', 10)
-  );
-  const limit = Math.min(
-    Number.parseInt(searchParams.get('limit') || '10', 10),
-    100
-  ); // Cap at 100
+  const { page, limit } = LeaderboardQuerySchema.parse({
+    page: searchParams.get('page') ?? undefined,
+    limit: searchParams.get('limit') ?? undefined,
+  });
   const pointsTypeParam = (searchParams.get('pointsType') || '').toLowerCase();
   const pointsType: 'total' | 'invite' =
     pointsTypeParam === 'total' ? 'total' : 'invite';
@@ -154,16 +158,18 @@ export const GET = withErrorHandling(async (request: NextRequest) => {
     'GET /api/waitlist/leaderboard'
   );
 
-  const topUsers = await WaitlistService.getTopWaitlistUsers(
-    limit,
-    offset,
-    pointsType
-  );
+  // The leaderboard is an explicit top-N view: never read past the cap.
+  const remaining = MAX_LEADERBOARD_USERS - offset;
+  const topUsers =
+    remaining > 0
+      ? await WaitlistService.getTopWaitlistUsers(
+          Math.min(limit, remaining),
+          offset,
+          pointsType
+        )
+      : [];
 
-  // Calculate total pages (cap at 100 users for leaderboard display)
-  // Determine hasMore based on whether we got a full page of results
-  const maxUsers = 100;
-  const totalPages = Math.ceil(maxUsers / limit);
+  const totalPages = Math.ceil(MAX_LEADERBOARD_USERS / limit);
   const hasMore = topUsers.length === limit && page < totalPages;
 
   const responseBody: LeaderboardResponse = {

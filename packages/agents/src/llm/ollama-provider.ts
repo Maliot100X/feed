@@ -16,6 +16,7 @@
  */
 
 import type { IAgentRuntime } from '@elizaos/core';
+import { getAgentLLMBridge } from '@feed/shared';
 import {
   ensureTrajectoryStep,
   getTrajectoryContext,
@@ -54,18 +55,18 @@ interface OllamaListResponse {
  * Updated when new models are trained, benchmarked, and deployed
  */
 const ARCHETYPE_MODELS: Record<string, string> = {
-  trader: 'babylon-trader:latest',
-  'social-butterfly': 'babylon-social:latest',
-  scammer: 'babylon-scammer:latest',
-  degen: 'babylon-degen:latest',
-  'information-trader': 'babylon-info-trader:latest',
-  researcher: 'babylon-researcher:latest',
-  'goody-twoshoes': 'babylon-goody:latest',
-  'ass-kisser': 'babylon-asskisser:latest',
-  'perps-trader': 'babylon-perps:latest',
-  'super-predictor': 'babylon-predictor:latest',
-  infosec: 'babylon-infosec:latest',
-  liar: 'babylon-liar:latest',
+  trader: 'feed-trader:latest',
+  'social-butterfly': 'feed-social:latest',
+  scammer: 'feed-scammer:latest',
+  degen: 'feed-degen:latest',
+  'information-trader': 'feed-info-trader:latest',
+  researcher: 'feed-researcher:latest',
+  'goody-twoshoes': 'feed-goody:latest',
+  'ass-kisser': 'feed-asskisser:latest',
+  'perps-trader': 'feed-perps:latest',
+  'super-predictor': 'feed-predictor:latest',
+  infosec: 'feed-infosec:latest',
+  liar: 'feed-liar:latest',
 };
 
 // Default fallback model
@@ -127,7 +128,8 @@ export async function isModelAvailable(modelName: string): Promise<boolean> {
   const models = await listOllamaModels();
   return models.some(
     (m) =>
-      m.name === modelName || m.name.startsWith(modelName.split(':')[0] ?? '')
+      m.name === modelName ||
+      (!modelName.includes(':') && m.name === `${modelName}:latest`)
   );
 }
 
@@ -137,31 +139,12 @@ export async function isModelAvailable(modelName: string): Promise<boolean> {
 export async function getModelForArchetype(archetype: string): Promise<string> {
   const configuredDefaultModel = getConfiguredDefaultModel();
 
-  // First, try the archetype-specific trained model
-  const archetypeModel = ARCHETYPE_MODELS[archetype];
-  if (archetypeModel && (await isModelAvailable(archetypeModel))) {
-    return archetypeModel;
+  const model =
+    ARCHETYPE_MODELS[archetype] || configuredDefaultModel || DEFAULT_MODEL;
+  if (!(await isModelAvailable(model))) {
+    throw new Error(`Required Ollama model is unavailable: ${model}`);
   }
-
-  if (
-    configuredDefaultModel &&
-    (await isModelAvailable(configuredDefaultModel))
-  ) {
-    return configuredDefaultModel;
-  }
-
-  // Fall back to default model
-  if (await isModelAvailable(DEFAULT_MODEL)) {
-    return DEFAULT_MODEL;
-  }
-
-  // Last resort: any available model
-  const models = await listOllamaModels();
-  if (models.length > 0 && models[0]) {
-    return models[0].name;
-  }
-
-  throw new Error('No Ollama models available');
+  return model;
 }
 
 /**
@@ -170,6 +153,8 @@ export async function getModelForArchetype(archetype: string): Promise<string> {
  * Supports archetype-specific model routing and automatic trajectory logging
  */
 export async function callOllama(params: OllamaCallParams): Promise<string> {
+  if (typeof params.prompt !== 'string' || !params.prompt.trim())
+    throw new Error('Agent LLM prompt is required');
   // Auto-extract trajectory context from runtime if not explicitly provided
   let trajectoryLogger = params.trajectoryLogger;
   let trajectoryId = params.trajectoryId;
@@ -189,10 +174,7 @@ export async function callOllama(params: OllamaCallParams): Promise<string> {
     model = params.modelOverride;
   } else if (params.archetype) {
     model = await getModelForArchetype(params.archetype);
-  } else if (
-    configuredDefaultModel &&
-    (await isModelAvailable(configuredDefaultModel))
-  ) {
+  } else if (configuredDefaultModel) {
     model = configuredDefaultModel;
   } else {
     model = DEFAULT_MODEL;
@@ -209,38 +191,78 @@ export async function callOllama(params: OllamaCallParams): Promise<string> {
 
   messages.push({ role: 'user', content: params.prompt });
 
-  // Call Ollama chat API
-  const timeoutMs = params.maxTokens && params.maxTokens < 500 ? 30000 : 120000;
-
-  const response = await fetch(`${OLLAMA_BASE_URL}/api/chat`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      model,
-      messages,
-      stream: false,
-      options: {
-        temperature: params.temperature ?? 0.7,
-        num_predict: params.maxTokens ?? 8192,
-      },
-    }),
-    signal: AbortSignal.timeout(timeoutMs),
-  });
-
-  if (!response.ok) {
-    const errorText = await response.text();
-    throw new Error(`Ollama API error: ${response.status} - ${errorText}`);
-  }
-
-  const data = (await response.json()) as {
+  const callMetadata = {
+    provider: 'ollama',
+    model,
+    promptType: params.actionType || params.purpose || 'agent-ollama',
+    format: 'text',
+    temperature: params.temperature ?? 0.7,
+    maxTokens: params.maxTokens ?? 8192,
+    systemPrompt: params.system || '',
+    userPrompt: params.prompt,
+  };
+  let responseText: string;
+  let data: {
     message?: { content: string };
     response?: string;
     prompt_eval_count?: number;
     eval_count?: number;
   };
+  try {
+    // Call Ollama chat API
+    const timeoutMs =
+      params.maxTokens && params.maxTokens < 500 ? 30000 : 120000;
 
-  const responseText = data.message?.content || data.response || '';
+    const response = await fetch(`${OLLAMA_BASE_URL}/api/chat`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        model,
+        messages,
+        stream: false,
+        options: {
+          temperature: params.temperature ?? 0.7,
+          num_predict: params.maxTokens ?? 8192,
+        },
+      }),
+      signal: AbortSignal.timeout(timeoutMs),
+    });
+
+    if (!response.ok) {
+      const errorText = await response.text();
+      throw new Error(`Ollama API error: ${response.status} - ${errorText}`);
+    }
+
+    data = (await response.json()) as {
+      message?: { content: string };
+      response?: string;
+      prompt_eval_count?: number;
+      eval_count?: number;
+    };
+
+    responseText = data.message?.content || data.response || '';
+    if (!responseText.trim()) throw new Error('Ollama returned empty content');
+  } catch (error) {
+    getAgentLLMBridge()?.({
+      ...callMetadata,
+      rawResponse: '',
+      inputTokens: 0,
+      outputTokens: 0,
+      durationMs: Date.now() - startTime,
+      success: false,
+      error: error instanceof Error ? error.message : String(error),
+    });
+    throw error;
+  }
   const latencyMs = Date.now() - startTime;
+  getAgentLLMBridge()?.({
+    ...callMetadata,
+    rawResponse: responseText,
+    inputTokens: data.prompt_eval_count ?? 0,
+    outputTokens: data.eval_count ?? 0,
+    durationMs: latencyMs,
+    success: true,
+  });
 
   // Log to trajectory if available (CRITICAL for RL training data collection)
   let stepId: string | null = null;

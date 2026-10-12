@@ -3,19 +3,6 @@
  * Sell shares from a prediction market position via core PredictionMarketService
  */
 
-import type { JsonValue } from '@babylon/api';
-import { broadcastToChannel } from '@babylon/api';
-import {
-  PredictionDbAdapter,
-  PredictionMarketService,
-} from '@babylon/core/markets/prediction';
-import { and, asUser, db, eq, positions } from '@babylon/db';
-import {
-  FEE_CONFIG,
-  FeeService,
-  invalidateAfterPredictionTrade,
-  WalletService,
-} from '@babylon/engine';
 import type {
   Action,
   ActionResult,
@@ -24,6 +11,19 @@ import type {
   Memory,
   State,
 } from '@elizaos/core';
+import type { JsonValue } from '@feed/api';
+import { broadcastToChannel } from '@feed/api';
+import {
+  PredictionDbAdapter,
+  PredictionMarketService,
+} from '@feed/core/markets/prediction';
+import { and, asUser, db, eq, positions } from '@feed/db';
+import {
+  FEE_CONFIG,
+  FeeService,
+  invalidateAfterPredictionTrade,
+  WalletService,
+} from '@feed/engine';
 import { AgentPnLService } from '../../../../services/AgentPnLService';
 import { logger } from '../../../../shared/logger';
 

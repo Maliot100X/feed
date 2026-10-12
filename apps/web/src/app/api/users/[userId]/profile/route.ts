@@ -73,9 +73,6 @@
  *                     profileComplete:
  *                       type: boolean
  *                       description: Whether profile setup is complete
- *                     hasFarcaster:
- *                       type: boolean
- *                       description: Whether Farcaster is linked
  *                     hasTwitter:
  *                       type: boolean
  *                       description: Whether Twitter is linked
@@ -115,8 +112,8 @@ import {
   publicRateLimit,
   successResponse,
   withErrorHandling,
-} from '@babylon/api';
-import { logger, toISO, toISOOrNull, UserIdParamSchema } from '@babylon/shared';
+} from '@feed/api';
+import { logger, toISO, toISOOrNull, UserIdParamSchema } from '@feed/shared';
 import type { NextRequest } from 'next/server';
 import { sanitizeForJson } from '@/lib/json/sanitize';
 import { getOptionalProfileStats } from '@/lib/users/profile-stats';
@@ -227,9 +224,7 @@ export const GET = withErrorHandling(
           bonusPoints: dbUser.bonusPoints,
           referralCount: dbUser.referralCount,
           referralCode: dbUser.referralCode,
-          hasFarcaster: dbUser.hasFarcaster,
           hasTwitter: dbUser.hasTwitter,
-          farcasterUsername: dbUser.farcasterUsername,
           twitterUsername: dbUser.twitterUsername,
           usernameChangedAt: toISOOrNull(dbUser.usernameChangedAt),
           createdAt: toISO(dbUser.createdAt),

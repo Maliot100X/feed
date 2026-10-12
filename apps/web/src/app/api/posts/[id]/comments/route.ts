@@ -73,6 +73,7 @@
  */
 
 import {
+  addPrivateReadHeaders,
   addPublicReadHeaders,
   authenticate,
   BusinessLogicError,
@@ -88,7 +89,7 @@ import {
   RATE_LIMIT_CONFIGS,
   successResponse,
   withErrorHandling,
-} from '@babylon/api';
+} from '@feed/api';
 import {
   and,
   asc,
@@ -98,16 +99,17 @@ import {
   eq,
   hasBlocked,
   inArray,
+  isNull,
   posts,
   reactions,
   users,
-} from '@babylon/db';
+} from '@feed/db';
 import {
   CreateCommentSchema,
   generateSnowflakeId,
   logger,
   PostIdParamSchema,
-} from '@babylon/shared';
+} from '@feed/shared';
 import type { NextRequest } from 'next/server';
 
 /**
@@ -147,29 +149,28 @@ interface CommentWithUser {
   isLiked: boolean;
 }
 
-function buildCommentTree(
-  commentsData: CommentWithUser[],
-  parentId: string | null = null
-): CommentTreeItem[] {
-  // Helper to find parent comment author name
-  const findParentAuthorName = (
+function buildCommentTree(commentsData: CommentWithUser[]): CommentTreeItem[] {
+  const byId = new Map(commentsData.map((c) => [c.id, c]));
+  const childrenByParent = new Map<string | null, CommentWithUser[]>();
+  for (const comment of commentsData) {
+    const siblings = childrenByParent.get(comment.parentCommentId);
+    if (siblings) siblings.push(comment);
+    else childrenByParent.set(comment.parentCommentId, [comment]);
+  }
+
+  const parentAuthorName = (
     parentCommentId: string | null
   ): string | undefined => {
     if (!parentCommentId) return undefined;
-    const parentComment = commentsData.find((c) => c.id === parentCommentId);
-    if (parentComment && parentComment.user) {
-      return (
-        parentComment.user.displayName ||
-        parentComment.user.username ||
-        'Anonymous'
-      );
-    }
-    return undefined;
+    const parent = byId.get(parentCommentId);
+    if (!parent?.user) return undefined;
+    return parent.user.displayName || parent.user.username || 'Anonymous';
   };
 
-  return commentsData
-    .filter((comment) => comment.parentCommentId === parentId)
-    .map((comment) => ({
+  // Comments whose parent is not visible (e.g. hidden by moderation) are
+  // unreachable from the root and therefore omitted with their parent.
+  const build = (parentId: string | null): CommentTreeItem[] =>
+    (childrenByParent.get(parentId) ?? []).map((comment) => ({
       id: comment.id,
       content: comment.content,
       createdAt: comment.createdAt,
@@ -180,11 +181,13 @@ function buildCommentTree(
       userUsername: comment.user?.username || null,
       userAvatar: comment.user?.profileImageUrl || null,
       parentCommentId: comment.parentCommentId,
-      parentCommentAuthorName: findParentAuthorName(comment.parentCommentId),
+      parentCommentAuthorName: parentAuthorName(comment.parentCommentId),
       likeCount: comment.likeCount,
       isLiked: comment.isLiked,
-      replies: buildCommentTree(commentsData, comment.id),
+      replies: build(comment.id),
     }));
+
+  return build(null);
 }
 
 /**
@@ -229,11 +232,12 @@ export const GET = withErrorHandling(
       throw new NotFoundError('Post', postId);
     }
 
-    // Get all comments for the post (including nested replies)
+    // Get all visible comments for the post (including nested replies).
+    // Soft-deleted (moderated) comments must never be returned.
     const commentsResult = await db
       .select()
       .from(comments)
-      .where(eq(comments.postId, postId))
+      .where(and(eq(comments.postId, postId), isNull(comments.deletedAt)))
       .orderBy(asc(comments.createdAt));
 
     // Get author IDs
@@ -330,7 +334,13 @@ export const GET = withErrorHandling(
         total: totalComments,
       },
     });
-    if (rateLimitInfo) addPublicReadHeaders(res, rateLimitInfo);
+    if (canonicalUserId) {
+      // Includes the viewer's isLiked: never shared-cacheable.
+      if (rateLimitInfo) addPrivateReadHeaders(res, rateLimitInfo);
+      else res.headers.set('Cache-Control', 'private, no-store');
+    } else if (rateLimitInfo) {
+      addPublicReadHeaders(res, rateLimitInfo);
+    }
     return res;
   }
 );
@@ -361,7 +371,7 @@ export const POST = withErrorHandling(
     }
 
     // Apply rate limiting and duplicate detection
-    const rateLimitError = checkRateLimitAndDuplicates(
+    const rateLimitError = await checkRateLimitAndDuplicates(
       user.userId,
       content,
       RATE_LIMIT_CONFIGS.CREATE_COMMENT,
@@ -385,100 +395,10 @@ export const POST = withErrorHandling(
       .where(eq(posts.id, postId))
       .limit(1);
 
-    // If post doesn't exist, try to auto-create it based on format
-    if (!post) {
-      // Try multiple post ID formats
-      // Format 1: gameId-gameTimestamp-authorId-isoTimestamp (e.g., babylon-1761441310151-kash-patrol-2025-10-01T02:12:00Z)
-      // Format 2: post-{timestamp}-{random} (e.g., post-1762099655817-0.7781412938928327)
-      // Format 3: post-{timestamp}-{actorId}-{random} (e.g., post-1762099655817-kash-patrol-abc123)
-
-      let gameId = 'babylon'; // default game
-      let authorId = 'system'; // default author for game-generated posts
-      let timestamp = new Date();
-
-      // Check Format 1: Has ISO timestamp at the end
-      const isoTimestampMatch = postId.match(
-        /(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{3})?Z)$/
-      );
-
-      if (isoTimestampMatch && isoTimestampMatch[1]) {
-        // Format 1: gameId-gameTimestamp-authorId-isoTimestamp
-        const timestampStr = isoTimestampMatch[1];
-        timestamp = new Date(timestampStr);
-
-        // Extract gameId (first part before first hyphen)
-        const firstHyphenIndex = postId.indexOf('-');
-        if (firstHyphenIndex !== -1) {
-          gameId = postId.substring(0, firstHyphenIndex);
-
-          // Extract authorId (everything between second hyphen and the ISO timestamp)
-          const withoutGameId = postId.substring(firstHyphenIndex + 1);
-          const secondHyphenIndex = withoutGameId.indexOf('-');
-          if (secondHyphenIndex !== -1) {
-            const afterGameTimestamp = withoutGameId.substring(
-              secondHyphenIndex + 1
-            );
-            authorId = afterGameTimestamp.substring(
-              0,
-              afterGameTimestamp.lastIndexOf('-' + timestampStr)
-            );
-          }
-        }
-      } else if (postId.startsWith('post-')) {
-        // Format 2 or 3: GameEngine format
-        const parts = postId.split('-');
-
-        if (parts.length >= 3 && parts[1]) {
-          // Try to extract timestamp from second part
-          const timestampPart = parts[1];
-          const timestampNum = Number.parseInt(timestampPart, 10);
-
-          if (!isNaN(timestampNum) && timestampNum > 1000000000000) {
-            // Valid timestamp (milliseconds since epoch)
-            timestamp = new Date(timestampNum);
-
-            // Check if third part looks like an actor ID (not a decimal)
-            if (parts.length >= 4 && parts[2] && !parts[2].includes('.')) {
-              // Format 3: post-{timestamp}-{actorId}-{random}
-              authorId = parts[2];
-            }
-            // Otherwise Format 2: post-{timestamp}-{random}
-            // Keep default authorId = 'system'
-          }
-        }
-      } else {
-        // Unknown format, reject
-        throw new BusinessLogicError(
-          'Invalid post ID format',
-          'INVALID_POST_ID_FORMAT'
-        );
-      }
-
-      // Ensure post exists (upsert pattern)
-      const [existingPost] = await db
-        .select({ id: posts.id, deletedAt: posts.deletedAt })
-        .from(posts)
-        .where(eq(posts.id, postId))
-        .limit(1);
-
-      if (existingPost) {
-        // Check if the existing post is deleted
-        if (existingPost.deletedAt) {
-          throw new BusinessLogicError(
-            'Cannot comment on deleted post',
-            'POST_DELETED'
-          );
-        }
-      } else {
-        // Create the post
-        await db.insert(posts).values({
-          id: postId,
-          content: '[Game-generated post]',
-          authorId,
-          gameId,
-          timestamp,
-        });
-      }
+    // Comments may only be added to existing, published posts. Unknown IDs
+    // are never turned into placeholder posts.
+    if (!post || post.timestamp > new Date()) {
+      throw new NotFoundError('Post', postId);
     } else if (post.deletedAt) {
       // Post exists but is deleted - cannot comment
       throw new BusinessLogicError(
@@ -492,7 +412,9 @@ export const POST = withErrorHandling(
       const [parentComment] = await db
         .select({ id: comments.id, postId: comments.postId })
         .from(comments)
-        .where(eq(comments.id, parentCommentId))
+        .where(
+          and(eq(comments.id, parentCommentId), isNull(comments.deletedAt))
+        )
         .limit(1);
 
       if (!parentComment) {

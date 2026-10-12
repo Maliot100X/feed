@@ -15,9 +15,12 @@ import { join } from 'path';
 import { parseArgs, wantsHelp } from '../lib/args.js';
 import { logger } from '../lib/logger.js';
 
-const CONTAINER_NAME = 'babylon-postgres';
+const CONTAINER_NAME = 'feed-postgres';
 const COMPOSE_FILE = 'docker-compose.yml';
 const HOST_PORT = '5433';
+const REPO_ROOT = join(import.meta.dir, '../../../..');
+// Credentials of the local docker-compose Postgres (see docker-compose.yml).
+const LOCAL_DATABASE_URL = `postgresql://feed:feed_dev_password@localhost:${HOST_PORT}/feed`;
 
 export function isRecoverableComposeStartError(message: string): boolean {
   const normalized = message.toLowerCase();
@@ -66,7 +69,7 @@ function printHelp(): void {
 Database Management
 
 USAGE:
-  babylon db <command>
+  feed db <command>
 
 COMMANDS:
   start     Start PostgreSQL container
@@ -78,14 +81,14 @@ COMMANDS:
   reset     Reset database (drop + migrate)
 
 EXAMPLES:
-  babylon db start
-  babylon db migrate
-  babylon db seed
-  babylon db status
+  feed db start
+  feed db migrate
+  feed db seed
+  feed db status
 
 ENVIRONMENT:
   DATABASE_URL should be set in your .env file:
-  DATABASE_URL="postgresql://babylon:babylon_dev_password@localhost:5433/babylon"
+  DATABASE_URL="postgresql://feed:feed_dev_password@localhost:5433/feed"
 `);
 }
 
@@ -195,7 +198,7 @@ async function startDatabase(): Promise<void> {
     }
 
     logger.warn(
-      'Detected stale Docker networking state. Recreating babylon-postgres...'
+      'Detected stale Docker networking state. Recreating feed-postgres...'
     );
 
     await $`docker rm -f ${CONTAINER_NAME}`.quiet().catch(() => undefined);
@@ -283,7 +286,7 @@ async function showStatus(): Promise<void> {
 
   if (!exists) {
     console.log('Status: Not created');
-    console.log("\nRun 'babylon db start' to create and start the database.");
+    console.log("\nRun 'feed db start' to create and start the database.");
     return;
   }
 
@@ -311,7 +314,7 @@ async function showStatus(): Promise<void> {
     await showConnectionInfo();
   } else {
     console.log('Status: ⏸️  Stopped');
-    console.log("\nRun 'babylon db start' to start the database.");
+    console.log("\nRun 'feed db start' to start the database.");
   }
 }
 
@@ -327,19 +330,20 @@ async function showConnectionInfo(): Promise<void> {
   console.log('\nConnection Info:');
   console.log('  Host:     localhost');
   console.log(`  Port:     ${HOST_PORT}`);
-  console.log('  Database: babylon');
-  console.log('  User:     babylon');
-  console.log('  Password: babylon_dev_password');
+  console.log('  Database: feed');
+  console.log('  User:     feed');
+  console.log('  Password: feed_dev_password');
   console.log(
-    `\n  URL: postgresql://babylon:babylon_dev_password@localhost:${HOST_PORT}/babylon`
+    `\n  URL: postgresql://feed:feed_dev_password@localhost:${HOST_PORT}/feed`
   );
 }
 
 /**
- * Runs database migrations using drizzle-kit push.
+ * Applies the committed migration history to the local container database
+ * via the canonical `bun run db:migrate` (drizzle-kit migrate).
  *
- * Pushes schema changes from Drizzle ORM definitions to the database.
- * Requires the database container to be running.
+ * DATABASE_URL is pinned to the local container so a remote URL in the
+ * developer's environment is never migrated by this local-dev command.
  *
  * @throws Exits process with code 1 if database is not running
  * @internal
@@ -349,13 +353,21 @@ async function runMigrations(): Promise<void> {
 
   if (!(await isContainerRunning())) {
     logger.fail('PostgreSQL is not running!');
-    console.log('Start it first with: babylon db start');
+    console.log('Start it first with: feed db start');
     process.exit(1);
   }
 
-  logger.step('Pushing schema changes...');
-  await $`bunx drizzle-kit push --config=packages/db/drizzle.config.ts`;
+  await applyMigrationsToLocalContainer();
   logger.success('Migrations complete');
+}
+
+async function applyMigrationsToLocalContainer(): Promise<void> {
+  logger.step('Applying migrations...');
+  await $`bun run db:migrate`.cwd(REPO_ROOT).env({
+    ...process.env,
+    DATABASE_URL: LOCAL_DATABASE_URL,
+    DIRECT_DATABASE_URL: LOCAL_DATABASE_URL,
+  });
 }
 
 /**
@@ -372,21 +384,26 @@ async function seedDatabase(): Promise<void> {
 
   if (!(await isContainerRunning())) {
     logger.fail('PostgreSQL is not running!');
-    console.log('Start it first with: babylon db start');
+    console.log('Start it first with: feed db start');
     process.exit(1);
   }
 
   logger.step('Running seed script...');
-  const rootDir = import.meta.dirname.replace('/apps/cli/src/commands', '');
-  await $`bun run ${rootDir}/scripts/seed-database.ts`;
+  // Seed the local container this command just checked, not whatever
+  // DATABASE_URL happens to be set in the shell.
+  await $`bun run scripts/seed-database.ts`.cwd(REPO_ROOT).env({
+    ...process.env,
+    DATABASE_URL: LOCAL_DATABASE_URL,
+  });
   logger.success('Database seeded');
 }
 
 /**
- * Resets the database by dropping and recreating schema.
+ * Resets the local container database: drops and recreates the public schema
+ * inside the docker-compose container, then reapplies the migration history.
  *
- * **Warning:** This will delete all data! Forces schema push using drizzle-kit.
- * Requires the database container to be running.
+ * **Warning:** This deletes all data in the local container database. It only
+ * ever targets the local container, never DATABASE_URL.
  *
  * @throws Exits process with code 1 if database is not running
  * @internal
@@ -394,16 +411,17 @@ async function seedDatabase(): Promise<void> {
 async function resetDatabase(): Promise<void> {
   logger.header('Resetting Database');
 
-  logger.warn('This will delete all data!');
+  logger.warn('This will delete all data in the local container database!');
 
   if (!(await isContainerRunning())) {
     logger.fail('PostgreSQL is not running!');
-    console.log('Start it first with: babylon db start');
+    console.log('Start it first with: feed db start');
     process.exit(1);
   }
 
-  logger.step('Resetting schema...');
-  await $`bunx drizzle-kit push --force --config=packages/db/drizzle.config.ts`;
+  logger.step('Dropping and recreating schema...');
+  await $`docker exec ${CONTAINER_NAME} psql -U feed -d feed -v ON_ERROR_STOP=1 -c ${'DROP SCHEMA public CASCADE; CREATE SCHEMA public;'}`;
+  await applyMigrationsToLocalContainer();
   logger.success('Database reset complete');
 }
 

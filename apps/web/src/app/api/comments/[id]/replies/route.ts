@@ -85,17 +85,18 @@
 
 import {
   authenticate,
+  BusinessLogicError,
   NotFoundError,
   successResponse,
   withErrorHandling,
-} from '@babylon/api';
-import { asUser, comments, eq, posts, users } from '@babylon/db';
+} from '@feed/api';
+import { asUser, comments, eq, posts, users } from '@feed/db';
 import {
   CreateCommentSchema,
   generateSnowflakeId,
   IdParamSchema,
   logger,
-} from '@babylon/shared';
+} from '@feed/shared';
 import type { NextRequest } from 'next/server';
 
 /**
@@ -135,34 +136,26 @@ export const POST = withErrorHandling(
         throw new NotFoundError('Parent comment', parentCommentId);
       }
 
-      // Auto-create post if it doesn't exist (for consistency)
-      // PostId format: gameId-authorId-timestamp
-      const postId = parentComment.postId;
-      const postParts = postId.split('-');
-      if (postParts.length >= 3) {
-        const gameId = postParts[0];
-        const authorId = postParts[1];
-        const timestampStr = postParts.slice(2).join('-');
+      // Replies are only allowed under a visible parent on a visible post.
+      // Posts are never created from the parent's post ID.
+      const [parentPost] = await dbClient
+        .select({
+          id: posts.id,
+          timestamp: posts.timestamp,
+          deletedAt: posts.deletedAt,
+        })
+        .from(posts)
+        .where(eq(posts.id, parentComment.postId))
+        .limit(1);
 
-        if (gameId && authorId) {
-          // Ensure post exists (insert if not exists pattern)
-          const [existingPost] = await dbClient
-            .select()
-            .from(posts)
-            .where(eq(posts.id, postId))
-            .limit(1);
-
-          if (!existingPost) {
-            await dbClient.insert(posts).values({
-              id: postId,
-              content: '[Game-generated post]',
-              authorId,
-              gameId,
-              timestamp: new Date(timestampStr),
-              createdAt: new Date(),
-            });
-          }
-        }
+      if (!parentPost || parentPost.timestamp > new Date()) {
+        throw new NotFoundError('Post', parentComment.postId);
+      }
+      if (parentPost.deletedAt || parentComment.deletedAt) {
+        throw new BusinessLogicError(
+          'Cannot reply to deleted content',
+          'CONTENT_DELETED'
+        );
       }
 
       // Create reply (comment with parentCommentId)

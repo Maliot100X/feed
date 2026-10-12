@@ -1,7 +1,7 @@
 /**
  * Unit tests for the achievement & challenge engine (checkProgress, getUserAchievements, getUserChallenges).
  *
- * Mocks @babylon/db, notification-service, points-service, and SSE broadcaster
+ * Mocks @feed/db, notification-service, points-service, and SSE broadcaster
  * to test core logic in isolation.
  */
 
@@ -21,7 +21,7 @@ import {
   DAILY_CHALLENGE_DEFINITIONS,
   POINTS,
   WEEKLY_CHALLENGE_DEFINITIONS,
-} from '@babylon/shared';
+} from '@feed/shared';
 
 // ── Mock state ────────────────────────────────────────────────────
 
@@ -140,6 +140,9 @@ describe('Achievement Engine (checkProgress)', () => {
     mock.module('../reputation-service', () => ({
       ReputationService: {
         awardReputation: mockAwardReputation,
+        // The tx-aware primitive records the same call (without the tx arg).
+        awardReputationInTx: (_tx: unknown, ...args: unknown[]) =>
+          mockAwardReputation(...args),
       },
     }));
 
@@ -155,8 +158,8 @@ describe('Achievement Engine (checkProgress)', () => {
       broadcastToChannel: mockBroadcastToChannel,
     }));
 
-    // Mock @babylon/db
-    mock.module('@babylon/db', () => {
+    // Mock @feed/db
+    mock.module('@feed/db', () => {
       const createSelectChain = (selectIsCount: boolean) => {
         let fromTable = '';
         const chain: Record<string, unknown> = {};
@@ -250,13 +253,22 @@ describe('Achievement Engine (checkProgress)', () => {
           return chain;
         });
         chain.where = mock(() => chain);
+        chain.returning = mock(async () =>
+          state.insertReturnsRow ? [{ id: 'mock-updated-id' }] : []
+        );
         chain.then = (onFulfilled?: ((value: unknown) => unknown) | null) =>
           Promise.resolve(undefined).then(onFulfilled);
         return chain;
       };
 
+      const mockDb: Record<string, unknown> = {};
+      mockDb.transaction = mock(
+        async (fn: (tx: Record<string, unknown>) => Promise<unknown>) =>
+          fn(mockDb)
+      );
+
       return {
-        db: {
+        db: Object.assign(mockDb, {
           select: mock((fields?: unknown) => {
             // Detect count queries: select({ c: count() }) passes 'count()' string
             const isCount = !!(
@@ -279,7 +291,7 @@ describe('Achievement Engine (checkProgress)', () => {
           }),
           update: mock((_table: unknown) => createUpdateChain()),
           delete: mock(() => createChainableQuery(() => [])),
-        },
+        }),
         // Table references (with _ marker for identification)
         userAchievements: {
           _: 'userAchievements',

@@ -14,9 +14,9 @@
  * Test DID:  steward:test:<userId> Bearer token (integration tests).
  */
 
-import { and, db, eq, isNull, users } from '@babylon/db';
-import { type AuthenticatedUser } from '@babylon/shared';
-import { jwtVerify } from 'jose';
+import { and, db, eq, isNull, users } from '@feed/db';
+import { type AuthenticatedUser, logger } from '@feed/shared';
+import { errors as joseErrors, jwtVerify } from 'jose';
 import type { NextRequest } from 'next/server';
 import { NextResponse } from 'next/server';
 import { verifyAgentSession } from './agent-auth';
@@ -31,8 +31,8 @@ import {
 } from './errors';
 import { ensureUserFromSteward } from './users/ensure-user';
 
-export type { AuthenticatedUser } from '@babylon/shared';
-export { extractErrorMessage } from '@babylon/shared';
+export type { AuthenticatedUser } from '@feed/shared';
+export { extractErrorMessage } from '@feed/shared';
 export { AuthenticationError, isAuthenticationError };
 
 // ─── Steward JWT verification ─────────────────────────────────────────────────
@@ -61,15 +61,69 @@ interface StewardJwtPayload {
   [key: string]: unknown;
 }
 
+/**
+ * Verify a Steward JWT.
+ *
+ * Only credential problems (jose verification errors, missing claims) map to
+ * AuthenticationError (401). Configuration problems such as a missing
+ * production secret propagate as ServiceUnavailableError.
+ */
 async function verifyStewardToken(token: string): Promise<StewardJwtPayload> {
-  const { payload } = await jwtVerify(token, getStewardJwtSecret(), {
-    issuer: 'steward',
-    algorithms: ['HS256'],
-  });
+  const secret = getStewardJwtSecret();
+  let payload: Awaited<ReturnType<typeof jwtVerify>>['payload'];
+  try {
+    ({ payload } = await jwtVerify(token, secret, {
+      issuer: 'steward',
+      algorithms: ['HS256'],
+    }));
+  } catch (err) {
+    if (err instanceof joseErrors.JWTExpired) {
+      throw new AuthenticationError(
+        'Authentication token has expired. Please sign in again.'
+      );
+    }
+    if (err instanceof joseErrors.JOSEError) {
+      throw new AuthenticationError(
+        'Invalid authentication token. Please sign in again.'
+      );
+    }
+    throw err;
+  }
   if (!payload['userId'] || typeof payload['userId'] !== 'string') {
     throw new AuthenticationError('Steward JWT missing userId claim');
   }
   return payload as unknown as StewardJwtPayload;
+}
+
+/** JWTs have three base64url segments; agent session tokens are opaque hex. */
+function looksLikeJwt(token: string): boolean {
+  return /^[\w-]+\.[\w-]+\.[\w-]*$/.test(token);
+}
+
+/**
+ * Look up an agent session for an opaque (non-JWT) token.
+ *
+ * A missing session returns null so verification can continue. A failing
+ * session store is surfaced as ServiceUnavailableError instead of being
+ * reported to the caller as an invalid token. JWT-shaped tokens skip the
+ * store entirely, so a store outage never affects Steward users.
+ */
+async function lookupAgentSession(
+  token: string
+): Promise<{ agentId: string } | null> {
+  if (looksLikeJwt(token)) {
+    return null;
+  }
+  try {
+    return await verifyAgentSession(token);
+  } catch (error) {
+    logger.error(
+      'Agent session store lookup failed',
+      { error: error instanceof Error ? error.message : String(error) },
+      'Auth'
+    );
+    throw new ServiceUnavailableError('Agent session store is unavailable');
+  }
 }
 
 // ─── User lookup chain ────────────────────────────────────────────────────────
@@ -99,7 +153,7 @@ async function resolveUserFromStewardPayload(
     return toAuthUser(byId);
   }
 
-  // 2. Email bridge: Babylon user exists but hasn't logged in via Steward yet.
+  // 2. Email bridge: Feed user exists but hasn't logged in via Steward yet.
   //    Only match on real emails — skip synthetic @id.steward.internal addresses.
   const isRealEmail =
     email &&
@@ -114,11 +168,30 @@ async function resolveUserFromStewardPayload(
       .limit(1);
 
     if (byEmail) {
-      await db
+      // Link only if still unlinked. Two Steward identities presenting the
+      // same email can race here; only the one whose conditional UPDATE wins
+      // is linked. The loser must not be authenticated as this user.
+      const [linked] = await db
         .update(users)
         .set({ stewardId: stewardUserId })
-        .where(eq(users.id, byEmail.id));
-      return toAuthUser({ ...byEmail, stewardId: stewardUserId });
+        .where(and(eq(users.id, byEmail.id), isNull(users.stewardId)))
+        .returning(USER_SELECT);
+      if (linked) {
+        return toAuthUser(linked);
+      }
+
+      // Lost the race. If the winner was this same Steward identity (e.g. a
+      // concurrent request from the same login), use the linked row.
+      const [byIdAfterRace] = await db
+        .select(USER_SELECT)
+        .from(users)
+        .where(eq(users.stewardId, stewardUserId))
+        .limit(1);
+      if (byIdAfterRace) {
+        return toAuthUser(byIdAfterRace);
+      }
+      // Another Steward identity claimed the row: treat this login exactly as
+      // a later request would (no unlinked row matches), i.e. step 3.
     }
   }
 
@@ -229,37 +302,17 @@ export async function authenticate(
   }
 
   // ── Agent session token ────────────────────────────────────────────────────
-  try {
-    const agentSession = await verifyAgentSession(token);
-    if (agentSession) {
-      return {
-        userId: agentSession.agentId,
-        privyId: agentSession.agentId,
-        isAgent: true,
-      };
-    }
-  } catch {
-    // Agent session lookup failed (e.g. Redis down) — fall through to Steward JWT
+  const agentSession = await lookupAgentSession(token);
+  if (agentSession) {
+    return {
+      userId: agentSession.agentId,
+      privyId: agentSession.agentId,
+      isAgent: true,
+    };
   }
 
   // ── Steward JWT verification ───────────────────────────────────────────────
-  let payload: StewardJwtPayload;
-  try {
-    payload = await verifyStewardToken(token);
-  } catch (err) {
-    if (isAuthenticationError(err)) throw err;
-
-    const msg = err instanceof Error ? err.message.toLowerCase() : '';
-    if (msg.includes('exp') || msg.includes('expired')) {
-      throw new AuthenticationError(
-        'Authentication token has expired. Please sign in again.'
-      );
-    }
-    throw new AuthenticationError(
-      'Invalid authentication token. Please sign in again.'
-    );
-  }
-
+  const payload = await verifyStewardToken(token);
   return resolveUserFromStewardPayload(payload);
 }
 
@@ -291,24 +344,23 @@ export async function optionalAuth(
 
   if (!token) return null;
 
-  try {
-    const agentSession = await verifyAgentSession(token);
-    if (agentSession) {
-      return {
-        userId: agentSession.agentId,
-        privyId: agentSession.agentId,
-        isAgent: true,
-      };
-    }
-  } catch {
-    // fall through
+  const agentSession = await lookupAgentSession(token);
+  if (agentSession) {
+    return {
+      userId: agentSession.agentId,
+      privyId: agentSession.agentId,
+      isAgent: true,
+    };
   }
 
+  // Invalid/expired credentials mean "anonymous"; infrastructure and
+  // configuration failures propagate.
   try {
     const payload = await verifyStewardToken(token);
-    return resolveUserFromStewardPayload(payload);
-  } catch {
-    return null;
+    return await resolveUserFromStewardPayload(payload);
+  } catch (error) {
+    if (isAuthenticationError(error)) return null;
+    throw error;
   }
 }
 
@@ -321,20 +373,17 @@ export async function optionalAuthFromHeaders(
   if (!authHeader?.startsWith('Bearer ')) return null;
   const token = authHeader.slice(7);
 
-  try {
-    const agentSession = await verifyAgentSession(token);
-    if (agentSession) {
-      return { userId: agentSession.agentId, isAgent: true };
-    }
-  } catch {
-    // fall through
+  const agentSession = await lookupAgentSession(token);
+  if (agentSession) {
+    return { userId: agentSession.agentId, isAgent: true };
   }
 
   try {
     const payload = await verifyStewardToken(token);
-    return resolveUserFromStewardPayload(payload);
-  } catch {
-    return null;
+    return await resolveUserFromStewardPayload(payload);
+  } catch (error) {
+    if (isAuthenticationError(error)) return null;
+    throw error;
   }
 }
 
@@ -347,20 +396,4 @@ export function authErrorResponse(message = 'Unauthorized') {
 export async function authenticateUser(req: NextRequest) {
   const authUser = await authenticate(req);
   return { id: authUser.userId, ...authUser };
-}
-
-// ─── Legacy Privy client export (no-op — kept for import compatibility) ───────
-// Any code still importing getPrivyClient() will compile but get an error at
-// runtime to surface remaining usages during Phase 2 migration.
-
-/** @deprecated — use Steward JWT verification instead */
-export function getPrivyClient(): never {
-  throw new Error(
-    '[Phase 2] getPrivyClient() has been removed. Use Steward JWT verification.'
-  );
-}
-
-/** @internal Reset for testing only — no-op in Phase 2 */
-export function _resetPrivyClientForTesting(): void {
-  /* no-op */
 }

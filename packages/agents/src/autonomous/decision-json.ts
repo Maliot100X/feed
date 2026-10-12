@@ -1,3 +1,5 @@
+import type { MultiStepDecision } from './templates/multi-step-decision';
+
 export function stripThinkBlocks(text: string): string {
   const withoutBlocks = text.replace(/<think>[\s\S]*?<\/think>/gi, '');
   return withoutBlocks.replace(/<\/?think>/gi, '').trim();
@@ -65,4 +67,38 @@ export function extractFirstJsonObject(response: string): string | null {
   }
 
   return null;
+}
+
+export class DecisionValidationError extends Error {}
+
+/** Validate model output before normalization can turn missing values into actions. */
+export function parseDecisionJson(json: string): MultiStepDecision {
+  const value: unknown = JSON.parse(json);
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    throw new DecisionValidationError('Decision must be an object');
+  }
+  if (
+    !('action' in value) ||
+    typeof value.action !== 'string' ||
+    !value.action.trim() ||
+    !('thought' in value) ||
+    typeof value.thought !== 'string' ||
+    !value.thought.trim() ||
+    !('isFinish' in value) ||
+    typeof value.isFinish !== 'boolean' ||
+    !('parameters' in value) ||
+    !value.parameters ||
+    typeof value.parameters !== 'object' ||
+    Array.isArray(value.parameters)
+  ) {
+    throw new DecisionValidationError(
+      'Decision requires action, thought, boolean isFinish, and object parameters'
+    );
+  }
+  return {
+    action: value.action,
+    thought: value.thought,
+    isFinish: value.isFinish,
+    parameters: value.parameters as Record<string, unknown>,
+  };
 }

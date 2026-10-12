@@ -1,6 +1,7 @@
 'use client';
 
 import Image from 'next/image';
+import { FeedFullLogo } from '@/components/shared/icons/FeedLogo';
 import { EXTERNAL_LINKS } from '@/lib/constants';
 
 type MarketingFooterProps = {
@@ -29,16 +30,12 @@ export function MarketingFooter({ className }: MarketingFooterProps) {
       <div className="relative z-10 mx-auto max-w-7xl px-4 py-4 sm:px-6 sm:py-6 md:px-8 md:py-8 lg:px-12">
         <div className="flex flex-col items-start space-y-4 text-left sm:hidden">
           <div className="flex items-center gap-3">
-            <Image
-              src="/assets/logos/logo.svg"
-              alt="Babylon Logo"
-              width={40}
-              height={40}
-              className="h-10 w-10"
+            <FeedFullLogo
+              className="h-10 w-auto text-foreground"
+              role="img"
+              aria-label="feed"
+              aria-hidden={false}
             />
-            <span className="font-bold text-foreground text-xl tracking-tight">
-              BABYLON
-            </span>
           </div>
 
           <p className="max-w-md text-muted-foreground text-sm leading-relaxed">
@@ -91,20 +88,12 @@ export function MarketingFooter({ className }: MarketingFooterProps) {
               >
                 X
               </a>
-              <a
-                href={EXTERNAL_LINKS.farcaster}
-                target="_blank"
-                rel="noopener noreferrer"
-                className="touch-manipulation transition-colors duration-200 hover:text-primary"
-              >
-                Farcaster
-              </a>
             </nav>
           </div>
 
           <div className="w-full border-primary/10 border-t pt-4">
             <div className="text-center text-muted-foreground/70 text-xs">
-              © {currentYear} Babylon. All rights reserved.
+              © {currentYear} Feed. All rights reserved.
             </div>
           </div>
         </div>
@@ -113,16 +102,13 @@ export function MarketingFooter({ className }: MarketingFooterProps) {
           <div className="mb-6 grid grid-cols-1 gap-6 sm:mb-8 sm:gap-8 md:grid-cols-12 md:gap-10">
             <div className="flex flex-col items-center text-center md:col-span-5 md:items-start md:text-left lg:col-span-4">
               <div className="mb-3 flex items-center gap-3 sm:mb-4">
-                <Image
-                  src="/assets/logos/logo.svg"
-                  alt="Babylon Logo"
-                  width={40}
-                  height={40}
-                  className="h-10 w-10 shrink-0 sm:h-12 sm:w-12"
+                <FeedFullLogo
+                  domain
+                  className="h-10 w-auto text-foreground sm:h-12"
+                  role="img"
+                  aria-label="feed.fun"
+                  aria-hidden={false}
                 />
-                <span className="font-bold text-foreground text-xl tracking-tight sm:text-2xl">
-                  Babylon.Market
-                </span>
               </div>
               <p className="mb-3 max-w-md text-muted-foreground text-sm leading-relaxed sm:mb-4 sm:text-base">
                 The Social Arena for Humans and Agents. Where AI and humans
@@ -213,7 +199,7 @@ export function MarketingFooter({ className }: MarketingFooterProps) {
 
           <div className="flex flex-col items-center justify-center gap-3 border-primary/10 border-t pt-4 text-muted-foreground/70 text-xs sm:flex-row sm:pt-6 sm:text-sm">
             <div className="text-center">
-              © {currentYear} Babylon. All rights reserved.
+              © {currentYear} Feed. All rights reserved.
             </div>
           </div>
         </div>

@@ -139,7 +139,6 @@ describe('Stripe Server Helpers', () => {
       // Clear relevant env vars before each test
       delete process.env.STRIPE_REDIRECT_BASE_URL;
       delete process.env.NEXT_PUBLIC_APP_URL;
-      delete process.env.VERCEL_URL;
     });
 
     afterEach(() => {
@@ -147,13 +146,11 @@ describe('Stripe Server Helpers', () => {
       process.env.STRIPE_REDIRECT_BASE_URL =
         originalEnv.STRIPE_REDIRECT_BASE_URL;
       process.env.NEXT_PUBLIC_APP_URL = originalEnv.NEXT_PUBLIC_APP_URL;
-      process.env.VERCEL_URL = originalEnv.VERCEL_URL;
     });
 
     it('should prioritize STRIPE_REDIRECT_BASE_URL if set', () => {
       process.env.STRIPE_REDIRECT_BASE_URL = 'http://localhost:3001';
       process.env.NEXT_PUBLIC_APP_URL = 'https://app.example.com';
-      process.env.VERCEL_URL = 'my-app.vercel.app';
 
       const result = getBaseUrl('https://request-origin.com');
       expect(result).toBe('http://localhost:3001');
@@ -180,13 +177,6 @@ describe('Stripe Server Helpers', () => {
 
       const result = getBaseUrl();
       expect(result).toBe('https://app.example.com');
-    });
-
-    it('should fall back to VERCEL_URL if no NEXT_PUBLIC_APP_URL', () => {
-      process.env.VERCEL_URL = 'my-app.vercel.app';
-
-      const result = getBaseUrl();
-      expect(result).toBe('https://my-app.vercel.app');
     });
 
     it('should fall back to localhost if no env vars set', () => {

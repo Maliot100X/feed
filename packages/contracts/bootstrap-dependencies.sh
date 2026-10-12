@@ -4,6 +4,14 @@ set -euo pipefail
 
 ROOT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 DEPS_DIR="$ROOT_DIR/dependencies"
+CURRENT_TMPDIR=""
+
+cleanup_tmpdir() {
+  if [[ -n "$CURRENT_TMPDIR" ]]; then
+    rm -rf "$CURRENT_TMPDIR"
+  fi
+}
+trap cleanup_tmpdir EXIT
 
 download_dependency() {
   local name="$1"
@@ -16,11 +24,16 @@ download_dependency() {
     return 0
   fi
 
-  mkdir -p "$target_dir"
+  mkdir -p "$DEPS_DIR"
 
+  # Download and extract into a temporary directory and only publish the
+  # target directory after the checksum and unzip succeed, so a failed run
+  # never leaves an empty target that later runs would mistake for success.
   local tmpdir
-  tmpdir="$(mktemp -d)"
+  tmpdir="$(mktemp -d "$DEPS_DIR/.tmp-${name//\//_}-XXXXXX")"
+  CURRENT_TMPDIR="$tmpdir"
   local archive_path="$tmpdir/dependency.zip"
+  local extract_dir="$tmpdir/extracted"
 
   echo "Downloading ${name}@${version}..."
   curl -fsSL "$url" -o "$archive_path"
@@ -34,8 +47,10 @@ download_dependency() {
     exit 1
   fi
 
-  unzip -q "$archive_path" -d "$target_dir"
+  unzip -q "$archive_path" -d "$extract_dir"
+  mv "$extract_dir" "$target_dir"
   rm -rf "$tmpdir"
+  CURRENT_TMPDIR=""
 }
 
 download_dependency \

@@ -38,15 +38,15 @@ import {
   sql,
   userInteractions,
   users,
-} from '@babylon/db';
+} from '@feed/db';
 import {
   GROUP_CONFIG,
   generateSnowflakeId,
   jaccardSimilarity,
   logger,
-} from '@babylon/shared';
+} from '@feed/shared';
 import { NPC_GROUP_DYNAMICS_CONFIG } from '../config/npc-activity';
-import { BabylonLLMClient } from '../llm/openai-client';
+import { FeedLLMClient } from '../llm/openai-client';
 import { generateWorldContext, validateNoRealNames } from '../prompts';
 import {
   pickRandom,
@@ -85,12 +85,14 @@ export function normalizeNpcGroupMessageResponse(
       return null;
     }
 
-    const xmlMatch = trimmed.match(/<message>([\s\S]*?)<\/message>/i);
+    const xmlMatch = trimmed.match(
+      /^<response>\s*<message>([\s\S]*?)<\/message>\s*<\/response>$/i
+    );
     if (xmlMatch?.[1]) {
       return { message: xmlMatch[1].trim() };
     }
 
-    return { message: trimmed };
+    return null;
   }
 
   if (
@@ -117,7 +119,7 @@ export function normalizeNpcGroupMessageResponse(
 }
 
 export class NPCGroupDynamicsService {
-  // User group participation limits - now use GROUP_CONFIG from @babylon/shared
+  // User group participation limits - now use GROUP_CONFIG from @feed/shared
 
   /**
    * Process all NPC group dynamics for one tick
@@ -148,7 +150,7 @@ export class NPCGroupDynamicsService {
 
     // Initialize LLM client for message generation
     // Priority: Groq > Claude > OpenAI
-    const llm = BabylonLLMClient.forGameTick();
+    const llm = FeedLLMClient.forGameTick();
 
     // 1. Form new groups
     const newGroups = await NPCGroupDynamicsService.formNewGroups(rng);
@@ -547,7 +549,7 @@ export class NPCGroupDynamicsService {
    * Optimized: Single query with LEFT JOIN to get tier data upfront instead of N+1.
    */
   private static async postGroupMessages(
-    llm: BabylonLLMClient,
+    llm: FeedLLMClient,
     rng: RngFunction
   ): Promise<number> {
     let messagesPosted = 0;
@@ -740,24 +742,24 @@ Return your response as XML:
           },
           {
             temperature: 0.9,
-            maxTokens: 100,
+            maxTokens: 512,
             promptType: 'npc_group_dynamic_message',
           }
         );
         response = normalizeNpcGroupMessageResponse(rawResponse);
       } catch (error) {
         logger.warn(
-          'LLM failed to generate group message, skipping',
+          'LLM failed to generate group message',
           {
             npcId: randomNpc.id,
             error: error instanceof Error ? error.message : String(error),
           },
           'NPCGroupDynamicsService'
         );
-        continue;
+        throw error;
       }
       if (!response?.message) {
-        continue;
+        throw new Error(`Missing generated group message for ${randomNpc.id}`);
       }
 
       // Process message: strip hashtags (never allowed) but keep emojis (allowed in private chats)
@@ -857,6 +859,7 @@ Return your response as XML:
           },
           'NPCGroupDynamicsService'
         );
+        throw error;
       }
 
       messagesPosted++;

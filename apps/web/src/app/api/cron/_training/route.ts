@@ -34,15 +34,15 @@
  *
  * @example
  * ```typescript
- * // Called by Vercel Cron
+ * // Called by the cron scheduler
  * await fetch('/api/cron/_training', {
  *   headers: { 'Authorization': `Bearer ${CRON_SECRET}` }
  * });
  * ```
  */
 
-import { withCronAuth, withErrorHandling } from '@babylon/api';
-import { logger } from '@babylon/shared';
+import { withCronAuth, withErrorHandling } from '@feed/api';
+import { logger } from '@feed/shared';
 import type { NextRequest } from 'next/server';
 import { NextResponse } from 'next/server';
 

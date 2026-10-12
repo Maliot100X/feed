@@ -108,14 +108,14 @@ import {
   storeEvaluationResult,
   successResponse,
   withErrorHandling,
-} from '@babylon/api';
-import { db } from '@babylon/db';
+} from '@feed/api';
+import { db } from '@feed/db';
 import {
   CreateReportSchema,
   GetReportsSchema,
   generateSnowflakeId,
   logger,
-} from '@babylon/shared';
+} from '@feed/shared';
 import type { NextRequest } from 'next/server';
 
 /**

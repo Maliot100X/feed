@@ -1,6 +1,6 @@
 # Tinker Runbook
 
-Use this when Babylon training runs on Tinker instead of a self-managed GPU box.
+Use this when Feed training runs on Tinker instead of a self-managed GPU box.
 
 ## Flow
 
@@ -85,14 +85,14 @@ The manifest records:
 Run the pinned dependency audit from `packages/training/python`:
 
 ```bash
-./.venv/bin/python scripts/audit_prod_dependencies.py \
+./.venv/bin/python scripts/analysis/audit_prod_dependencies.py \
   --output /tmp/rlvr-pip-audit.json
 ```
 
 Validate training and eval artifacts:
 
 ```bash
-./.venv/bin/python scripts/check_rlvr_pipeline_health.py \
+./.venv/bin/python scripts/releases/check_rlvr_pipeline_health.py \
   --report ./rlvr_output/rlvr_pipeline_report.json \
   --output ./rlvr_output/rlvr_pipeline_health.json
 ```
@@ -100,7 +100,7 @@ Validate training and eval artifacts:
 Promote a validated release:
 
 ```bash
-./.venv/bin/python scripts/manage_rlvr_release.py promote \
+./.venv/bin/python scripts/releases/manage_rlvr_release.py promote \
   --report ./rlvr_output/rlvr_pipeline_report.json \
   --release-root ./releases/rlvr \
   --label scam-defense
@@ -111,7 +111,7 @@ Promotion copies the adapter, score report, decision output, and pipeline report
 Rollback to the previous promoted release:
 
 ```bash
-./.venv/bin/python scripts/manage_rlvr_release.py rollback \
+./.venv/bin/python scripts/releases/manage_rlvr_release.py rollback \
   --release-root ./releases/rlvr
 ```
 

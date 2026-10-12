@@ -1,11 +1,12 @@
 import { describe, expect, it } from 'bun:test';
-import type { NarrativePost, NarrativeStory } from '@babylon/shared';
+import type { NarrativePost, NarrativeStory } from '@feed/shared';
 import {
   calculateConversationDepthScore,
   calculateForYouScore,
   calculateFreshnessScore,
   calculateVelocityScore,
   diversifyForYouStories,
+  ensureArticleSpacing,
   spreadNewMarkets,
 } from './scoring';
 
@@ -274,5 +275,47 @@ describe('for-you scoring helpers', () => {
     const diversified = diversifyForYouStories(stories);
     expect(diversified[0]?.storyKey).toBe('a1');
     expect(diversified[1]?.storyKey).toBe('b1');
+  });
+});
+
+describe('ensureArticleSpacing', () => {
+  const GAP = 40;
+  const build = (length: number, articleAt: number[]) =>
+    Array.from({ length }, (_, i) =>
+      makeStory(`s${i}`, articleAt.includes(i) ? { itemType: 'article' } : {})
+    );
+  const isArticle = (story: NarrativeStory) => story.itemType === 'article';
+
+  /** Longest run of consecutive non-articles before the last article. */
+  const maxRunBeforeLastArticle = (stories: NarrativeStory[]) => {
+    const lastArticle = stories.map(isArticle).lastIndexOf(true);
+    let run = 0;
+    let max = 0;
+    for (let i = 0; i <= lastArticle; i++) {
+      run = isArticle(stories[i]!) ? 0 : run + 1;
+      max = Math.max(max, run);
+    }
+    return max;
+  };
+
+  it('keeps the gap bound with articles originally at 40, 80 and 120', () => {
+    const out = ensureArticleSpacing(build(160, [40, 80, 120]));
+    expect(out).toHaveLength(160);
+    expect(new Set(out.map((s) => s.storyKey)).size).toBe(160);
+    expect(maxRunBeforeLastArticle(out)).toBeLessThanOrEqual(GAP - 1);
+  });
+
+  it('handles a long leading gap with several pulled articles', () => {
+    const out = ensureArticleSpacing(build(200, [150, 160, 170, 180]));
+    expect(maxRunBeforeLastArticle(out)).toBeLessThanOrEqual(GAP - 1);
+    const articleKeys = out.filter(isArticle).map((s) => s.storyKey);
+    expect(articleKeys).toEqual(['s150', 's160', 's170', 's180']);
+  });
+
+  it('preserves order when spacing is already satisfied', () => {
+    const input = build(30, [5, 20]);
+    expect(ensureArticleSpacing(input).map((s) => s.storyKey)).toEqual(
+      input.map((s) => s.storyKey)
+    );
   });
 });

@@ -4,7 +4,7 @@
  * Strongly typed response interfaces for all A2A protocol methods
  */
 
-import type { JsonValue } from '@babylon/shared';
+import type { JsonValue } from '@feed/shared';
 
 /**
  * Balance information response
@@ -159,8 +159,8 @@ export interface A2AChatParticipant {
 export interface A2AChatMessage {
   id: string;
   content: string;
-  authorId: string;
-  timestamp: string | number;
+  senderId: string;
+  createdAt?: string;
 }
 
 /**
@@ -237,14 +237,11 @@ export interface A2AUserWalletResponse {
  */
 export interface A2ATradeHistoryEntry {
   id: string;
-  marketId?: string;
-  ticker?: string;
-  type: 'prediction' | 'perp';
-  action: string;
-  amount: number;
-  price: number;
-  pnl?: number;
-  timestamp: string | number;
+  marketId: string;
+  side: 'YES' | 'NO';
+  shares: number;
+  avgPrice: number;
+  timestamp?: string;
 }
 
 /**
@@ -356,8 +353,7 @@ export interface A2AReferralStatsResponse {
  * Referral code response from a2a.getReferralCode
  */
 export interface A2AReferralCodeResponse {
-  code: string;
-  url: string;
+  referralCode: string | null;
 }
 
 /**

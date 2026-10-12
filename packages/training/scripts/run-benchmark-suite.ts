@@ -21,8 +21,8 @@
  *   --json              Output JSON only (no HTML)
  */
 
-import { initializeJsonMode } from '@babylon/db';
 import type { IAgentRuntime } from '@elizaos/core';
+import { initializeJsonMode } from '@feed/db';
 import { mkdirSync, unlinkSync } from 'fs';
 import * as path from 'path';
 import { parseArgs } from 'util';

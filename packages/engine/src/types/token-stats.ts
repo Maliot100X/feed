@@ -5,7 +5,12 @@
  * Used to measure costs, optimize prompts, and provide transparency on AI usage.
  */
 
-export type LLMProviderName = 'elizacloud' | 'groq' | 'claude' | 'openai';
+export type LLMProviderName =
+  | 'surplus'
+  | 'elizacloud'
+  | 'groq'
+  | 'claude'
+  | 'openai';
 
 /**
  * Token usage for a single LLM call

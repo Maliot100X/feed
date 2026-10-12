@@ -1,6 +1,6 @@
 'use client';
 
-import { logger } from '@babylon/shared';
+import { logger } from '@feed/shared';
 
 import { useEffect, useRef } from 'react';
 import type { OutcomeNotification } from '@/components/notifications/OutcomeNotificationPopup';
@@ -10,6 +10,7 @@ import {
   isMarketResolvedData,
   type MarketResolvedData,
 } from '@/types/notifications';
+import { apiFetch } from '@/utils/api-fetch';
 
 interface QueuedNotification {
   id: string;
@@ -22,50 +23,41 @@ interface NotificationsApiResponse {
 }
 
 /**
- * On mount (after authentication), fetches any undelivered `market_resolved`
- * notifications from the server and shows them via the outcome notification
- * provider. Marks them as read once delivered.
+ * After authentication, fetches undelivered `market_resolved` notifications
+ * and shows them via the outcome notification provider, then marks them read.
  *
- * Runs once per authenticated session — repeated mounts are no-ops via
- * `deliveredRef`. Transient failures (auth, network) reset the guard so the
- * next mount can retry. Successful delivery keeps the guard set permanently.
+ * Delivery is tracked per user ID (`deliveredForRef`): an account switch
+ * delivers for the new user, and a response for a previous user is dropped.
+ * Failures before display leave the user unmarked so a later render retries.
  */
 export function useQueuedOutcomes(): void {
   const { authenticated, user } = useAuth();
-  const { getAccessToken } = useAuth();
   const { showOutcome, showBatchOutcomes } = useOutcomeNotification();
-  const deliveredRef = useRef(false);
+  const deliveredForRef = useRef<string | null>(null);
+  const currentUserIdRef = useRef<string | null>(null);
+  const userId = authenticated ? (user?.id ?? null) : null;
+  currentUserIdRef.current = userId;
 
   useEffect(() => {
-    if (!authenticated || !user || deliveredRef.current) return;
+    if (!userId || deliveredForRef.current === userId) return;
 
-    // Guard immediately — before any async work — to handle Strict Mode double-invoke
-    deliveredRef.current = true;
+    // Guard immediately (Strict Mode double-invoke) for this user only.
+    deliveredForRef.current = userId;
 
     const deliver = async () => {
-      let accessToken: string | null = null;
-      try {
-        accessToken = await getAccessToken();
-      } catch {
-        // Transient auth failure — reset so the next mount can retry
-        deliveredRef.current = false;
-        return;
-      }
-      if (!accessToken) {
-        // Token not yet available — reset so the next mount can retry
-        deliveredRef.current = false;
-        return;
-      }
-
       let body: NotificationsApiResponse;
       try {
-        const res = await fetch(
-          '/api/notifications?type=market_resolved&unreadOnly=true&limit=20',
-          { headers: { Authorization: `Bearer ${accessToken}` } }
+        const res = await apiFetch(
+          '/api/notifications?type=market_resolved&unreadOnly=true&limit=20'
         );
         if (!res.ok) {
-          // Server error — reset so the next mount can retry
-          deliveredRef.current = false;
+          logger.warn(
+            'Failed to fetch queued outcome notifications',
+            { status: res.status },
+            'useQueuedOutcomes'
+          );
+          if (deliveredForRef.current === userId)
+            deliveredForRef.current = null;
           return;
         }
         body = (await res.json()) as NotificationsApiResponse;
@@ -75,10 +67,12 @@ export function useQueuedOutcomes(): void {
           { error: err },
           'useQueuedOutcomes'
         );
-        // Network failure — reset so the next mount can retry
-        deliveredRef.current = false;
+        if (deliveredForRef.current === userId) deliveredForRef.current = null;
         return;
       }
+
+      // The account changed while the request was in flight.
+      if (currentUserIdRef.current !== userId) return;
 
       const resolved = body.notifications.filter(
         (n): n is QueuedNotification & { data: MarketResolvedData } =>
@@ -102,25 +96,31 @@ export function useQueuedOutcomes(): void {
         showBatchOutcomes(outcomes);
       }
 
-      // Mark as read — fire-and-forget, failure is non-critical
-      void fetch('/api/notifications', {
-        method: 'PATCH',
-        headers: {
-          Authorization: `Bearer ${accessToken}`,
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({
-          notificationIds: resolved.map((n) => n.id),
-        }),
-      }).catch((err) => {
+      // Mark as read. A failure only means they may be shown again later.
+      try {
+        const res = await apiFetch('/api/notifications', {
+          method: 'PATCH',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            notificationIds: resolved.map((n) => n.id),
+          }),
+        });
+        if (!res.ok) {
+          logger.warn(
+            'Failed to mark outcome notifications as read',
+            { status: res.status },
+            'useQueuedOutcomes'
+          );
+        }
+      } catch (err) {
         logger.warn(
           'Failed to mark outcome notifications as read',
           { error: err },
           'useQueuedOutcomes'
         );
-      });
+      }
     };
 
     void deliver();
-  }, [authenticated, user, getAccessToken, showOutcome, showBatchOutcomes]);
+  }, [userId, showOutcome, showBatchOutcomes]);
 }

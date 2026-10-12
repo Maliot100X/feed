@@ -1,5 +1,5 @@
-import { actors as packActors } from '@babylon/pack-default';
-import type { ActorData, PackActor } from '@babylon/shared';
+import { actors as packActors } from '@feed/pack-default';
+import type { ActorData, PackActor } from '@feed/shared';
 
 function toLegacyActorData(packActor: PackActor): ActorData {
   const displayNameParts = packActor.name.trim().split(/\s+/);

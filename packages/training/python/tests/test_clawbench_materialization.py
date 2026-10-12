@@ -21,15 +21,9 @@ def load_script_module(module_name: str, script_path: Path):
     return module
 
 
-_first_script = (
-    Path(__file__).resolve().parent.parent / "scripts" / "materialize_clawbench_sources.py"
-)
-if not _first_script.exists():
-    pytest.skip("script not found: materialize_clawbench_sources.py", allow_module_level=True)
-
 clawbench_script = load_script_module(
     "materialize_clawbench_sources",
-    PYTHON_ROOT / "scripts" / "materialize_clawbench_sources.py",
+    PYTHON_ROOT / "scripts" / "data-prep" / "materialize_clawbench_sources.py",
 )
 
 

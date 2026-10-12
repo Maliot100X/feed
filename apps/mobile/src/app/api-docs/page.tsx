@@ -1,4 +1,4 @@
-import Link from 'next/link';
+import { WEB_ORIGIN } from '@/mobile/lib/web-origin';
 
 export default function MobileApiDocsPage() {
   return (
@@ -8,12 +8,13 @@ export default function MobileApiDocsPage() {
         Interactive API documentation is only available in the web app.
       </p>
       <div>
-        <Link
-          href="/api-docs"
+        {/* /api-docs in this static export is this page; link to the web app. */}
+        <a
+          href={`${WEB_ORIGIN}/api-docs`}
           className="inline-flex rounded-lg bg-primary px-4 py-2 font-medium text-primary-foreground"
         >
           Open Web Docs
-        </Link>
+        </a>
       </div>
     </main>
   );

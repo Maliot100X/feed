@@ -16,15 +16,18 @@ import {
   publicRateLimit,
   successResponse,
   withErrorHandling,
-} from '@babylon/api';
+} from '@feed/api';
 import {
   PredictionDbAdapter,
   PredictionMarketService,
   PredictionPricing,
-} from '@babylon/core/markets/prediction';
-import { FEE_CONFIG, WalletService } from '@babylon/engine';
-import { logger } from '@babylon/shared';
+} from '@feed/core/markets/prediction';
+import { FEE_CONFIG, WalletService } from '@feed/engine';
+import { logger } from '@feed/shared';
 import type { NextRequest } from 'next/server';
+import { GET as getBreakingNews } from '@/app/api/feed/widgets/breaking-news/route';
+import { GET as getPosts } from '@/app/api/posts/route';
+import { loadAnonymousJson } from '@/lib/http/in-process';
 import type {
   TickerNewsItem,
   TickerPerpItem,
@@ -68,41 +71,39 @@ export const GET = withErrorHandling(async (request: NextRequest) => {
 
   const result: TickerResponse = {};
 
-  const origin =
-    request.headers.get('x-forwarded-host') &&
-    request.headers.get('x-forwarded-proto')
-      ? `${request.headers.get('x-forwarded-proto')}://${request.headers.get('x-forwarded-host')}`
-      : process.env.NEXT_PUBLIC_BASE_URL ||
-        (process.env.VERCEL_URL ? `https://${process.env.VERCEL_URL}` : null) ||
-        new URL(request.url).origin;
+  const origin = new URL(request.url).origin;
 
   if (streams.has('news')) {
     try {
-      const breakingNewsUrl = `${origin}/api/feed/widgets/breaking-news?limit=${limit}`;
-      const res = await fetch(breakingNewsUrl, { cache: 'no-store' });
-      if (res.ok) {
-        const data = (await res.json()) as {
-          success?: boolean;
-          news?: Array<{
-            id: string;
-            title: string;
-            description?: string;
-            timestamp: string;
-          }>;
-        };
+      // Source routes are invoked in-process (anonymously) rather than via an
+      // HTTP loopback to a forwarded host.
+      const breakingNewsUrl = new URL(
+        `/api/feed/widgets/breaking-news?limit=${limit}`,
+        origin
+      );
+      const data = await loadAnonymousJson<{
+        news?: Array<{
+          id: string;
+          title: string;
+          description?: string;
+          timestamp: string;
+        }>;
+      }>(getBreakingNews, breakingNewsUrl);
+      if (data) {
         let news = data.news ?? [];
         if (news.length === 0) {
-          const postsUrl = `${origin}/api/posts?type=article&limit=${limit}`;
-          const postsRes = await fetch(postsUrl, { cache: 'no-store' });
-          if (postsRes.ok) {
-            const postsData = (await postsRes.json()) as {
-              posts?: Array<{
-                id: string;
-                articleTitle?: string;
-                content?: string;
-                timestamp?: string;
-              }>;
-            };
+          const postsData = await loadAnonymousJson<{
+            posts?: Array<{
+              id: string;
+              articleTitle?: string;
+              content?: string;
+              timestamp?: string;
+            }>;
+          }>(
+            getPosts,
+            new URL(`/api/posts?type=article&limit=${limit}`, origin)
+          );
+          if (postsData) {
             const posts = postsData.posts ?? [];
             news = posts.slice(0, limit).map((p) => {
               const ts = p.timestamp;
@@ -135,8 +136,6 @@ export const GET = withErrorHandling(async (request: NextRequest) => {
         logger.info(
           'Ticker news',
           {
-            origin,
-            breakingNewsStatus: res.status,
             breakingNewsCount: (data.news ?? []).length,
             usedPostsFallback: (data.news ?? []).length === 0,
             finalNewsCount: result.news?.length ?? 0,
@@ -147,7 +146,7 @@ export const GET = withErrorHandling(async (request: NextRequest) => {
         result.news = [];
         logger.warn(
           'Ticker breaking-news not ok',
-          { origin, status: res.status, url: breakingNewsUrl },
+          { url: breakingNewsUrl.toString() },
           'GET /api/ticker'
         );
       }

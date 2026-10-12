@@ -1,3 +1,4 @@
+import { getSurplusConfig } from '@feed/shared';
 /**
  * Team Chat Message API
  *
@@ -47,16 +48,16 @@
  */
 
 import { createGroq } from '@ai-sdk/groq';
-import { teamChatService } from '@babylon/agents';
+import { teamChatService } from '@feed/agents';
 import {
   authenticateUser,
   broadcastChatMessage,
   checkRateLimitAsync,
   RATE_LIMIT_CONFIGS,
   withErrorHandling,
-} from '@babylon/api';
-import { and, db, eq, generateSnowflakeId, messages, users } from '@babylon/db';
-import { logger, toISO } from '@babylon/shared';
+} from '@feed/api';
+import { and, db, eq, generateSnowflakeId, messages, users } from '@feed/db';
+import { logger, toISO } from '@feed/shared';
 import { generateText } from 'ai';
 import type { NextRequest } from 'next/server';
 import { NextResponse } from 'next/server';
@@ -76,7 +77,7 @@ async function generateAndUpdateChatTitle(
   userId: string
 ): Promise<string | null> {
   try {
-    if (!process.env.GROQ_API_KEY) {
+    if (!process.env.SURPLUS_API_KEY && !process.env.GROQ_API_KEY) {
       logger.warn(
         'GROQ_API_KEY not set, skipping title generation',
         { chatId },
@@ -86,8 +87,8 @@ async function generateAndUpdateChatTitle(
     }
 
     const groq = createGroq({
-      apiKey: process.env.GROQ_API_KEY,
-      baseURL: 'https://api.groq.com/openai/v1',
+      apiKey: getSurplusConfig()?.apiKey || process.env.GROQ_API_KEY,
+      baseURL: getSurplusConfig()?.baseURL || 'https://api.groq.com/openai/v1',
     });
 
     const prompt = `Create a brief chat title (2-5 words) that captures the topic of this message.
@@ -111,7 +112,7 @@ Title:`;
     let result: { text: string };
     try {
       result = await generateText({
-        model: groq('llama-3.1-8b-instant'),
+        model: groq(getSurplusConfig()?.model || 'llama-3.1-8b-instant'),
         prompt,
         temperature: 0.7,
         maxOutputTokens: 50,

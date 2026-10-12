@@ -1,10 +1,10 @@
 {
     "python.analysis.extraPaths": [
-        "./python/src",
-        "./python"
+        "./src",
+        "."
     ],
     "python.autoComplete.extraPaths": [
-        "./python/src",
-        "./python"
+        "./src",
+        "."
     ]
 }

@@ -29,21 +29,6 @@ export {
   runQuickMatchupBenchmark,
 } from './ArchetypeMatchupBenchmark';
 export type {
-  BabylonTrustBenchmarkResult,
-  BabylonTrustScenario,
-  TrustScenarioId,
-  TrustScenarioMetadata,
-} from './BabylonTrustBenchmark';
-export {
-  BabylonTrustBenchmark,
-  getTrustScenarioLoader,
-  isValidTrustScenarioId,
-  listTrustScenarios,
-  loadTrustScenario,
-  TrustScenarioLoader,
-  TrustScenarioValidationError,
-} from './BabylonTrustBenchmark';
-export type {
   BenchmarkHistoryEntry,
   ModelComparisonData,
 } from './BenchmarkChartGenerator';
@@ -73,6 +58,21 @@ export { BenchmarkRunner } from './BenchmarkRunner';
 export { BenchmarkValidator } from './BenchmarkValidator';
 export type { FastEvalConfig, FastEvalResult } from './FastEvalRunner';
 export { FastEvalRunner } from './FastEvalRunner';
+export type {
+  FeedTrustBenchmarkResult,
+  FeedTrustScenario,
+  TrustScenarioId,
+  TrustScenarioMetadata,
+} from './FeedTrustBenchmark';
+export {
+  FeedTrustBenchmark,
+  getTrustScenarioLoader,
+  isValidTrustScenarioId,
+  listTrustScenarios,
+  loadTrustScenario,
+  TrustScenarioLoader,
+  TrustScenarioValidationError,
+} from './FeedTrustBenchmark';
 export { MetricsValidator } from './MetricsValidator';
 export { MetricsVisualizer } from './MetricsVisualizer';
 export type {

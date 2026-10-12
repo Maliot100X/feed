@@ -75,6 +75,8 @@ export interface LLMCallTrace {
   systemPrompt: string;
   userPrompt: string;
   rawResponse: string;
+  /** Exact request messages, including continuation assistant/user turns. */
+  messages?: Array<{ role: string; content: string }>;
   parsedResponse: unknown;
   inputTokens: number;
   outputTokens: number;
@@ -150,6 +152,8 @@ export interface LLMCallInput {
   systemPrompt: string;
   userPrompt: string;
   rawResponse: string;
+  /** Exact request messages, including continuation assistant/user turns. */
+  messages?: Array<{ role: string; content: string }>;
   parsedResponse: unknown;
   inputTokens: number;
   outputTokens: number;

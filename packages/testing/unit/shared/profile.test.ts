@@ -9,7 +9,7 @@ import {
   getProfileUrl,
   getUserProfileUrl,
   isUsername,
-} from '@babylon/shared/utils/profile';
+} from '@feed/shared/utils/profile';
 
 describe('Profile URL Utilities', () => {
   describe('getProfileUrl', () => {
@@ -85,10 +85,17 @@ describe('Profile URL Utilities', () => {
       expect(isUsername('did:ethr:0x123')).toBe(false);
     });
 
-    it('should return false for identifiers containing privy', () => {
-      expect(isUsername('privy-user-123')).toBe(false);
-      expect(isUsername('some-privy-id')).toBe(false);
-      expect(isUsername('PRIVY_USER')).toBe(false);
+    it('does not infer IDs from a privy substring in a valid username', () => {
+      expect(isUsername('privy_fan')).toBe(true);
+      expect(isUsername('PRIVY_USER')).toBe(true);
+    });
+
+    it('should return false for snowflake IDs', () => {
+      expect(isUsername('263849173829304320')).toBe(false);
+    });
+
+    it('treats short numeric handles as usernames', () => {
+      expect(isUsername('12345')).toBe(true);
     });
 
     it('should return false for UUID identifiers', () => {
@@ -96,12 +103,12 @@ describe('Profile URL Utilities', () => {
       expect(isUsername('123e4567-e89b-12d3-a456-426614174000')).toBe(false);
     });
 
-    it('should return false for identifiers with dashes (non-UUID)', () => {
-      expect(isUsername('some-user-id')).toBe(false);
+    it('treats hyphenated handles as usernames (hyphens are valid)', () => {
+      expect(isUsername('my-handle')).toBe(true);
     });
 
     it('should return true for long usernames without dashes', () => {
-      // Usernames can be up to 42 characters
+      // Legacy handles can be up to 42 characters (wallet addresses)
       const longUsername = 'a'.repeat(42);
       expect(isUsername(longUsername)).toBe(true);
     });

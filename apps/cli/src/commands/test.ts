@@ -6,9 +6,10 @@
  * Commands:
  *   load     - Run load tests against the server
  *   a2a      - Run A2A protocol stress tests
- *   scambench-seed - Seed a ScamBench scenario into Babylon chats
+ *   scambench-seed - Seed a ScamBench scenario into Feed chats
  */
 
+import { existsSync } from 'node:fs';
 import { readFile } from 'node:fs/promises';
 import { resolve } from 'node:path';
 import { getOption, parseArgs, wantsHelp } from '../lib/args.js';
@@ -19,12 +20,12 @@ function printHelp(): void {
 Test Commands
 
 USAGE:
-  babylon test <command> [options]
+  feed test <command> [options]
 
 COMMANDS:
   load      Run load tests against the server
   a2a       Run A2A protocol stress tests
-  scambench-seed  Seed a ScamBench scenario into Babylon chats
+  scambench-seed  Seed a ScamBench scenario into Feed chats
 
 OPTIONS (load):
   --scenario=NAME   Test scenario: light, normal, heavy, stress (default: normal)
@@ -36,15 +37,15 @@ OPTIONS (a2a):
 
 OPTIONS (scambench-seed):
   --scenario-id=ID  Scenario id from the ScamBench catalog
-  --user-id=ID      Target Babylon user id
+  --user-id=ID      Target Feed user id
   --catalog=PATH    Scenario catalog JSON (default: ../scambench/generated/scenario-catalog.json)
   --target-chats=N  Ensure user is seeded into at least N NPC group chats first (default: 3)
 
 EXAMPLES:
-  babylon test load                       Normal load test
-  babylon test load --scenario=heavy      Heavy load test
-  babylon test a2a --scenario=rate-limit  Test rate limiting
-  babylon test scambench-seed --scenario-id=group-to-dm-asymmetric-info --user-id=123
+  feed test load                       Normal load test
+  feed test load --scenario=heavy      Heavy load test
+  feed test a2a --scenario=rate-limit  Test rate limiting
+  feed test scambench-seed --scenario-id=group-to-dm-asymmetric-info --user-id=123
 `);
 }
 
@@ -68,8 +69,7 @@ function resolveDefaultCatalogPath(): string {
   ];
 
   return (
-    candidates.find((candidate) => Bun.file(candidate).exists()) ??
-    candidates[0]!
+    candidates.find((candidate) => existsSync(candidate)) ?? candidates[0]!
   );
 }
 
@@ -103,7 +103,7 @@ async function runScamBenchSeed(
     process.exit(1);
   }
 
-  const { seedScamBenchScenario } = await import('@babylon/engine');
+  const { seedScamBenchScenario } = await import('@feed/engine');
   const scenarioPayload = {
     id: scenario.id,
     name: scenario.name,
@@ -148,14 +148,12 @@ async function runLoadTest(args: ReturnType<typeof parseArgs>): Promise<void> {
     process.exit(1);
   }
 
-  logger.header('Babylon Load Test');
+  logger.header('Feed Load Test');
   console.log(`Scenario: ${scenario}`);
   console.log(`Base URL: ${baseUrl}\n`);
 
   // Import dynamically to avoid loading testing infrastructure if not needed
-  const { LoadTestSimulator, TEST_SCENARIOS } = await import(
-    '@babylon/testing'
-  );
+  const { LoadTestSimulator, TEST_SCENARIOS } = await import('@feed/testing');
 
   const scenarioKey = scenario.toUpperCase() as keyof typeof TEST_SCENARIOS;
   const config = TEST_SCENARIOS[scenarioKey];
@@ -250,7 +248,7 @@ async function runA2AStressTest(
 
   // Import dynamically
   const { LoadTestSimulator, A2A_TEST_SCENARIOS } = await import(
-    '@babylon/testing'
+    '@feed/testing'
   );
 
   const scenarioKey = scenario
@@ -266,7 +264,7 @@ async function runA2AStressTest(
   const response = await fetch(`${baseUrl}/api/a2a`);
   const data = await response.json();
 
-  if (data.service !== 'Babylon A2A Protocol') {
+  if (data.service !== 'Feed A2A Protocol') {
     logger.fail('A2A endpoint not responding correctly');
     process.exit(1);
   }

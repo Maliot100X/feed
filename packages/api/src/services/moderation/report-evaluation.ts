@@ -8,47 +8,37 @@
  */
 
 import {
+  and,
   count,
   db,
   desc,
   eq,
+  gte,
+  isNull,
   messages,
   posts,
   reports,
   users,
-} from '@babylon/db';
-import { logger } from '@babylon/shared';
+} from '@feed/db';
+import { logger } from '@feed/shared';
+import { z } from 'zod';
 import { callClaudeDirect } from '../claude-service';
+import { createNotification } from '../notification-service';
 
-/**
- * NotificationService interface for dependency injection
- *
- * @description Service interface injected from the web application layer
- * to avoid circular dependencies between packages.
- */
-type NotificationService = {
-  createNotification: (params: {
-    userId: string;
-    type: string;
-    title: string;
-    message: string;
-  }) => Promise<void>;
-};
+/** Window for the "recent" activity shown to the evaluator. */
+const RECENT_WINDOW_DAYS = 30;
 
-let notificationServiceInstance: NotificationService | null = null;
-
-export function setNotificationService(service: NotificationService): void {
-  notificationServiceInstance = service;
-}
-
-function getNotificationService(): NotificationService {
-  if (!notificationServiceInstance) {
-    throw new Error(
-      'NotificationService not initialized. Call setNotificationService() first.'
-    );
-  }
-  return notificationServiceInstance;
-}
+const AiEvaluationSchema = z.object({
+  outcome: z.enum([
+    'valid_report',
+    'invalid_report',
+    'abusive_reporter',
+    'insufficient_evidence',
+  ]),
+  confidence: z.number().min(0).max(1),
+  reasoning: z.string(),
+  recommendedActions: z.array(z.string()),
+});
 
 export type ReportEvaluationOutcome =
   | 'valid_report' // Reporter has valid reason, reported user is abusive
@@ -107,6 +97,7 @@ interface ReportContext {
   }>;
   posts: Array<{
     id: string;
+    authorId: string;
     content: string;
     createdAt: Date;
   }>;
@@ -162,8 +153,7 @@ export async function evaluateReport(
     .limit(1);
 
   if (report) {
-    const notificationService = getNotificationService();
-    await notificationService.createNotification({
+    await createNotification({
       userId: report.reporterId,
       type: 'system',
       title: 'Report Evaluation Complete',
@@ -251,49 +241,57 @@ async function collectReportContext(
     .orderBy(desc(messages.createdAt))
     .limit(50);
 
-  // Get recent posts from both users (last 30 days)
-  const reporterPosts = await db
-    .select({
-      id: posts.id,
-      content: posts.content,
-      createdAt: posts.createdAt,
-    })
-    .from(posts)
-    .where(eq(posts.authorId, reporterId))
-    .orderBy(desc(posts.createdAt))
-    .limit(20);
+  const since = new Date(Date.now() - RECENT_WINDOW_DAYS * 24 * 60 * 60 * 1000);
 
-  const reportedPosts = await db
-    .select({
-      id: posts.id,
-      content: posts.content,
-      createdAt: posts.createdAt,
-    })
-    .from(posts)
-    .where(eq(posts.authorId, reportedId))
-    .orderBy(desc(posts.createdAt))
-    .limit(20);
+  // Recent, non-deleted posts from both users
+  const recentPostsBy = (authorId: string) =>
+    db
+      .select({
+        id: posts.id,
+        authorId: posts.authorId,
+        content: posts.content,
+        createdAt: posts.createdAt,
+      })
+      .from(posts)
+      .where(
+        and(
+          eq(posts.authorId, authorId),
+          isNull(posts.deletedAt),
+          gte(posts.createdAt, since)
+        )
+      )
+      .orderBy(desc(posts.createdAt))
+      .limit(20);
+  const reporterPosts = await recentPostsBy(reporterId);
+  const reportedPosts = await recentPostsBy(reportedId);
 
-  // Get report counts
-  const [reporterReportsSentResult] = await db
-    .select({ count: count() })
-    .from(reports)
-    .where(eq(reports.reporterId, reporterId));
-
-  const [reporterReportsReceivedResult] = await db
-    .select({ count: count() })
-    .from(reports)
-    .where(eq(reports.reportedUserId, reporterId));
-
-  const [reportedReportsSentResult] = await db
-    .select({ count: count() })
-    .from(reports)
-    .where(eq(reports.reporterId, reportedId));
-
-  const [reportedReportsReceivedResult] = await db
-    .select({ count: count() })
-    .from(reports)
-    .where(eq(reports.reportedUserId, reportedId));
+  // Recent report counts
+  const countReports = async (
+    column: typeof reports.reporterId | typeof reports.reportedUserId,
+    userId: string
+  ) => {
+    const [row] = await db
+      .select({ count: count() })
+      .from(reports)
+      .where(and(eq(column, userId), gte(reports.createdAt, since)));
+    return row;
+  };
+  const reporterReportsSentResult = await countReports(
+    reports.reporterId,
+    reporterId
+  );
+  const reporterReportsReceivedResult = await countReports(
+    reports.reportedUserId,
+    reporterId
+  );
+  const reportedReportsSentResult = await countReports(
+    reports.reporterId,
+    reportedId
+  );
+  const reportedReportsReceivedResult = await countReports(
+    reports.reportedUserId,
+    reportedId
+  );
 
   return {
     reporter: {
@@ -388,9 +386,8 @@ RECENT POSTS (${context.posts.length} posts):
 ${context.posts
   .slice(0, 10)
   .map((post) => {
-    const author = post.id.startsWith(context.reporter.id)
-      ? 'REPORTER'
-      : 'REPORTED';
+    const author =
+      post.authorId === context.reporter.id ? 'REPORTER' : 'REPORTED';
     return `[${author}] ${post.content.substring(0, 200)}`;
   })
   .join('\n')}
@@ -437,29 +434,36 @@ Respond with a JSON object:
     throw new Error('No JSON found in AI response');
   }
 
-  const evaluation = JSON.parse(jsonMatch[0]) as ReportEvaluationResult;
-
-  // Validate outcome
-  if (
-    ![
-      'valid_report',
-      'invalid_report',
-      'abusive_reporter',
-      'insufficient_evidence',
-    ].includes(evaluation.outcome)
-  ) {
-    evaluation.outcome = 'insufficient_evidence';
-  }
-
-  // Add evidence summary
-  evaluation.evidenceSummary = {
+  const evidenceSummary = {
     chatMessages: context.chatMessages.length,
     posts: context.posts.length,
     reportsReceived: context.reported.recentReportsReceived,
     reportsSent: context.reporter.recentReportsSent,
   };
 
-  return evaluation;
+  let parsedJson: unknown;
+  try {
+    parsedJson = JSON.parse(jsonMatch[0]);
+  } catch {
+    parsedJson = undefined;
+  }
+  const parsed = AiEvaluationSchema.safeParse(parsedJson);
+  if (!parsed.success) {
+    logger.warn(
+      'AI report evaluation returned an invalid response',
+      { reportId: context.report.id },
+      'ReportEvaluation'
+    );
+    return {
+      outcome: 'insufficient_evidence',
+      confidence: 0,
+      reasoning: 'Automated evaluation returned an invalid response',
+      recommendedActions: [],
+      evidenceSummary,
+    };
+  }
+
+  return { ...parsed.data, evidenceSummary };
 }
 
 /**

@@ -68,15 +68,15 @@
  * ```
  */
 
+import { getSharedX402Manager } from '@feed/a2a';
 import {
   authenticate,
   TradingBalanceFundingService,
   withErrorHandling,
-} from '@babylon/api';
-import { logger } from '@babylon/shared';
+} from '@feed/api';
+import { logger } from '@feed/shared';
 import type { NextRequest } from 'next/server';
 import { NextResponse } from 'next/server';
-import { getPointsPurchaseX402Manager } from '@/lib/points-purchase-x402';
 import { trackServerEvent } from '@/lib/posthog/server';
 
 interface VerifyPaymentBody {
@@ -94,7 +94,17 @@ export const POST = withErrorHandling(async function POST(req: NextRequest) {
   const body: VerifyPaymentBody = await req.json();
   const { requestId, txHash, fromAddress, toAddress, amount } = body;
 
-  const x402Manager = await getPointsPurchaseX402Manager();
+  const x402Manager = await getSharedX402Manager();
+
+  // Only the user who created the payment request may redeem it.
+  const pendingRequest = await x402Manager.getPaymentRequest(requestId);
+  if (!pendingRequest || pendingRequest.metadata?.userId !== userId) {
+    return NextResponse.json(
+      { success: false, error: 'Payment request not found' },
+      { status: 404 }
+    );
+  }
+
   const verificationResult = await x402Manager.verifyPayment({
     requestId,
     txHash,

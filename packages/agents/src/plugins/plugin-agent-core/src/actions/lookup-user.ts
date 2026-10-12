@@ -4,7 +4,6 @@
  * Look up a user by username or display name to get their ID for other actions.
  */
 
-import { db, ilike, or, users } from '@babylon/db';
 import type {
   Action,
   ActionResult,
@@ -13,6 +12,7 @@ import type {
   Memory,
   State,
 } from '@elizaos/core';
+import { db, ilike, or, users } from '@feed/db';
 import { logger } from '../../../../shared/logger';
 
 export const lookupUserAction: Action = {

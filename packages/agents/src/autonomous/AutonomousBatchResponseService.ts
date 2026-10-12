@@ -12,10 +12,10 @@
  * 4. Executes responses for approved interactions
  */
 
-import { countTokensSync, truncateToTokenLimitSync } from '@babylon/api';
-import type { UserAgentConfig } from '@babylon/db';
 import type { IAgentRuntime } from '@elizaos/core';
 import { parseKeyValueXml } from '@elizaos/core';
+import { countTokensSync } from '@feed/api';
+import type { UserAgentConfig } from '@feed/db';
 import { callGroqDirect } from '../llm/direct-groq';
 import { agentService } from '../services/AgentService';
 import { getAgentConfig } from '../shared/agent-config';
@@ -230,7 +230,8 @@ ${chatLines.join('\n\n')}`);
     _runtime: IAgentRuntime,
     interactions: PendingInteraction[],
     agentContext: AgentContext,
-    agentConfig: UserAgentConfig | null
+    agentConfig: UserAgentConfig | null,
+    planningContext?: string
   ): Promise<ResponseDecision[]> {
     if (interactions.length === 0) {
       return [];
@@ -242,9 +243,9 @@ ${chatLines.join('\n\n')}`);
 
     // Build evaluation prompt - ask for IDs instead of positional true/false
     // This is more robust as it doesn't rely on counting/ordering
-    const prompt = `${config?.systemPrompt ?? 'You are an AI agent on Babylon.'}
+    const prompt = `${config?.systemPrompt ?? 'You are an AI agent on Feed.'}
 
-You are ${agentDisplayName}, an AI agent on Babylon. You need to decide which interactions warrant a response.
+You are ${agentDisplayName}, an AI agent on Feed. You need to decide which interactions warrant a response.
 
 CRITICAL: Be VERY selective. Silence is often the best response.
 
@@ -286,23 +287,11 @@ Do NOT include any explanations, only the XML format above.`;
 
     // Ensure prompt fits within 32K context limit (W&B trained models)
     const estimatedTokens = countTokensSync(prompt);
-    let finalPrompt = prompt;
+    const finalPrompt = prompt;
 
     if (estimatedTokens > 30000) {
-      // 30K with 2K safety margin
-      logger.warn(
-        `Evaluation prompt too long: ${estimatedTokens} tokens, truncating`,
-        undefined,
-        'AutonomousBatchResponse'
-      );
-      const truncated = truncateToTokenLimitSync(prompt, 30000, {
-        ellipsis: true,
-      });
-      finalPrompt = truncated.text;
-      logger.info(
-        `Truncated to ${truncated.tokens} tokens`,
-        undefined,
-        'AutonomousBatchResponse'
+      throw new Error(
+        `AutonomousBatchResponseService required context exceeds token budget: ${estimatedTokens}`
       );
     }
 
@@ -318,23 +307,19 @@ Do NOT include any explanations, only the XML format above.`;
           : finalPrompt;
 
         // Add timeout to prevent hanging (30 seconds max for larger model)
-        const decisionText = await Promise.race([
-          callGroqDirect({
-            prompt: currentPrompt,
-            system: config?.systemPrompt ?? undefined,
-            modelSize: 'large', // Large model: Better at structured outputs
-            runtime: _runtime, // Pass runtime to access W&B trained models AND trajectory context
-            temperature: isRetry ? 0.5 : 0.6,
-            maxTokens: 16384,
-            actionType: 'evaluate_interactions',
-            purpose: 'evaluation', // RLAIF: This is an evaluation/reasoning call
-          }),
-          new Promise<string>((_, reject) => {
-            setTimeout(() => {
-              reject(new Error('Timeout'));
-            }, 30000); // 30 second timeout
-          }),
-        ]);
+        const decisionText = await callGroqDirect({
+          prompt: currentPrompt,
+          system:
+            [config?.systemPrompt, planningContext]
+              .filter(Boolean)
+              .join('\n\n') || undefined,
+          modelSize: 'large', // Large model: Better at structured outputs
+          runtime: _runtime, // Pass runtime to access W&B trained models AND trajectory context
+          temperature: isRetry ? 0.5 : 0.6,
+          maxTokens: 16384,
+          actionType: 'evaluate_interactions',
+          purpose: 'evaluation', // RLAIF: This is an evaluation/reasoning call
+        });
 
         // Extract <response>...</response> block before parsing
         const responseMatch = decisionText.match(
@@ -391,11 +376,7 @@ Do NOT include any explanations, only the XML format above.`;
             if (validIds.has(id)) {
               parsedIds.add(id);
             } else {
-              logger.warn(
-                `LLM returned unknown interaction ID: ${id}`,
-                undefined,
-                'AutonomousBatchResponse'
-              );
+              throw new Error(`LLM returned unknown interaction ID: ${id}`);
             }
           }
 
@@ -409,31 +390,20 @@ Do NOT include any explanations, only the XML format above.`;
         );
         break;
       } catch (error) {
-        const errorMsg = error instanceof Error ? error.message : String(error);
-        if (errorMsg === 'Timeout') {
-          logger.warn(
-            `Interaction evaluation timeout (attempt ${attempt}/${MAX_ATTEMPTS})`,
-            { agentUserId },
-            'AutonomousBatchResponse'
-          );
-        } else {
-          logger.warn(
-            `Interaction evaluation attempt ${attempt} failed`,
-            { agentUserId, error: errorMsg },
-            'AutonomousBatchResponse'
-          );
-        }
+        throw error;
       }
     }
 
     // If all attempts failed, return all false (don't respond to anything)
     if (!respondToIds) {
       logger.error(
-        `Failed to evaluate interactions after ${MAX_ATTEMPTS} attempts, defaulting to no responses`,
+        `Failed to evaluate interactions after ${MAX_ATTEMPTS} attempts, aborting response batch`,
         { agentUserId },
         'AutonomousBatchResponse'
       );
-      respondToIds = new Set();
+      throw new Error(
+        `Failed to evaluate interactions after ${MAX_ATTEMPTS} attempts`
+      );
     }
 
     // Convert to ResponseDecision array (maintaining order of original interactions)
@@ -451,7 +421,8 @@ Do NOT include any explanations, only the XML format above.`;
     interactions: PendingInteraction[],
     decisions: ResponseDecision[],
     agentContext: AgentContext,
-    agentConfig: UserAgentConfig | null
+    agentConfig: UserAgentConfig | null,
+    planningContext?: string
   ): Promise<number> {
     // Use pre-fetched agent context and config (passed from processBatch)
     const agentDisplayName = agentContext.displayName;
@@ -466,13 +437,13 @@ Do NOT include any explanations, only the XML format above.`;
       if (!interaction || !decision || !decision.shouldRespond) continue;
 
       // Generate response with retry loop
-      const responsePrompt = `${respConfig?.systemPrompt ?? 'You are an AI agent on Babylon.'}
+      const responsePrompt = `${respConfig?.systemPrompt ?? 'You are an AI agent on Feed.'}
 
 You are ${agentDisplayName}, responding to an interaction.
 
 ${interaction.context}
 
-Task: Write a response (1-2 sentences, under 200 characters) OR leave empty to skip.
+Task: Write a response (1-2 sentences, under 200 characters) OR explicitly choose action skip.
 
 CRITICAL QUESTION: Does this add a NEW perspective, or just more of the same?
 
@@ -490,7 +461,7 @@ DO NOT WRITE:
 - Generic advice without specifics
 - Questions just to keep conversation going
 
-LEAVE EMPTY IF:
+CHOOSE SKIP IF:
 - You would just be agreeing or adding more evidence to same point
 - The thread has reached consensus - let it conclude
 - Conversation is going in circles
@@ -501,22 +472,23 @@ LEAVE EMPTY IF:
 # Required Output Format
 <response>
 <thought>Brief reasoning for your response</thought>
-<text>your response here (or leave empty to skip)</text>
+<action>respond or skip</action>
+<text>your response here (empty only when action is skip)</text>
 </response>`;
 
       // Truncate if needed (unlikely for individual responses but safe)
       const respTokens = countTokensSync(responsePrompt);
-      let finalRespPrompt = responsePrompt;
+      const finalRespPrompt = responsePrompt;
       if (respTokens > 30000) {
-        const truncated = truncateToTokenLimitSync(responsePrompt, 30000, {
-          ellipsis: true,
-        });
-        finalRespPrompt = truncated.text;
+        throw new Error(
+          `AutonomousBatchResponseService required context exceeds token budget: ${respTokens}`
+        );
       }
 
       // Use large model for response generation with retry
       const RESPONSE_MAX_ATTEMPTS = 3;
       let cleanContent: string | null = null;
+      let skipped = false;
 
       for (let attempt = 1; attempt <= RESPONSE_MAX_ATTEMPTS; attempt++) {
         try {
@@ -525,23 +497,19 @@ LEAVE EMPTY IF:
             ? `${finalRespPrompt}\n\nREMINDER: You MUST output valid XML. Start with <response> and include <thought> and <text> tags.`
             : finalRespPrompt;
 
-          const responseContent = await Promise.race([
-            callGroqDirect({
-              prompt: currentPrompt,
-              system: respConfig?.systemPrompt ?? undefined,
-              modelSize: 'large', // Large model: Higher quality responses
-              runtime: _runtime, // Pass runtime to access W&B trained models AND trajectory context
-              temperature: isRetry ? 0.6 : 0.8,
-              maxTokens: 16384,
-              actionType: 'execute_response',
-              purpose: 'response', // RLAIF: This is a response generation call
-            }),
-            new Promise<string>((_, reject) => {
-              setTimeout(() => {
-                reject(new Error('Timeout'));
-              }, 20000); // 20 second timeout
-            }),
-          ]);
+          const responseContent = await callGroqDirect({
+            prompt: currentPrompt,
+            system:
+              [respConfig?.systemPrompt, planningContext]
+                .filter(Boolean)
+                .join('\n\n') || undefined,
+            modelSize: 'large', // Large model: Higher quality responses
+            runtime: _runtime, // Pass runtime to access W&B trained models AND trajectory context
+            temperature: isRetry ? 0.6 : 0.8,
+            maxTokens: 16384,
+            actionType: 'execute_response',
+            purpose: 'response', // RLAIF: This is a response generation call
+          });
 
           // Extract <response>...</response> block
           const responseMatch = responseContent.match(
@@ -562,116 +530,56 @@ LEAVE EMPTY IF:
 
           // Parse the extracted XML response
           const parsed = parseKeyValueXml(responseMatch[0]) as {
+            action?: string;
             text?: string;
             thought?: string;
           } | null;
 
-          if (!parsed?.text || parsed.text.trim().length === 0) {
-            logger.warn(
-              'Failed to parse XML response in response generation',
-              {
-                interactionId: interaction.id,
-                attempt,
-                raw: responseContent.substring(0, 300),
-              },
-              'AutonomousBatchResponse'
-            );
+          if (parsed?.action === 'skip') {
+            skipped = true;
+            await agentService.createLog(agentUserId, {
+              type: 'system',
+              level: 'debug',
+              message: `Skipped automated response to ${interaction.type}`,
+              prompt: currentPrompt,
+              completion: responseContent,
+              thinking: parsed.thought,
+              metadata: { interactionId: interaction.id, skipped: true },
+            });
+            break;
+          }
+          if (
+            parsed?.action !== 'respond' ||
+            !parsed.text ||
+            parsed.text.trim().length < 5
+          ) {
             continue;
           }
-
-          // Success!
           cleanContent = parsed.text.trim().replace(/^["']|["']$/g, '');
-          const thought = parsed.thought?.trim();
-
-          // Check if LLM decided to skip (empty response)
-          if (!cleanContent || cleanContent.length === 0) {
-            logger.info(
-              `LLM chose to skip interaction ${interaction.id} (empty response)`,
-              { thought },
-              'AutonomousBatchResponse'
-            );
-
-            // Log skipped interaction if there was reasoning
-            if (thought) {
-              agentService
-                .createLog(agentUserId, {
-                  type: 'system',
-                  level: 'debug',
-                  message: `Skipped automated response to ${interaction.type}`,
-                  prompt: currentPrompt,
-                  completion: responseContent,
-                  thinking: thought,
-                  metadata: {
-                    interactionId: interaction.id,
-                    interactionType: interaction.type,
-                    skipped: true,
-                  },
-                })
-                .catch((err) => {
-                  logger.warn(
-                    'Failed to create log for skipped response',
-                    { error: err, interactionId: interaction.id },
-                    'AutonomousBatchResponse'
-                  );
-                });
-            }
-
-            cleanContent = null; // Mark as skipped
-          }
-
-          // Log the response generation context including reasoning
-          if (cleanContent) {
-            // We use setTimeout to not block the main loop, but here we want to ensure it's logged
-            // No await needed if we don't care about the result
-            agentService
-              .createLog(agentUserId, {
-                type: interaction.type === 'comment_reply' ? 'comment' : 'chat',
-                level: 'info',
-                message: `Generated automated response to ${interaction.type}`,
-                prompt: currentPrompt,
-                completion: responseContent,
-                thinking: thought,
-                metadata: {
-                  interactionId: interaction.id,
-                  interactionType: interaction.type,
-                  content: cleanContent,
-                },
-              })
-              .catch((err) => {
-                logger.error(
-                  'Failed to create log for automated response',
-                  { error: err },
-                  'AutonomousBatchResponse'
-                );
-              });
-          }
+          await agentService.createLog(agentUserId, {
+            type: interaction.type === 'comment_reply' ? 'comment' : 'chat',
+            level: 'info',
+            message: `Generated automated response to ${interaction.type}`,
+            prompt: currentPrompt,
+            completion: responseContent,
+            thinking: parsed.thought,
+            metadata: {
+              interactionId: interaction.id,
+              interactionType: interaction.type,
+              content: cleanContent,
+            },
+          });
           break;
         } catch (error) {
-          const errorMsg =
-            error instanceof Error ? error.message : String(error);
-          if (errorMsg === 'Timeout') {
-            logger.warn(
-              `Response generation timeout (attempt ${attempt}/${RESPONSE_MAX_ATTEMPTS})`,
-              { interactionId: interaction.id },
-              'AutonomousBatchResponse'
-            );
-          } else {
-            logger.warn(
-              `Response generation attempt ${attempt} failed`,
-              { interactionId: interaction.id, error: errorMsg },
-              'AutonomousBatchResponse'
-            );
-          }
+          throw error;
         }
       }
 
+      if (skipped) continue;
       if (!cleanContent || cleanContent.length < 5) {
-        logger.warn(
-          `Failed to generate valid response for interaction ${interaction.id}`,
-          undefined,
-          'AutonomousBatchResponse'
+        throw new Error(
+          `Failed to generate valid response for interaction ${interaction.id}`
         );
-        continue;
       }
 
       // Post the response based on type
@@ -696,10 +604,8 @@ LEAVE EMPTY IF:
             'AutonomousBatchResponse'
           );
         } else {
-          logger.warn(
-            `Failed to create comment reply: ${commentResult.error}`,
-            { interactionId: interaction.id },
-            'AutonomousBatchResponse'
+          throw new Error(
+            `Failed to create comment reply: ${commentResult.error}`
           );
         }
       } else if (interaction.type === 'chat_message' && interaction.chatId) {
@@ -718,14 +624,11 @@ LEAVE EMPTY IF:
             'AutonomousBatchResponse'
           );
         } else {
-          logger.warn(
-            `Failed to create chat message: ${messageResult.error}`,
-            { interactionId: interaction.id },
-            'AutonomousBatchResponse'
+          throw new Error(
+            `Failed to create chat message: ${messageResult.error}`
           );
         }
       }
-
       // Small delay to avoid spam
       await new Promise((resolve) => setTimeout(resolve, 1000));
     }
@@ -738,7 +641,8 @@ LEAVE EMPTY IF:
   // ===========================================================================
   async processBatch(
     agentUserId: string,
-    _runtime: IAgentRuntime
+    _runtime: IAgentRuntime,
+    planningContext?: string
   ): Promise<number> {
     logger.info(
       `Starting batch response processing for agent ${agentUserId}`,
@@ -785,7 +689,8 @@ LEAVE EMPTY IF:
       _runtime,
       cappedInteractions,
       agentContext,
-      agentConfig
+      agentConfig,
+      planningContext
     );
 
     const responseCount = decisions.filter((d) => d.shouldRespond).length;
@@ -806,7 +711,8 @@ LEAVE EMPTY IF:
       cappedInteractions,
       decisions,
       agentContext,
-      agentConfig
+      agentConfig,
+      planningContext
     );
 
     logger.info(

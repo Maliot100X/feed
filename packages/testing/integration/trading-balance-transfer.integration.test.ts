@@ -9,17 +9,17 @@ import {
 import {
   TradingBalanceTransferService,
   TradingPerformanceService,
-} from '@babylon/api';
-import { balanceTransactions, db, eq, inArray, sql, users } from '@babylon/db';
+} from '@feed/api';
+import { balanceTransactions, db, eq, inArray, sql, users } from '@feed/db';
 import {
   calculatePortfolioBreakdown,
   calculatePortfolioPnL,
-} from '@babylon/engine';
+} from '@feed/engine';
 import {
   generateSnowflakeId,
   PEER_TRANSFER_IN_TRANSACTION_TYPE,
   PEER_TRANSFER_OUT_TRANSACTION_TYPE,
-} from '@babylon/shared';
+} from '@feed/shared';
 
 setDefaultTimeout(30000);
 
@@ -246,7 +246,59 @@ describe('TradingBalanceTransferService - Integration', () => {
     expect(result).toEqual({
       success: false,
       errorCode: 'RECIPIENT_NOT_ALLOWED',
-      error: 'Recipient must be a Babylon user, not an actor or agent',
+      error: 'Recipient must be a Feed user, not an actor or agent',
     });
+  });
+
+  test('opposing concurrent transfers neither deadlock nor lose money', async () => {
+    if (!dbAvailable) {
+      return;
+    }
+
+    const a = await createTestUser({
+      usernamePrefix: 'tb-transfer-a',
+      initialBalance: 100,
+      totalDeposited: 100,
+    });
+    const b = await createTestUser({
+      usernamePrefix: 'tb-transfer-b',
+      initialBalance: 100,
+      totalDeposited: 100,
+    });
+
+    const transfers = Array.from({ length: 10 }, (_, i) =>
+      TradingBalanceTransferService.transfer(
+        i % 2 === 0
+          ? { senderUserId: a.id, recipientIdentifier: b.username, amount: 0.1 }
+          : { senderUserId: b.id, recipientIdentifier: a.username, amount: 0.3 }
+      )
+    );
+    const results = await Promise.all(transfers);
+    expect(results.every((r) => r.success)).toBe(true);
+
+    const rows = await db
+      .select({ id: users.id, virtualBalance: users.virtualBalance })
+      .from(users)
+      .where(inArray(users.id, [a.id, b.id]));
+    const balances = Object.fromEntries(
+      rows.map((r) => [r.id, String(r.virtualBalance)])
+    );
+    // 5 x 0.1 out, 5 x 0.3 in for A; exact decimal results.
+    expect(Number(balances[a.id])).toBeCloseTo(101, 10);
+    expect(Number(balances[b.id])).toBeCloseTo(99, 10);
+
+    // Each ledger row's balanceAfter equals before + amount exactly.
+    const ledger = await db
+      .select({
+        amount: balanceTransactions.amount,
+        before: balanceTransactions.balanceBefore,
+        after: balanceTransactions.balanceAfter,
+      })
+      .from(balanceTransactions)
+      .where(inArray(balanceTransactions.userId, [a.id, b.id]));
+    for (const row of ledger) {
+      const cents = (value: string | number) => Math.round(Number(value) * 100);
+      expect(cents(row.after)).toBe(cents(row.before) + cents(row.amount));
+    }
   });
 });

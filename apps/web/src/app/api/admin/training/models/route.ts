@@ -49,9 +49,9 @@
  * ```
  */
 
-import { requireAdmin, successResponse, withErrorHandling } from '@babylon/api';
-import { db } from '@babylon/db';
-import { modelStorage } from '@babylon/training';
+import { requireAdmin, successResponse, withErrorHandling } from '@feed/api';
+import { db } from '@feed/db';
+import { modelStorage } from '@feed/training';
 import type { NextRequest } from 'next/server';
 
 export const dynamic = 'force-dynamic';
@@ -64,7 +64,7 @@ export const GET = withErrorHandling(async (request: NextRequest) => {
     take: 20,
   });
 
-  // Get models from Vercel Blob
+  // Get models from object storage (R2)
   const blobModels = await modelStorage.listModels();
 
   // Merge data

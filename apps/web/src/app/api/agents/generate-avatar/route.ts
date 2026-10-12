@@ -10,6 +10,7 @@ import { randomUUID } from 'node:crypto';
 import { existsSync } from 'node:fs';
 import { readFile } from 'node:fs/promises';
 import { join } from 'node:path';
+import { fal } from '@fal-ai/client';
 import {
   authenticateUser,
   checkRateLimitAndDuplicates,
@@ -19,17 +20,11 @@ import {
   RATE_LIMIT_CONFIGS,
   successResponse,
   withErrorHandling,
-} from '@babylon/api';
-import {
-  generateAgentMonkeyProfileImage,
-  initFalClient,
-} from '@babylon/engine';
-import { logger } from '@babylon/shared';
-import { fal } from '@fal-ai/client';
+} from '@feed/api';
+import { generateAgentMonkeyProfileImage, initFalClient } from '@feed/engine';
+import { logger } from '@feed/shared';
 import type { NextRequest } from 'next/server';
 import { NextResponse } from 'next/server';
-
-export const maxDuration = 120;
 
 const BUNDLED_REFERENCE = join(
   process.cwd(),
@@ -125,7 +120,7 @@ export const POST = withErrorHandling(async function POST(req: NextRequest) {
     });
   }
 
-  const rateLimitError = checkRateLimitAndDuplicates(
+  const rateLimitError = await checkRateLimitAndDuplicates(
     user.userId,
     null,
     RATE_LIMIT_CONFIGS.GENERATE_AGENT_AVATAR

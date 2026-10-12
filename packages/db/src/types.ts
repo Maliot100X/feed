@@ -19,8 +19,9 @@ export type JsonArray = JsonValue[];
 export type InputJsonValue = JsonValue;
 
 /**
- * Decimal number class for precise decimal arithmetic.
- * Uses string representation for database storage to avoid floating-point precision issues.
+ * Wrapper that carries a decimal value as its string representation for
+ * NUMERIC columns. It performs no arithmetic: do decimal math in SQL (or a
+ * real decimal library), not through this class.
  */
 export class Decimal {
   private value: string;
@@ -41,42 +42,6 @@ export class Decimal {
 
   toNumber(): number {
     return Number.parseFloat(this.value);
-  }
-
-  static add(
-    a: Decimal | string | number,
-    b: Decimal | string | number
-  ): Decimal {
-    const aNum = typeof a === 'number' ? a : Number.parseFloat(a.toString());
-    const bNum = typeof b === 'number' ? b : Number.parseFloat(b.toString());
-    return new Decimal((aNum + bNum).toString());
-  }
-
-  static sub(
-    a: Decimal | string | number,
-    b: Decimal | string | number
-  ): Decimal {
-    const aNum = typeof a === 'number' ? a : Number.parseFloat(a.toString());
-    const bNum = typeof b === 'number' ? b : Number.parseFloat(b.toString());
-    return new Decimal((aNum - bNum).toString());
-  }
-
-  static mul(
-    a: Decimal | string | number,
-    b: Decimal | string | number
-  ): Decimal {
-    const aNum = typeof a === 'number' ? a : Number.parseFloat(a.toString());
-    const bNum = typeof b === 'number' ? b : Number.parseFloat(b.toString());
-    return new Decimal((aNum * bNum).toString());
-  }
-
-  static div(
-    a: Decimal | string | number,
-    b: Decimal | string | number
-  ): Decimal {
-    const aNum = typeof a === 'number' ? a : Number.parseFloat(a.toString());
-    const bNum = typeof b === 'number' ? b : Number.parseFloat(b.toString());
-    return new Decimal((aNum / bNum).toString());
   }
 }
 

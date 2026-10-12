@@ -5,8 +5,6 @@
  * Useful for getting context about the full conversation history.
  */
 
-import { db, desc, eq, messages, users } from '@babylon/db';
-import { COORDINATOR_INFO, COORDINATOR_SENDER_ID } from '@babylon/shared';
 import type {
   Action,
   ActionResult,
@@ -16,6 +14,8 @@ import type {
   Memory,
   State,
 } from '@elizaos/core';
+import { db, desc, eq, messages, users } from '@feed/db';
+import { COORDINATOR_INFO, COORDINATOR_SENDER_ID } from '@feed/shared';
 import { logger } from '../../../../shared/logger';
 
 /** Options for check team chat action */

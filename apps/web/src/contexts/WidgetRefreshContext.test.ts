@@ -59,21 +59,11 @@ describe('useWidgetRefresh', () => {
     ).toThrow('useWidgetRefresh must be used within WidgetRefreshProvider');
   });
 
-  it('returns a no-op context outside the provider in production', () => {
+  it('throws outside the provider in production too', () => {
     env.NODE_ENV = 'production';
 
     expect(() =>
-      renderToString(
-        createElement(HookConsumer, {
-          onContext: ({ registerRefresh, unregisterRefresh, refreshAll }) => {
-            registerRefresh('sidebar-widget', () => {
-              throw new Error('no-op context should not run refresh callbacks');
-            });
-            refreshAll();
-            unregisterRefresh('sidebar-widget');
-          },
-        })
-      )
-    ).not.toThrow();
+      renderToString(createElement(HookConsumer, { onContext: () => {} }))
+    ).toThrow('useWidgetRefresh must be used within WidgetRefreshProvider');
   });
 });

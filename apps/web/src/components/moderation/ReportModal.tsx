@@ -36,7 +36,8 @@ import { AlertCircle, Flag, X } from 'lucide-react';
 import { useState, useTransition } from 'react';
 import { toast } from 'sonner';
 import { Avatar } from '@/components/shared/Avatar';
-import { apiUrl } from '@/utils/api-url';
+import { readApiErrorMessage } from '@/utils/api-error';
+import { apiFetch } from '@/utils/api-fetch';
 
 interface ReportModalProps {
   isOpen: boolean;
@@ -119,28 +120,36 @@ export function ReportModal({
       return;
     }
 
-    if (reason.length < 10) {
+    const trimmedReason = reason.trim();
+    if (trimmedReason.length < 10) {
       toast.error('Please provide more details (at least 10 characters)');
       return;
     }
 
     startReporting(async () => {
-      const response = await fetch(apiUrl('/api/moderation/reports'), {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          reportType: postId ? 'post' : 'user',
-          reportedUserId: postId ? undefined : targetUserId,
-          reportedPostId: postId,
-          category,
-          reason,
-          evidence: evidence || undefined,
-        }),
-      });
+      let response: Response;
+      try {
+        response = await apiFetch('/api/moderation/reports', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            reportType: postId ? 'post' : 'user',
+            reportedUserId: postId ? undefined : targetUserId,
+            reportedPostId: postId,
+            category,
+            reason: trimmedReason,
+            evidence: evidence.trim() || undefined,
+          }),
+        });
+      } catch {
+        toast.error('Network error. Please try again.');
+        return;
+      }
 
       if (!response.ok) {
-        const error = await response.json();
-        toast.error(error.message || 'Failed to submit report');
+        toast.error(
+          await readApiErrorMessage(response, 'Failed to submit report')
+        );
         return;
       }
 

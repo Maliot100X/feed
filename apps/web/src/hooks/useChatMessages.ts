@@ -1,4 +1,4 @@
-import { logger, type MessageMetadata } from '@babylon/shared';
+import { logger, type MessageMetadata } from '@feed/shared';
 import { useQueryClient } from '@tanstack/react-query';
 import { useCallback, useEffect, useRef, useState } from 'react';
 import {
@@ -211,7 +211,15 @@ export function useChatMessages(chatId: string | null) {
     }) => {
       const key = `${delta.messageId}:${delta.emoji}:${delta.action}`;
       pendingReactionDeltasRef.current.add(key);
-      setTimeout(() => pendingReactionDeltasRef.current.delete(key), 5000);
+      const timer = setTimeout(
+        () => pendingReactionDeltasRef.current.delete(key),
+        5000
+      );
+      // Clear early when the request failed (no echo will arrive).
+      return () => {
+        clearTimeout(timer);
+        pendingReactionDeltasRef.current.delete(key);
+      };
     },
     []
   );

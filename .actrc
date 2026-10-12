@@ -28,6 +28,3 @@
 # Reuse containers between runs for faster iteration
 --reuse
 
-# Apple Silicon (M-series) compatibility - use x86_64 emulation via Rosetta
---container-architecture linux/amd64
-

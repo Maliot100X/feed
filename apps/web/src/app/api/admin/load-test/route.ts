@@ -79,10 +79,10 @@ import {
   requireAdmin,
   successResponse,
   withErrorHandling,
-} from '@babylon/api';
-import { logger } from '@babylon/shared';
-import type { LoadTestResult } from '@babylon/testing';
-import { LoadTestSimulator, TEST_SCENARIOS } from '@babylon/testing';
+} from '@feed/api';
+import { logger } from '@feed/shared';
+import type { LoadTestResult } from '@feed/testing';
+import { LoadTestSimulator, TEST_SCENARIOS } from '@feed/testing';
 import type { NextRequest } from 'next/server';
 import { z } from 'zod';
 
@@ -120,10 +120,7 @@ export const POST = withErrorHandling(async (request: NextRequest) => {
   // Get configuration
   const config = TEST_SCENARIOS[scenario];
   const testBaseUrl =
-    baseUrl ||
-    (process.env.VERCEL_URL
-      ? `https://${process.env.VERCEL_URL}`
-      : 'http://localhost:3000');
+    baseUrl || process.env.NEXT_PUBLIC_APP_URL || 'http://localhost:3000';
 
   logger.info(
     'Starting load test',

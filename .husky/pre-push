@@ -1,9 +1,10 @@
 echo "Running pre-push checks..."
 
-# Quick format/lint check (Biome, ~15s)
-bun run check
-if [ $? -ne 0 ]; then
-  echo "❌ Biome check failed. Run 'bun run check' to auto-fix."
+# Read-only format/lint check (Biome, ~15s). Do not use --write here: the
+# commits being pushed are already fixed, so auto-fixing would only mutate the
+# working tree without changing what gets pushed.
+if ! bunx biome check .; then
+  echo "❌ Biome check failed. Run 'bun run check' to auto-fix, then commit."
   exit 1
 fi
 

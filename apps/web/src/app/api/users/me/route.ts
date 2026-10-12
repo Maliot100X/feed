@@ -61,7 +61,7 @@
  * **Profile Data Includes:**
  * - **Identity:** username, display name, bio, avatar, cover image
  * - **Onboarding Status:** profile completion
- * - **Social Links:** Farcaster, Twitter connections and visibility settings
+ * - **Social Links:** Twitter connections and visibility settings
  * - **Reputation:** reputation points, referral code, referral source
  * - **Stats:** cached profile statistics (posts, followers, following)
  * - **Permissions:** admin status, actor/agent flag
@@ -97,7 +97,6 @@
  * @property {string} user.referralCode - User's referral code
  * @property {string} user.referredBy - Referrer's code (if referred)
  * @property {number} user.reputationPoints - Reputation score
- * @property {boolean} user.hasFarcaster - Farcaster connected
  * @property {boolean} user.hasTwitter - Twitter connected
  * @property {boolean} user.isAdmin - Admin privileges
  * @property {boolean} user.isActor - Agent/actor flag
@@ -136,9 +135,9 @@ import {
   InternalServerError,
   successResponse,
   withErrorHandling,
-} from '@babylon/api';
-import { db, eq, or, sql, users } from '@babylon/db';
-import { logger, toISO, toISOOrNull } from '@babylon/shared';
+} from '@feed/api';
+import { db, eq, or, sql, users } from '@feed/db';
+import { logger, toISO, toISOOrNull } from '@feed/shared';
 import type { NextRequest } from 'next/server';
 import { getOptionalProfileStats } from '@/lib/users/profile-stats';
 import { POST as updateProfilePOST } from '../[userId]/update-profile/route';
@@ -167,15 +166,11 @@ const userSelectFields = {
   reputationPoints: users.reputationPoints,
   virtualBalance: users.virtualBalance,
   pointsAwardedForProfile: users.pointsAwardedForProfile,
-  pointsAwardedForFarcasterFollow: users.pointsAwardedForFarcasterFollow,
   pointsAwardedForTwitterFollow: users.pointsAwardedForTwitterFollow,
   pointsAwardedForDiscordJoin: users.pointsAwardedForDiscordJoin,
   pointsAwardedForEmail: users.pointsAwardedForEmail,
-  hasFarcaster: users.hasFarcaster,
   hasTwitter: users.hasTwitter,
   hasDiscord: users.hasDiscord,
-  farcasterUsername: users.farcasterUsername,
-  farcasterFid: users.farcasterFid,
   twitterUsername: users.twitterUsername,
   twitterId: users.twitterId,
   discordUsername: users.discordUsername,
@@ -183,7 +178,6 @@ const userSelectFields = {
   telegramId: users.telegramId,
   telegramUsername: users.telegramUsername,
   showTwitterPublic: users.showTwitterPublic,
-  showFarcasterPublic: users.showFarcasterPublic,
   showWalletPublic: users.showWalletPublic,
   isAdmin: users.isAdmin,
   isActor: users.isActor,
@@ -216,23 +210,18 @@ type UserSelectResult = {
   reputationPoints: number;
   virtualBalance: string;
   pointsAwardedForProfile: boolean;
-  pointsAwardedForFarcasterFollow: boolean;
   pointsAwardedForTwitterFollow: boolean;
   pointsAwardedForDiscordJoin: boolean;
   pointsAwardedForEmail: boolean;
-  hasFarcaster: boolean;
   hasTwitter: boolean;
   hasDiscord: boolean;
   hasTelegram: boolean;
   telegramId: string | null;
   telegramUsername: string | null;
-  farcasterUsername: string | null;
-  farcasterFid: string | null;
   twitterUsername: string | null;
   twitterId: string | null;
   discordUsername: string | null;
   showTwitterPublic: boolean;
-  showFarcasterPublic: boolean;
   showWalletPublic: boolean;
   isAdmin: boolean;
   isActor: boolean;
@@ -269,20 +258,16 @@ function buildUserResponse(
     reputationPoints: dbUser.reputationPoints,
     virtualBalance: Number(dbUser.virtualBalance ?? 0),
     pointsAwardedForProfile: dbUser.pointsAwardedForProfile,
-    pointsAwardedForFarcasterFollow: dbUser.pointsAwardedForFarcasterFollow,
     pointsAwardedForTwitterFollow: dbUser.pointsAwardedForTwitterFollow,
     pointsAwardedForDiscordJoin: dbUser.pointsAwardedForDiscordJoin,
     pointsAwardedForEmail: dbUser.pointsAwardedForEmail,
-    hasFarcaster: dbUser.hasFarcaster,
     hasTwitter: dbUser.hasTwitter,
     hasDiscord: dbUser.hasDiscord,
     hasTelegram: dbUser.hasTelegram,
-    farcasterUsername: dbUser.farcasterUsername,
     twitterUsername: dbUser.twitterUsername,
     discordUsername: dbUser.discordUsername,
     telegramUsername: dbUser.telegramUsername,
     showTwitterPublic: dbUser.showTwitterPublic,
-    showFarcasterPublic: dbUser.showFarcasterPublic,
     showWalletPublic: dbUser.showWalletPublic,
     isAdmin: dbUser.isAdmin,
     isActor: dbUser.isActor,
@@ -383,7 +368,7 @@ export const GET = withErrorHandling(async (request: NextRequest) => {
   );
 
   // Phase 2: Look up by primary key (fastest, works for both Steward and legacy Privy users).
-  // auth-middleware already resolved the correct Babylon user ID into authUser.dbUserId
+  // auth-middleware already resolved the correct Feed user ID into authUser.dbUserId
   // via ensureUserFromSteward / email-bridge / fast-path, so we trust it directly.
   let [dbUser] = await db
     .select(userSelectFields)
@@ -393,7 +378,7 @@ export const GET = withErrorHandling(async (request: NextRequest) => {
 
   // Fallback: legacy Privy users whose row predates the stewardId column —
   // find them by privyId in case canonicalUserId resolved to the Steward UUID
-  // rather than the Babylon snowflake on an older session.
+  // rather than the Feed snowflake on an older session.
   if (!dbUser) {
     [dbUser] = await db
       .select(userSelectFields)
@@ -408,8 +393,6 @@ export const GET = withErrorHandling(async (request: NextRequest) => {
   if (!dbUser) {
     // Use only data available from the authenticated session — no Privy call
     const email: string | null = authUser.email ?? null;
-    const farcasterUsername: string | null = null;
-    const farcasterFid: string | null = null;
     const twitterUsername: string | null = null;
     const twitterId: string | null = null;
     const telegramUserId: string | null = null;
@@ -421,14 +404,11 @@ export const GET = withErrorHandling(async (request: NextRequest) => {
       'GET /api/users/me'
     );
 
-    // Check if Farcaster or Twitter account is already linked to an existing user
+    // Check if Twitter account is already linked to an existing user
     // If found, auto-link the new Privy session to the existing account
-    // This allows users to login with their social account and access their existing Babylon account
-    if (farcasterFid || twitterId) {
+    // This allows users to login with their social account and access their existing Feed account
+    if (twitterId) {
       const conditions = [];
-      if (farcasterFid) {
-        conditions.push(eq(users.farcasterFid, farcasterFid));
-      }
       if (twitterId) {
         conditions.push(eq(users.twitterId, twitterId));
       }
@@ -439,14 +419,12 @@ export const GET = withErrorHandling(async (request: NextRequest) => {
         .where(or(...conditions))
         .limit(2);
 
-      // If multiple users found, it means Farcaster and Twitter belong to different accounts
       // Skip auto-linking to prevent linking the wrong account
       if (existingUsersWithSocial.length > 1) {
         logger.warn(
           'Multiple users found with conflicting social accounts - skipping auto-link',
           {
             newPrivyId: privyId,
-            farcasterFid,
             twitterId,
             foundUserIds: existingUsersWithSocial.map((u) => u.id),
           },
@@ -460,20 +438,10 @@ export const GET = withErrorHandling(async (request: NextRequest) => {
         );
       } else if (existingUsersWithSocial.length === 1) {
         const existingUserWithSocial = existingUsersWithSocial[0]!;
-        const matchedByFarcaster =
-          !!farcasterFid &&
-          existingUserWithSocial.farcasterFid === farcasterFid;
         const matchedByTwitter =
           !!twitterId && existingUserWithSocial.twitterId === twitterId;
 
-        const linkedAccount =
-          matchedByFarcaster && matchedByTwitter
-            ? 'Farcaster+Twitter'
-            : matchedByFarcaster
-              ? 'Farcaster'
-              : matchedByTwitter
-                ? 'Twitter'
-                : 'Unknown';
+        const linkedAccount = matchedByTwitter ? 'Twitter' : 'Unknown';
 
         logger.info(
           'Found existing user by social account - auto-linking new Privy session',
@@ -483,7 +451,6 @@ export const GET = withErrorHandling(async (request: NextRequest) => {
             existingUserId: existingUserWithSocial.id,
             existingUsername: existingUserWithSocial.username,
             linkedAccount,
-            farcasterFid,
             twitterId,
           },
           'GET /api/users/me'
@@ -675,7 +642,6 @@ export const GET = withErrorHandling(async (request: NextRequest) => {
         referredBy: resolvedReferrerId,
         email,
         emailVerified: !!email,
-        farcasterUsername,
         twitterUsername,
       },
       'GET /api/users/me'
@@ -702,11 +668,8 @@ export const GET = withErrorHandling(async (request: NextRequest) => {
         privyId,
         referredBy: resolvedReferrerId,
         email,
-        farcasterUsername,
-        farcasterFid,
         twitterUsername,
         twitterId,
-        hasFarcaster: !!farcasterUsername,
         hasTwitter: !!twitterUsername,
         hasTelegram: !!telegramUserId,
         telegramId: telegramUserId,

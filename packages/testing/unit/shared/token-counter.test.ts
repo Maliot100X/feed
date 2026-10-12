@@ -9,7 +9,7 @@ import {
   getSafeContextLimit,
   MODEL_TOKEN_LIMITS,
   truncateToTokenLimitSync,
-} from '@babylon/api';
+} from '@feed/api';
 
 describe('Token Counter Utilities', () => {
   describe('countTokensSync', () => {
@@ -92,27 +92,27 @@ describe('Token Counter Utilities', () => {
       // GPT-5.1 has 128000 limit
       // With 2% margin: 128000 * 0.98 = 125440
       const result = getSafeContextLimit('gpt-5.1');
-      expect(result).toBe(125440);
+      expect(result).toBe(117440);
     });
 
     it('should use custom safety margin', () => {
       // GPT-5.1 has 128000 limit
       // With 5% margin: 128000 * 0.95 = 121600
       const result = getSafeContextLimit('gpt-5.1', 8000, 0.05);
-      expect(result).toBe(121600);
+      expect(result).toBe(113600);
     });
 
-    it('should enforce minimum of 1000 tokens', () => {
+    it('must not invent a minimum above remaining capacity', () => {
       // Very small model with large margin
       const result = getSafeContextLimit('unknown', 0, 0.99);
-      expect(result).toBeGreaterThanOrEqual(1000);
+      expect(result).toBe(81);
     });
 
     it('should handle unknown models with default limit', () => {
       // Unknown model defaults to 8192
       // With 2% margin: 8192 * 0.98 = 8028
       const result = getSafeContextLimit('unknown-model');
-      expect(result).toBe(8028);
+      expect(result).toBe(28);
     });
   });
 
@@ -190,6 +190,37 @@ describe('Token Counter Utilities', () => {
     it('should have Groq models', () => {
       expect(MODEL_TOKEN_LIMITS['llama-3.3-70b-versatile']).toBeDefined();
       expect(MODEL_TOKEN_LIMITS['mixtral-8x7b-32768']).toBeDefined();
+    });
+  });
+
+  describe('budget edge cases', () => {
+    it('rejects negative or fractional budgets', () => {
+      expect(() => truncateToTokenLimitSync('abcdef', -1)).toThrow();
+      expect(() => truncateToTokenLimitSync('abcdef', 1.5)).toThrow();
+      expect(() => budgetTokens(-10, [{ name: 'a', priority: 1 }])).toThrow();
+    });
+
+    it('honours a zero budget (no text, no ellipsis)', () => {
+      const result = truncateToTokenLimitSync('a'.repeat(100), 0);
+      expect(result.text).toBe('');
+      const tail = truncateToTokenLimitSync('a'.repeat(100), 0, {
+        preserveEnd: true,
+      });
+      expect(tail.text).toBe('');
+    });
+
+    it('keeps a configured zero model limit', () => {
+      expect(getModelTokenLimit('whisper-large-v3')).toBe(0);
+      expect(getModelTokenLimit('unknown-model')).toBe(8192);
+    });
+
+    it('allocates only minimums when no section has priority', () => {
+      expect(
+        budgetTokens(100, [
+          { name: 'a', priority: 0, minTokens: 10 },
+          { name: 'b', priority: 0 },
+        ])
+      ).toEqual({ a: 10, b: 0 });
     });
   });
 });

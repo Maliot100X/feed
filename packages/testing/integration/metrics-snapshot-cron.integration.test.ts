@@ -8,7 +8,7 @@
  */
 
 import { afterAll, beforeAll, describe, expect, test } from 'bun:test';
-import { db, eq, inArray, systemMetricsSnapshots } from '@babylon/db';
+import { db, eq, inArray, systemMetricsSnapshots } from '@feed/db';
 import { getAdminToken } from './helpers';
 
 const BASE_URL =
@@ -121,75 +121,56 @@ describe('Metrics Snapshot Cron Job', () => {
   });
 
   describe('Snapshot Creation', () => {
-    test('creates snapshot with all required metrics', async () => {
+    test('creates the hourly snapshot or reports the existing one', async () => {
       requireServer();
 
-      // First, clear any existing snapshot for this hour to force creation
-      const now = new Date();
-      const hourBoundary = new Date(now);
+      // Never delete pre-existing history: if this hour already has a
+      // snapshot, the route must report it as skipped.
+      const hourBoundary = new Date();
       hourBoundary.setMinutes(0, 0, 0);
-
-      // Delete existing snapshot for this hour
-      await db
-        .delete(systemMetricsSnapshots)
-        .where(eq(systemMetricsSnapshots.timestamp, hourBoundary));
+      const [existing] = await db
+        .select({ id: systemMetricsSnapshots.id })
+        .from(systemMetricsSnapshots)
+        .where(eq(systemMetricsSnapshots.timestamp, hourBoundary))
+        .limit(1);
 
       const response = await cronRequest('/api/cron/metrics-snapshot');
+      expect(response.status).toBe(200);
       const data = await response.json();
+      expect(data.success).toBe(true);
 
-      if (response.status === 200 && data.success && !data.skipped) {
-        // Verify snapshot was created
-        expect(data.snapshotId).toBeDefined();
-        expect(data.timestamp).toBeDefined();
-        expect(data.environment).toBeDefined();
-        expect(data.durationMs).toBeGreaterThan(0);
-
-        // Track for cleanup
-        testSnapshotIds.push(data.snapshotId);
-
-        // Verify metrics are present
-        expect(data.metrics).toBeDefined();
-        expect(data.metrics.totalUsers).toBeGreaterThanOrEqual(0);
-        expect(data.metrics.activeUsers).toBeGreaterThanOrEqual(0);
-        expect(data.metrics.activeMarkets).toBeGreaterThanOrEqual(0);
-
-        // Verify system health metrics
-        expect(data.systemHealth).toBeDefined();
-        expect(data.systemHealth.apiUptime).toBeGreaterThanOrEqual(0);
-        expect(data.systemHealth.apiUptime).toBeLessThanOrEqual(100);
-      } else if (data.skipped) {
-        // Snapshot already exists, that's fine
+      if (existing) {
+        expect(data.skipped).toBe(true);
         expect(data.reason).toContain('already exists');
+        return;
       }
+
+      expect(data.skipped).toBeFalsy();
+      expect(data.snapshotId).toBeDefined();
+      testSnapshotIds.push(data.snapshotId);
+      expect(data.timestamp).toBeDefined();
+      expect(data.environment).toBeDefined();
+      expect(data.metrics.totalUsers).toBeGreaterThanOrEqual(0);
+      expect(data.systemHealth.apiUptime).toBeGreaterThanOrEqual(0);
+      expect(data.systemHealth.apiUptime).toBeLessThanOrEqual(100);
     });
 
     test('skips when snapshot already exists for hour', async () => {
       requireServer();
 
-      // First request creates (or already exists)
       const firstResponse = await cronRequest('/api/cron/metrics-snapshot');
-
-      // Only test skip behavior if first request succeeded
-      if (firstResponse.status !== 200) {
-        console.log('First request failed, skipping duplicate test');
-        return;
+      expect(firstResponse.status).toBe(200);
+      const first = await firstResponse.json();
+      if (first.snapshotId && !first.skipped) {
+        testSnapshotIds.push(first.snapshotId);
       }
 
-      // Second request should skip
       const response = await cronRequest('/api/cron/metrics-snapshot');
+      expect(response.status).toBe(200);
       const data = await response.json();
-
-      // Should succeed (either created or skipped)
-      if (response.status === 200) {
-        expect(data.success).toBe(true);
-        // Second call should have skipped
-        if (data.skipped) {
-          expect(data.reason).toContain('already exists');
-        }
-      } else {
-        // If 500, there might be a DB issue - just log it
-        console.log('Duplicate check returned error:', data);
-      }
+      expect(data.success).toBe(true);
+      expect(data.skipped).toBe(true);
+      expect(data.reason).toContain('already exists');
     });
 
     test('stores correct environment', async () => {

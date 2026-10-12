@@ -42,11 +42,11 @@ import {
   relayCronToStaging,
   verifyCronAuth,
   withErrorHandling,
-} from '@babylon/api';
+} from '@feed/api';
 import {
   PredictionDbAdapter as CorePredictionDbAdapter,
   PredictionMarketService as CorePredictionMarketService,
-} from '@babylon/core/markets/prediction';
+} from '@feed/core/markets/prediction';
 import {
   type ArcStateType,
   and,
@@ -68,12 +68,12 @@ import {
   sql,
   timeframedMarkets,
   worldEvents,
-} from '@babylon/db';
+} from '@feed/db';
 import {
-  BabylonLLMClient,
   type DailyTopicContext,
   dailyTopicService,
   deriveTopicFromText,
+  FeedLLMClient,
   getPredictionMarketInitialization,
   isEligibleActor,
   mapGranularToDbTimeframe,
@@ -85,8 +85,8 @@ import {
   secureRandom,
   timeframeArcPlanner,
   weightedPick,
-} from '@babylon/engine';
-import { isStringArray, logger, toISO } from '@babylon/shared';
+} from '@feed/engine';
+import { isStringArray, logger, toISO } from '@feed/shared';
 import type { NextRequest } from 'next/server';
 import { NextResponse } from 'next/server';
 import { notifyResolvedMarketOwners } from '@/lib/services/market-resolution-notifications';
@@ -99,8 +99,6 @@ interface GameState {
   currentDay: number | null;
 }
 
-// Vercel function configuration
-export const maxDuration = 300; // 5 minutes max
 export const dynamic = 'force-dynamic';
 
 // ============================================================================
@@ -115,7 +113,7 @@ const DEFAULT_SCENARIO_ID = 1;
 
 /**
  * Default time budget for tick execution in milliseconds.
- * Vercel cron has a 5-minute timeout; we use 4 minutes to leave buffer.
+ * Kept under the 5-minute cron interval budget; 4 minutes leaves buffer.
  */
 const DEFAULT_TICK_BUDGET_MS = 240000;
 
@@ -576,7 +574,7 @@ export const POST = withErrorHandling(async function POST(_req: NextRequest) {
     }
 
     // Initialize LLM client for question generation
-    const llmClient = BabylonLLMClient.forGameTick();
+    const llmClient = FeedLLMClient.forGameTick();
 
     // Results tracking with detailed performance metrics
     const results = {
@@ -1207,7 +1205,7 @@ export const POST = withErrorHandling(async function POST(_req: NextRequest) {
       subMarketMetrics,
     });
 
-    // Emit structured log for metrics aggregation (Vercel/Datadog integration)
+    // Emit structured log for metrics aggregation (log drain / Datadog integration)
     logger.info(
       'sub_market_metrics',
       {
@@ -1399,7 +1397,7 @@ async function resolveMarket(
     questionNumber: number;
     timeframe: string;
   },
-  llmClient: BabylonLLMClient,
+  llmClient: FeedLLMClient,
   gameState: GameState
 ): Promise<{ resolved: boolean }> {
   logger.info(
@@ -1761,7 +1759,7 @@ async function resolveMarket(
 async function createMarketForTimeframe(
   timeframe: string,
   durationMs: number,
-  llmClient: BabylonLLMClient,
+  llmClient: FeedLLMClient,
   gameState: GameState,
   dailyTopic: DailyTopicContext | null,
   allTopics: DailyTopicContext[] = []
@@ -2111,7 +2109,7 @@ function inferCategory(questionText: string): MarketCategory {
 
 /**
  * Map our timeframe strings to database MarketTimeframe enum values.
- * Delegates to the shared mapping function from @babylon/engine which
+ * Delegates to the shared mapping function from @feed/engine which
  * throws on unknown timeframes to fail fast.
  */
 function mapTimeframeToDbType(timeframe: string): MarketTimeframe {
@@ -2302,7 +2300,7 @@ function resolveTopicForMarket(
 async function createSubMarket(
   parentMarket: ParentMarketData,
   durationMs: number,
-  llmClient: BabylonLLMClient,
+  llmClient: FeedLLMClient,
   gameState: GameState
 ): Promise<boolean> {
   const now = new Date();

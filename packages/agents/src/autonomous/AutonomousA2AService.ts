@@ -7,9 +7,9 @@
  * @packageDocumentation
  */
 
-import { db, eq, users } from '@babylon/db';
 import type { IAgentRuntime } from '@elizaos/core';
-import type { BabylonRuntime } from '../plugins/babylon/types';
+import { db, eq, users } from '@feed/db';
+import type { FeedRuntime } from '../plugins/feed/types';
 import { agentPnLService } from '../services/AgentPnLService';
 import {
   getAgentConfig,
@@ -24,10 +24,9 @@ import { getPredictionMarketPrices } from './utils/prediction-pricing';
  *
  * @internal
  */
-function isBabylonRuntime(runtime: IAgentRuntime): runtime is BabylonRuntime {
+function isFeedRuntime(runtime: IAgentRuntime): runtime is FeedRuntime {
   return (
-    'a2aClient' in runtime &&
-    (runtime as BabylonRuntime).a2aClient !== undefined
+    'a2aClient' in runtime && (runtime as FeedRuntime).a2aClient !== undefined
   );
 }
 
@@ -91,7 +90,7 @@ export class AutonomousA2AService {
     side?: string;
     marketType?: 'prediction' | 'perp';
   }> {
-    if (!isBabylonRuntime(runtime) || !runtime.a2aClient?.isConnected()) {
+    if (!isFeedRuntime(runtime) || !runtime.a2aClient?.isConnected()) {
       logger.debug('A2A not available, skipping A2A trade', { agentUserId });
       return {
         success: false,
@@ -120,7 +119,7 @@ export class AutonomousA2AService {
       };
     }
 
-    // After type guard, runtime is BabylonRuntime and a2aClient is defined
+    // After type guard, runtime is FeedRuntime and a2aClient is defined
     const a2aClient = runtime.a2aClient;
 
     // Get available markets (both prediction and perpetual)
@@ -172,7 +171,7 @@ export class AutonomousA2AService {
     };
 
     // Shuffle markets to provide variety and avoid bias toward first markets
-    const { shuffleArray } = await import('@babylon/engine');
+    const { shuffleArray } = await import('@feed/engine');
     const shuffledPredictions = hasPredictions
       ? shuffleArray([...predictionsResponse.predictions!])
       : [];
@@ -477,7 +476,7 @@ Your JSON response:`;
     runtime: IAgentRuntime,
     content: string
   ): Promise<{ success: boolean; postId?: string }> {
-    if (!isBabylonRuntime(runtime) || !runtime.a2aClient?.isConnected()) {
+    if (!isFeedRuntime(runtime) || !runtime.a2aClient?.isConnected()) {
       logger.debug('A2A not connected, skipping A2A post', { agentUserId });
       return { success: false };
     }
@@ -494,7 +493,7 @@ Your JSON response:`;
       return { success: false };
     }
 
-    // After type guard, runtime is BabylonRuntime and a2aClient is defined
+    // After type guard, runtime is FeedRuntime and a2aClient is defined
     const a2aClient = runtime.a2aClient;
 
     // Create post via A2A
@@ -519,7 +518,7 @@ Your JSON response:`;
     agentUserId: string,
     runtime: IAgentRuntime
   ): Promise<{ success: boolean; engagements: number }> {
-    if (!isBabylonRuntime(runtime) || !runtime.a2aClient?.isConnected()) {
+    if (!isFeedRuntime(runtime) || !runtime.a2aClient?.isConnected()) {
       return { success: false, engagements: 0 };
     }
 
@@ -534,7 +533,7 @@ Your JSON response:`;
       return { success: false, engagements: 0 };
     }
 
-    // After type guard, runtime is BabylonRuntime and a2aClient is defined
+    // After type guard, runtime is FeedRuntime and a2aClient is defined
     const a2aClient = runtime.a2aClient;
 
     // Get trending topics
@@ -601,7 +600,7 @@ Your JSON response:`;
     agentUserId: string,
     runtime: IAgentRuntime
   ): Promise<{ success: boolean; actionsTaken: number }> {
-    if (!isBabylonRuntime(runtime) || !runtime.a2aClient?.isConnected()) {
+    if (!isFeedRuntime(runtime) || !runtime.a2aClient?.isConnected()) {
       return { success: false, actionsTaken: 0 };
     }
 
@@ -621,7 +620,7 @@ Your JSON response:`;
       return { success: false, actionsTaken: 0 };
     }
 
-    // After type guard, runtime is BabylonRuntime and a2aClient is defined
+    // After type guard, runtime is FeedRuntime and a2aClient is defined
     const a2aClient = runtime.a2aClient;
 
     // Get positions via A2A

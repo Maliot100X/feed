@@ -1,13 +1,13 @@
-# Babylon Web (`apps/web`)
+# Feed Web (`apps/web`)
 
-Next.js application: UI, API routes, SSE, auth wiring, and Vercel Analytics/Speed Insights.
+Next.js application: UI, API routes, SSE, and Steward auth wiring, deployed through OpenNext to Cloudflare Workers.
 
-## Observability
+## Deployment and observability
 
-- **Vercel Speed Insights** (real-user Web Vitals) is wrapped in **`GatedSpeedInsights`**: route allowlist + session sampling + optional disable for minimal/embed layout.
-- **Why documented centrally:** Operators tune sampling without reading layout code; rationale for allowlists and defaults lives in one place.
-
-Full write-up (WHYs, env vars, route list, roadmap): [`docs/observability/speed-insights.md`](../../docs/observability/speed-insights.md).
+See the root [deployment runbook](../../README.md#deployment) for environment secrets,
+R2 migration, scheduled jobs, and cutover gates. Worker logs and PostHog replace the
+removed Vercel Analytics/Speed Insights integration. Sentry remains disabled until
+validated on Workers.
 
 ## Related docs
 
@@ -22,7 +22,7 @@ From repo root:
 
 ```bash
 bun run dev:web    # This app only
-bun run build      # Production build (turbo)
+bun run build:cloudflare staging # OpenNext Worker build
 ```
 
 See root [`README.md`](../../README.md) for full quality gates and monorepo commands.

@@ -1,6 +1,6 @@
-import type { JsonValue } from '@babylon/shared';
 import type { IAgentRuntime, Plugin } from '@elizaos/core';
 import { logger } from '@elizaos/core';
+import type { JsonValue } from '@feed/shared';
 import { experienceEvaluator } from './evaluators/experienceEvaluator';
 import { marketOutcomeEvaluator } from './evaluators/marketOutcomeEvaluator';
 import { experienceProvider } from './providers/experienceProvider';

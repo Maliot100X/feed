@@ -1,5 +1,5 @@
 <!--
-Babylon PR template
+Feed PR template
 
 Goal: make PRs easy to review + easy to ship.
 - Prefer small, focused PRs (one theme). Avoid catch‑all PRs.
@@ -100,7 +100,7 @@ Goal: make PRs easy to review + easy to ship.
 - [ ] No deploy impact
 - [ ] Requires env var updates (listed below + `.env.example` updated)
 - [ ] Requires DB migration (`bun run db:migrate`) / backfill / seed
-- [ ] Changes cron schedule or endpoints (`vercel.json`, `CRON_SECRET`, etc.)
+- [ ] Changes cron schedule or endpoints (`workers/cron/src/schedule.ts`, `CRON_SECRET`, etc.)
 - [ ] Rollout behind a flag / gradual rollout
 
 **Env vars (added/changed/removed)**

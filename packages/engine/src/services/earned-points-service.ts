@@ -6,14 +6,8 @@
  * points for trades.
  */
 
-import {
-  db,
-  eq,
-  pointsTransactions,
-  type Transaction,
-  users,
-} from '@babylon/db';
-import { generateSnowflakeId, logger } from '@babylon/shared';
+import { db, eq, pointsTransactions, type Transaction, users } from '@feed/db';
+import { generateSnowflakeId, logger } from '@feed/shared';
 
 /**
  * Earned Points Service Class

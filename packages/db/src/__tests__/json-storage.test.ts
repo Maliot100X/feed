@@ -17,10 +17,7 @@ describe('JSON Storage Backend', () => {
   beforeEach(async () => {
     // Use random suffix to avoid state collision
     await initializeJsonMode(
-      '/tmp/babylon-test-' +
-        Date.now() +
-        '-' +
-        Math.random().toString(36).slice(2)
+      '/tmp/feed-test-' + Date.now() + '-' + Math.random().toString(36).slice(2)
     );
   });
 
@@ -345,7 +342,7 @@ describe('JSON Storage Backend', () => {
 
 describe('Question Arc Plans in JSON Mode', () => {
   beforeEach(async () => {
-    await initializeJsonMode('/tmp/babylon-arc-test-' + Date.now());
+    await initializeJsonMode('/tmp/feed-arc-test-' + Date.now());
   });
 
   afterEach(() => {
@@ -398,7 +395,7 @@ describe('Complex Queries in JSON Mode', () => {
   beforeEach(async () => {
     // Use random suffix to avoid state collision
     await initializeJsonMode(
-      '/tmp/babylon-complex-test-' +
+      '/tmp/feed-complex-test-' +
         Date.now() +
         '-' +
         Math.random().toString(36).slice(2)
@@ -622,7 +619,7 @@ describe('Snapshot Operations', () => {
 
   beforeEach(async () => {
     testDir =
-      '/tmp/babylon-snapshot-test-' +
+      '/tmp/feed-snapshot-test-' +
       Date.now() +
       '-' +
       Math.random().toString(36).slice(2);
@@ -670,5 +667,50 @@ describe('Snapshot Operations', () => {
 
     expect(user).not.toBeNull();
     expect(user!.username).toBe('snapshotuser');
+  });
+
+  test('honours take: 0, Date equality, numeric strings and duplicate IDs', async () => {
+    const when = new Date('2026-05-06T07:08:09.000Z');
+    await db.user.create({
+      data: {
+        id: 'sem-user',
+        username: 'semuser',
+        displayName: 'Sem User',
+        virtualBalance: '10',
+        totalDeposited: '0',
+        reputationPoints: 1,
+        lifetimePnL: '0',
+        isAgent: false,
+        role: 'user',
+        updatedAt: when,
+      },
+    });
+
+    expect(
+      await db.user.findMany({ where: { id: 'sem-user' }, take: 0 })
+    ).toEqual([]);
+    expect(
+      await db.user.findMany({ where: { id: 'sem-user', updatedAt: when } })
+    ).toHaveLength(1);
+    expect(
+      await db.user.findMany({
+        where: { id: 'sem-user', virtualBalance: { gt: '9' } },
+      })
+    ).toHaveLength(1);
+    await expect(
+      db.user.create({
+        data: {
+          id: 'sem-user',
+          username: 'dup',
+          displayName: 'Dup',
+          virtualBalance: '0',
+          totalDeposited: '0',
+          reputationPoints: 0,
+          lifetimePnL: '0',
+          isAgent: false,
+          role: 'user',
+        },
+      })
+    ).rejects.toThrow('Unique constraint violation');
   });
 });

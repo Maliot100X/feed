@@ -66,18 +66,26 @@ import {
   successResponse,
   WaitlistService,
   withErrorHandling,
-} from '@babylon/api';
-import { logger } from '@babylon/shared';
+} from '@feed/api';
+import { logger } from '@feed/shared';
 import type { NextRequest } from 'next/server';
 import { z } from 'zod';
 
 const MarkSchema = z.object({
-  referralCode: z.string().optional(),
+  referralCode: z
+    .string()
+    .trim()
+    .max(64)
+    .optional()
+    .transform((value) => value || undefined),
 });
 
 export const POST = withErrorHandling(async (request: NextRequest) => {
   // Authenticate user - use authenticated user's ID, not from request body
   const authUser = await authenticate(request);
+
+  // Validate input before creating any user record.
+  const { referralCode } = MarkSchema.parse(await request.json());
 
   // Ensure user exists in database (create if needed)
   const { user: dbUser } = await ensureUserForAuth(authUser, {
@@ -85,9 +93,6 @@ export const POST = withErrorHandling(async (request: NextRequest) => {
       ? `${authUser.walletAddress.slice(0, 6)}...${authUser.walletAddress.slice(-4)}`
       : 'User',
   });
-
-  const body = (await request.json()) as { referralCode?: string };
-  const { referralCode } = MarkSchema.parse(body);
 
   logger.info(
     'Waitlist mark request',

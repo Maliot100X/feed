@@ -1,14 +1,8 @@
 'use client';
 
-import { cn, logger } from '@babylon/shared';
+import { cn, logger } from '@feed/shared';
 
-import {
-  AlertCircle,
-  CheckCircle2,
-  CreditCard,
-  DollarSign,
-  X,
-} from 'lucide-react';
+import { AlertCircle, CreditCard, DollarSign, X } from 'lucide-react';
 import { useEffect, useRef, useState } from 'react';
 import { toast } from 'sonner';
 import { Skeleton } from '@/components/shared/Skeleton';
@@ -24,7 +18,6 @@ import { isStripeEnabled } from '@/lib/stripe';
 interface BuyPointsModalProps {
   isOpen: boolean;
   onClose: () => void;
-  onSuccess?: () => void;
 }
 
 type PaymentStep = 'input' | 'redirecting' | 'error';
@@ -41,13 +34,8 @@ function isAbortLikeError(error: unknown): error is Error {
   );
 }
 
-export function BuyPointsModal({
-  isOpen,
-  onClose,
-  onSuccess: _onSuccess,
-}: BuyPointsModalProps) {
-  const { user } = useAuth();
-  const { getAccessToken } = useAuth();
+export function BuyPointsModal({ isOpen, onClose }: BuyPointsModalProps) {
+  const { user, getAccessToken } = useAuth();
 
   const [amountUSD, setAmountUSD] = useState('10');
   const [step, setStep] = useState<PaymentStep>('input');
@@ -224,8 +212,11 @@ export function BuyPointsModal({
                     pattern="[0-9]*"
                     value={amountUSD}
                     onChange={(e) => {
-                      const sanitized = e.target.value.replace(/[^0-9]/g, '');
-                      const noLeadingZeros = sanitized.replace(/^0+/, '') || '';
+                      // Whole dollars only: reject (don't strip) other
+                      // characters, so a pasted "1.50" can never become $150.
+                      if (!/^\d*$/.test(e.target.value)) return;
+                      const noLeadingZeros =
+                        e.target.value.replace(/^0+/, '') || '';
                       const num = parseInt(noLeadingZeros, 10);
                       if (noLeadingZeros === '' || isNaN(num)) {
                         setAmountUSD('');
@@ -300,7 +291,7 @@ export function BuyPointsModal({
               <div className="space-y-2 text-muted-foreground text-xs">
                 <div>
                   <p>Trading balance is non-transferable.</p>
-                  <p>Balance units can be used for trading on Babylon.</p>
+                  <p>Balance units can be used for trading on Feed.</p>
                 </div>
                 <p className="flex items-start gap-2">
                   <CreditCard className="mt-0.5 h-3.5 w-3.5 shrink-0" />
@@ -397,9 +388,6 @@ export function BuyPointsModal({
         );
     }
   };
-
-  // Keep CheckCircle2 import used — for future success state if Stripe return URL flow is added
-  void CheckCircle2;
 
   return (
     <div

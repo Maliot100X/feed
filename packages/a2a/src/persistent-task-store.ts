@@ -1,45 +1,48 @@
 /**
  * Persistent Task Store
  *
- * Extends the ExtendedTaskStore to add Redis-backed persistence for tasks.
- * This ensures tasks survive server restarts and work across multiple
- * serverless instances (e.g., Vercel functions).
+ * Extends ExtendedTaskStore with Redis-backed persistence so tasks survive
+ * restarts and are visible across instances (e.g. Cloudflare Worker isolates).
  *
- * Uses Redis for storage with an in-memory fallback when Redis is unavailable.
+ * - Writes go to the local store and, when Redis is available, to Redis.
+ * - Reads prefer Redis when available (another instance may have updated the
+ *   task); the local store is used when Redis is unavailable or the task was
+ *   only saved locally.
+ * - Individual and batch reads share one parser/validator.
  *
  * @public
  */
 
 import type { Task } from '@a2a-js/sdk';
-import {
-  getCache,
-  getRedisClient,
-  isRedisAvailable,
-  setCache,
-} from '@babylon/api';
-import { logger } from '@babylon/shared';
+import { getRedisClient, isRedisAvailable } from '@feed/api';
+import { logger } from '@feed/shared';
 import { z } from 'zod';
 import {
   ExtendedTaskStore,
   type ListTasksParams,
   type ListTasksResult,
+  projectTask,
+  resolvePage,
+  taskTimestamp,
 } from './extended-task-store';
+
+const TASK_STATES = [
+  'submitted',
+  'working',
+  'input-required',
+  'completed',
+  'canceled',
+  'failed',
+  'rejected',
+  'auth-required',
+  'unknown',
+] as const;
 
 /**
  * Zod schema for TaskStatus validation
  */
 const TaskStatusSchema = z.object({
-  state: z.enum([
-    'submitted',
-    'working',
-    'input-required',
-    'completed',
-    'canceled',
-    'failed',
-    'rejected',
-    'auth-required',
-    'unknown',
-  ]),
+  state: z.enum(TASK_STATES),
   timestamp: z.string().optional(),
   message: z.record(z.string(), z.unknown()).optional(),
 });
@@ -58,16 +61,43 @@ const TaskSchema = z.object({
   metadata: z.record(z.string(), z.unknown()).optional(),
 });
 
-/**
- * Type guard to validate if an object is a valid Task
- */
 function isValidTask(obj: unknown): obj is Task {
-  const result = TaskSchema.safeParse(obj);
-  return result.success;
+  return TaskSchema.safeParse(obj).success;
 }
 
 /**
- * Status update for atomic task status changes
+ * Parse a stored task. Accepts the current single-encoded JSON and the legacy
+ * double-encoded form (a JSON string containing JSON) written by earlier
+ * versions via setCache. Returns undefined for corrupt or invalid entries.
+ */
+export function parseStoredTask(raw: string, taskId: string): Task | undefined {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+    if (typeof parsed === 'string') {
+      parsed = JSON.parse(parsed);
+    }
+  } catch (error) {
+    logger.warn(
+      'Failed to parse task from Redis, treating as cache miss',
+      { taskId, error: String(error) },
+      'A2A'
+    );
+    return undefined;
+  }
+  if (!isValidTask(parsed)) {
+    logger.warn(
+      'Invalid task structure in Redis, treating as cache miss',
+      { taskId },
+      'A2A'
+    );
+    return undefined;
+  }
+  return parsed;
+}
+
+/**
+ * Status update for task status changes
  */
 export interface TaskStatusUpdate {
   state: Task['status']['state'];
@@ -78,26 +108,34 @@ export interface TaskStatusUpdate {
 const TASK_CACHE_NAMESPACE = 'a2a:tasks';
 const TASK_INDEX_NAMESPACE = 'a2a:task-index';
 
-// Environment-configurable constants with sensible defaults (12-Factor App pattern)
+// Environment-configurable constants with sensible defaults
 const DEFAULT_TTL_SECONDS =
   Number(process.env.A2A_TASK_TTL_SECONDS) || 7 * 24 * 60 * 60; // 7 days
-const MAX_INDEX_SIZE = Number(process.env.A2A_MAX_INDEX_SIZE) || 1000; // Maximum entries per index
+const MAX_INDEX_SIZE = Number(process.env.A2A_MAX_INDEX_SIZE) || 1000;
 const CLEANUP_INTERVAL_MS =
   Number(process.env.A2A_CLEANUP_INTERVAL_MS) || 60 * 60 * 1000; // 1 hour
 
+function taskKey(taskId: string): string {
+  return `${TASK_CACHE_NAMESPACE}:task:${taskId}`;
+}
+
+function contextIndexKey(contextId: string): string {
+  return `${TASK_INDEX_NAMESPACE}:context:${contextId}`;
+}
+
+function statusIndexKey(status: string): string {
+  return `${TASK_INDEX_NAMESPACE}:status:${status}`;
+}
+
 /**
  * Persistent task store with Redis backing
- *
- * Provides task storage and retrieval with Redis persistence and
- * automatic fallback to in-memory storage when Redis is unavailable.
  */
 export class PersistentTaskStore extends ExtendedTaskStore {
-  private memoryFallback: Map<string, Task> = new Map();
   private lastCleanup = Date.now();
 
   /**
-   * Periodically clean up old entries from memoryFallback to prevent memory leaks.
-   * Only runs if CLEANUP_INTERVAL_MS has passed since last cleanup.
+   * Periodically evict local entries older than the persistence TTL so the
+   * local store cannot grow without bound or serve tasks Redis has expired.
    */
   private maybeCleanupMemory(): void {
     const now = Date.now();
@@ -107,69 +145,85 @@ export class PersistentTaskStore extends ExtendedTaskStore {
     this.lastCleanup = now;
 
     const cutoff = now - DEFAULT_TTL_SECONDS * 1000;
-    for (const [taskId, task] of this.memoryFallback.entries()) {
-      const taskTime = task.status.timestamp
-        ? new Date(task.status.timestamp).getTime()
-        : 0;
-      if (taskTime < cutoff || !Number.isFinite(taskTime)) {
-        this.memoryFallback.delete(taskId);
+    for (const [taskId, task] of this.tasks.entries()) {
+      if (taskTimestamp(task) < cutoff) {
+        this.tasks.delete(taskId);
       }
     }
   }
 
+  private redis() {
+    return isRedisAvailable() ? getRedisClient() : null;
+  }
+
   /**
-   * Save task to both in-memory and Redis
+   * Save task locally and, when available, to Redis with its indexes.
    */
   async save(task: Task): Promise<void> {
-    // Periodically clean up old entries
     this.maybeCleanupMemory();
-
-    // Always save to parent (in-memory)
     await super.save(task);
 
-    // Also save to memory fallback for quick access
-    this.memoryFallback.set(task.id, task);
+    const client = this.redis();
+    if (!client) return;
 
-    // Persist to Redis if available
-    if (await isRedisAvailable()) {
-      try {
-        const taskKey = `task:${task.id}`;
-        const serialized = JSON.stringify(task);
+    const contextId = task.contextId || 'global';
+    const timestamp = taskTimestamp(task) || Date.now();
+    const contextKey = contextIndexKey(contextId);
+    const statusKey = statusIndexKey(task.status.state);
 
-        await setCache(taskKey, serialized, {
-          namespace: TASK_CACHE_NAMESPACE,
-          ttl: DEFAULT_TTL_SECONDS,
-        });
-
-        // Update indexes for efficient querying
-        await this.updateIndexes(task);
-      } catch (error) {
+    try {
+      const multi = client.multi();
+      multi.set(
+        taskKey(task.id),
+        JSON.stringify(task),
+        'EX',
+        DEFAULT_TTL_SECONDS
+      );
+      multi.zadd(contextKey, timestamp, task.id);
+      multi.zremrangebyrank(contextKey, 0, -(MAX_INDEX_SIZE + 1));
+      multi.expire(contextKey, DEFAULT_TTL_SECONDS);
+      // A task belongs to exactly one status index.
+      for (const state of TASK_STATES) {
+        if (state !== task.status.state) {
+          multi.zrem(statusIndexKey(state), task.id);
+        }
+      }
+      multi.zadd(statusKey, timestamp, task.id);
+      multi.zremrangebyrank(statusKey, 0, -(MAX_INDEX_SIZE + 1));
+      multi.expire(statusKey, DEFAULT_TTL_SECONDS);
+      const results = await multi.exec();
+      const failed =
+        results === null || results.some(([cmdErr]) => cmdErr !== null);
+      if (failed) {
         logger.warn(
-          'Failed to persist task to Redis, using memory only',
-          { taskId: task.id, error: String(error) },
+          'Failed to persist task to Redis, task is held locally only',
+          { taskId: task.id },
           'A2A'
         );
       }
+    } catch (error) {
+      logger.warn(
+        'Failed to persist task to Redis, task is held locally only',
+        { taskId: task.id, error: String(error) },
+        'A2A'
+      );
     }
   }
 
   /**
-   * Atomically update task status without load-modify-save race conditions.
-   * Only updates the status field while preserving all other task properties.
+   * Update a task's status, preserving other task fields.
    *
-   * @param taskId - The ID of the task to update
-   * @param statusUpdate - The status fields to update
-   * @returns The updated task, or undefined if task not found
+   * This is a load-modify-save and is NOT atomic across concurrent writers:
+   * a concurrent save of the same task can overwrite (or be overwritten by)
+   * this update.
    */
   async updateStatus(
     taskId: string,
     statusUpdate: TaskStatusUpdate
   ): Promise<Task | undefined> {
-    // Load the current task
     const task = await this.load(taskId);
     if (!task) return undefined;
 
-    // Create updated task with new status (atomic merge)
     const updatedTask: Task = {
       ...task,
       status: {
@@ -182,357 +236,122 @@ export class PersistentTaskStore extends ExtendedTaskStore {
       },
     };
 
-    // Save atomically
     await this.save(updatedTask);
-
     return updatedTask;
   }
 
   /**
-   * Load task from memory first, then Redis
+   * Load a task, preferring Redis when it is available.
    */
   async load(taskId: string): Promise<Task | undefined> {
-    // Periodically clean up old entries
     this.maybeCleanupMemory();
 
-    // Check in-memory first (from parent)
-    let task = await super.load(taskId);
-    if (task) return task;
-
-    // Check memory fallback
-    task = this.memoryFallback.get(taskId);
-    if (task) return task;
-
-    // Try Redis
-    if (await isRedisAvailable()) {
+    const client = this.redis();
+    if (client) {
       try {
-        const taskKey = `task:${taskId}`;
-        const cached = await getCache<string>(taskKey, {
-          namespace: TASK_CACHE_NAMESPACE,
-        });
-
-        if (cached) {
-          try {
-            const parsed = JSON.parse(cached);
-            // Validate the parsed object against full Task schema using Zod
-            if (isValidTask(parsed)) {
-              task = parsed;
-              // Restore to memory for fast subsequent access
-              await super.save(task);
-              this.memoryFallback.set(taskId, task);
-              return task;
-            }
-            // Invalid task structure - treat as cache miss
-            logger.warn(
-              'Invalid task structure in Redis cache, treating as cache miss',
-              {
-                taskId,
-                validationErrors: TaskSchema.safeParse(parsed).error?.issues,
-              },
-              'A2A'
-            );
-          } catch (parseError) {
-            // Corrupted cache entry - treat as cache miss
-            logger.warn(
-              'Failed to parse task from Redis cache, treating as cache miss',
-              { taskId, error: String(parseError) },
-              'A2A'
-            );
-          }
+        const raw = await client.get(taskKey(taskId));
+        const task = raw ? parseStoredTask(raw, taskId) : undefined;
+        if (task) {
+          await super.save(task);
+          return task;
         }
       } catch (error) {
         logger.warn(
-          'Failed to load task from Redis',
+          'Failed to load task from Redis, using local store',
           { taskId, error: String(error) },
           'A2A'
         );
       }
     }
 
-    return undefined;
+    return super.load(taskId);
   }
 
   /**
-   * Load multiple tasks in batch using Redis mget for efficiency
-   * Uses parallel loading for memory checks and single mget for Redis
+   * Load multiple tasks: Redis (single MGET) when available, local store for
+   * anything Redis does not have.
    */
   private async loadBatch(taskIds: string[]): Promise<Map<string, Task>> {
     const results = new Map<string, Task>();
     if (taskIds.length === 0) return results;
 
-    // First check memory in parallel
-    const memoryCheckPromises = taskIds.map(async (taskId) => {
-      // Check in-memory first (from parent)
-      const memTask = await super.load(taskId);
-      if (memTask) return { taskId, task: memTask };
-
-      // Check memory fallback
-      const fallbackTask = this.memoryFallback.get(taskId);
-      if (fallbackTask) return { taskId, task: fallbackTask };
-
-      return { taskId, task: null };
-    });
-
-    const memoryResults = await Promise.all(memoryCheckPromises);
-
-    // Collect results and identify missing IDs
-    const missingIds: string[] = [];
-    for (const { taskId, task } of memoryResults) {
-      if (task) {
-        results.set(taskId, task);
-      } else {
-        missingIds.push(taskId);
-      }
-    }
-
-    // Batch fetch remaining from Redis using mget
-    if (missingIds.length > 0 && (await isRedisAvailable())) {
-      const client = getRedisClient();
-      if (client) {
-        try {
-          const keys = missingIds.map(
-            (id) => `${TASK_CACHE_NAMESPACE}:task:${id}`
-          );
-          const values = await client.mget(...keys);
-
-          // Collect save promises for parallel execution
-          const savePromises: Promise<void>[] = [];
-
-          for (let i = 0; i < missingIds.length; i++) {
-            const taskId = missingIds[i];
-            const cached = values[i];
-            if (taskId && cached) {
-              try {
-                const parsed = JSON.parse(cached);
-                // Validate the parsed object has required Task properties
-                if (
-                  parsed &&
-                  typeof parsed === 'object' &&
-                  typeof parsed.id === 'string' &&
-                  parsed.status &&
-                  typeof parsed.status === 'object' &&
-                  typeof parsed.status.state === 'string'
-                ) {
-                  const task = parsed as Task;
-                  results.set(taskId, task);
-                  // Collect save promise without awaiting (parallel execution)
-                  savePromises.push(super.save(task));
-                  // Set memory fallback synchronously
-                  this.memoryFallback.set(taskId, task);
-                }
-              } catch {
-                // Skip invalid entries
-                logger.debug(
-                  'Failed to parse task in batch load',
-                  { taskId },
-                  'A2A'
-                );
-              }
-            }
-          }
-
-          // Await all saves in parallel (use allSettled for isolation)
-          await Promise.allSettled(savePromises);
-        } catch (error) {
-          logger.warn(
-            'Failed to batch load tasks from Redis, falling back to parallel individual loads',
-            { error: String(error) },
-            'A2A'
-          );
-          // Fallback to parallel individual loads for remaining using Promise.allSettled
-          const fallbackPromises = missingIds
-            .filter((id) => !results.has(id))
-            .map(async (taskId) => {
-              const task = await this.load(taskId);
-              return { taskId, task };
-            });
-
-          const fallbackResults = await Promise.allSettled(fallbackPromises);
-          for (const result of fallbackResults) {
-            if (result.status === 'fulfilled' && result.value.task) {
-              results.set(result.value.taskId, result.value.task);
-            }
-          }
-        }
-      }
-    }
-
-    return results;
-  }
-
-  /**
-   * Merge two ListTasksResult sets, deduplicating by task id
-   */
-  private mergeListResults(
-    redisResult: ListTasksResult,
-    memoryResult: ListTasksResult
-  ): ListTasksResult {
-    // Create a map to deduplicate by task id, preferring Redis (more persistent)
-    const taskMap = new Map<string, Task>();
-
-    // Add memory tasks first (will be overwritten by Redis if duplicate)
-    for (const task of memoryResult.tasks) {
-      taskMap.set(task.id, task);
-    }
-
-    // Add/overwrite with Redis tasks
-    for (const task of redisResult.tasks) {
-      taskMap.set(task.id, task);
-    }
-
-    // Convert back to array and sort by timestamp (most recent first)
-    const mergedTasks = Array.from(taskMap.values()).sort((a, b) => {
-      const aTime = a.status.timestamp
-        ? new Date(a.status.timestamp).getTime()
-        : 0;
-      const bTime = b.status.timestamp
-        ? new Date(b.status.timestamp).getTime()
-        : 0;
-      return bTime - aTime;
-    });
-
-    // Use the larger pageSize and combine totals (deduplicated)
-    const pageSize = Math.max(redisResult.pageSize, memoryResult.pageSize);
-    const paginatedTasks = mergedTasks.slice(0, pageSize);
-    const hasMore = mergedTasks.length > pageSize;
-
-    return {
-      tasks: paginatedTasks,
-      totalSize: taskMap.size,
-      pageSize,
-      // Compute nextPageToken based on merged results, not source offsets
-      nextPageToken: hasMore ? String(pageSize) : '',
-    };
-  }
-
-  /**
-   * List tasks with optional Redis-backed querying
-   */
-  async list(params: ListTasksParams = {}): Promise<ListTasksResult> {
-    // If Redis is available and we have a contextId filter, try Redis first
-    if ((await isRedisAvailable()) && params.contextId) {
+    const client = this.redis();
+    if (client) {
       try {
-        const redisResult = await this.listFromRedis(params);
-
-        // If Redis returned empty results, try merging with in-memory
-        if (redisResult.tasks.length === 0) {
-          const memoryResult = await super.list(params);
-          if (memoryResult.tasks.length > 0) {
-            return this.mergeListResults(redisResult, memoryResult);
+        const values = await client.mget(...taskIds.map(taskKey));
+        for (const [index, taskId] of taskIds.entries()) {
+          const raw = values[index];
+          const task = raw ? parseStoredTask(raw, taskId) : undefined;
+          if (task) {
+            results.set(taskId, task);
+            await super.save(task);
           }
         }
-
-        return redisResult;
       } catch (error) {
         logger.warn(
-          'Failed to list tasks from Redis, falling back to memory',
+          'Failed to batch load tasks from Redis, using local store',
           { error: String(error) },
           'A2A'
         );
       }
     }
 
-    // Fall back to parent implementation (in-memory)
+    for (const taskId of taskIds) {
+      if (!results.has(taskId)) {
+        const local = await super.load(taskId);
+        if (local) results.set(taskId, local);
+      }
+    }
+    return results;
+  }
+
+  /**
+   * List tasks. With a contextId and Redis available, the Redis indexes are
+   * authoritative; otherwise (or if Redis has nothing for the context) the
+   * local store is listed.
+   */
+  async list(params: ListTasksParams = {}): Promise<ListTasksResult> {
+    // Validate pagination up front so invalid input is never mistaken for a
+    // Redis failure below.
+    resolvePage(params);
+
+    if (params.contextId && this.redis()) {
+      try {
+        const redisResult = await this.listFromRedis(params);
+        if (redisResult.totalSize > 0) {
+          return redisResult;
+        }
+      } catch (error) {
+        logger.warn(
+          'Failed to list tasks from Redis, falling back to local store',
+          { error: String(error) },
+          'A2A'
+        );
+      }
+    }
+
     return super.list(params);
   }
 
   /**
-   * Update Redis indexes for efficient querying using atomic sorted set operations
+   * Read an index (newest first).
    */
-  private async updateIndexes(task: Task): Promise<void> {
-    const client = getRedisClient();
-    if (!client) return;
-
-    const contextId = task.contextId || 'global';
-    const status = task.status.state;
-    // Parse timestamp with fallback to Date.now() if invalid/NaN
-    let timestamp = Date.now();
-    if (task.status.timestamp) {
-      const parsed = new Date(task.status.timestamp).getTime();
-      if (Number.isFinite(parsed)) {
-        timestamp = parsed;
-      }
-    }
-
-    const contextIndexKey = `${TASK_INDEX_NAMESPACE}:context:${contextId}`;
-    const statusIndexKey = `${TASK_INDEX_NAMESPACE}:status:${status}`;
-
-    try {
-      // Check current cardinality to avoid unnecessary trimming operations
-      const [contextCardinality, statusCardinality] = await Promise.all([
-        client.zcard(contextIndexKey),
-        client.zcard(statusIndexKey),
-      ]);
-
-      // Use Redis MULTI/EXEC for atomic operations on both indexes
-      const pipeline = client.multi();
-
-      // Add/update task in context index (sorted set with timestamp as score)
-      // ZADD with score=timestamp atomically adds or updates the entry
-      pipeline.zadd(contextIndexKey, timestamp, task.id);
-      // Only trim if index exceeds MAX_INDEX_SIZE to avoid unnecessary operations
-      if (contextCardinality >= MAX_INDEX_SIZE) {
-        // ZREMRANGEBYRANK 0 -(MAX_INDEX_SIZE+1) removes all but the top MAX_INDEX_SIZE entries
-        pipeline.zremrangebyrank(contextIndexKey, 0, -(MAX_INDEX_SIZE + 1));
-      }
-      // Set TTL on the index key
-      pipeline.expire(contextIndexKey, DEFAULT_TTL_SECONDS);
-
-      // Add/update task in status index
-      pipeline.zadd(statusIndexKey, timestamp, task.id);
-      // Only trim if index exceeds MAX_INDEX_SIZE
-      if (statusCardinality >= MAX_INDEX_SIZE) {
-        pipeline.zremrangebyrank(statusIndexKey, 0, -(MAX_INDEX_SIZE + 1));
-      }
-      pipeline.expire(statusIndexKey, DEFAULT_TTL_SECONDS);
-
-      // Execute all commands atomically
-      await pipeline.exec();
-    } catch (error) {
-      logger.debug(
-        'Failed to update indexes atomically in Redis',
-        { taskId: task.id, error: String(error) },
-        'A2A'
-      );
-    }
-  }
-
-  /**
-   * Get an index from Redis sorted set
-   * Returns entries sorted by timestamp descending (newest first)
-   */
-  private async getIndexFromSortedSet(
+  private async readIndex(
     indexKey: string
   ): Promise<Array<{ taskId: string; timestamp: number }>> {
-    const client = getRedisClient();
+    const client = this.redis();
     if (!client) return [];
 
-    try {
-      // ZREVRANGE returns members sorted by score descending (newest first)
-      // with WITHSCORES to get the timestamps
-      const results = await client.zrevrange(indexKey, 0, -1, 'WITHSCORES');
-
-      // Results come as [member1, score1, member2, score2, ...]
-      const entries: Array<{ taskId: string; timestamp: number }> = [];
-      for (let i = 0; i < results.length; i += 2) {
-        const taskId = results[i];
-        const score = results[i + 1];
-        if (taskId && score) {
-          entries.push({
-            taskId,
-            timestamp: Number.parseFloat(score),
-          });
-        }
+    const results = await client.zrevrange(indexKey, 0, -1, 'WITHSCORES');
+    const entries: Array<{ taskId: string; timestamp: number }> = [];
+    for (let i = 0; i < results.length; i += 2) {
+      const taskId = results[i];
+      const score = results[i + 1];
+      if (taskId && score) {
+        entries.push({ taskId, timestamp: Number.parseFloat(score) });
       }
-      return entries;
-    } catch {
-      logger.debug(
-        'Failed to get index from Redis sorted set',
-        { indexKey },
-        'A2A'
-      );
     }
-    return [];
+    return entries;
   }
 
   /**
@@ -541,89 +360,41 @@ export class PersistentTaskStore extends ExtendedTaskStore {
   private async listFromRedis(
     params: ListTasksParams
   ): Promise<ListTasksResult> {
-    const contextId = params.contextId || 'global';
-    const contextIndexKey = `${TASK_INDEX_NAMESPACE}:context:${contextId}`;
-
-    // Get task IDs from context index (sorted set)
-    let taskEntries = await this.getIndexFromSortedSet(contextIndexKey);
-
-    // Filter by status if specified
-    if (params.status) {
-      const statusIndexKey = `${TASK_INDEX_NAMESPACE}:status:${params.status}`;
-      const statusIndex = await this.getIndexFromSortedSet(statusIndexKey);
-      const statusTaskIds = new Set(statusIndex.map((e) => e.taskId));
-      taskEntries = taskEntries.filter((e) => statusTaskIds.has(e.taskId));
-    }
-
-    // Filter by lastUpdatedAfter
-    if (params.lastUpdatedAfter) {
-      taskEntries = taskEntries.filter(
-        (e) => e.timestamp >= params.lastUpdatedAfter!
-      );
-    }
-
-    // Pagination with validated pageToken
-    const pageSize = Math.min(params.pageSize || 10, 100);
-    let pageOffset = 0;
-
-    if (params.pageToken) {
-      const parsed = Number.parseInt(params.pageToken, 10);
-      if (!Number.isFinite(parsed) || parsed < 0) {
-        throw new Error(
-          `Invalid pageToken: expected non-negative integer, got "${params.pageToken}"`
-        );
-      }
-      pageOffset = parsed;
-    }
-
-    const totalSize = taskEntries.length;
-    const paginatedEntries = taskEntries.slice(
-      pageOffset,
-      pageOffset + pageSize
+    const { offset, pageSize } = resolvePage(params);
+    let entries = await this.readIndex(
+      contextIndexKey(params.contextId || 'global')
     );
 
-    // Load tasks in batch to avoid N+1 queries
-    const taskIds = paginatedEntries.map((e) => e.taskId);
-    const loadedTasks = await this.loadBatch(taskIds);
-
-    // Process loaded tasks
-    const tasks: Task[] = [];
-    for (const taskId of taskIds) {
-      const task = loadedTasks.get(taskId);
-      if (task) {
-        // Process task (trim history, remove artifacts if needed)
-        const processed = { ...task };
-
-        if (params.historyLength !== undefined && processed.history) {
-          processed.history = processed.history.slice(-params.historyLength);
-        }
-
-        if (params.includeArtifacts === false) {
-          delete processed.artifacts;
-        }
-
-        tasks.push(processed);
-      }
+    if (params.status) {
+      const statusIds = new Set(
+        (await this.readIndex(statusIndexKey(params.status))).map(
+          (e) => e.taskId
+        )
+      );
+      entries = entries.filter((e) => statusIds.has(e.taskId));
     }
 
-    // Calculate next page token
-    const hasMore = totalSize > pageOffset + pageSize;
-    const nextPageToken = hasMore ? String(pageOffset + pageSize) : '';
+    if (params.lastUpdatedAfter !== undefined) {
+      entries = entries.filter((e) => e.timestamp >= params.lastUpdatedAfter!);
+    }
 
+    const pageIds = entries
+      .slice(offset, offset + pageSize)
+      .map((e) => e.taskId);
+    const loaded = await this.loadBatch(pageIds);
+
+    const tasks: Task[] = [];
+    for (const taskId of pageIds) {
+      const task = loaded.get(taskId);
+      if (task) tasks.push(projectTask(task, params));
+    }
+
+    const end = offset + pageSize;
     return {
       tasks,
-      totalSize,
+      totalSize: entries.length,
       pageSize,
-      nextPageToken,
+      nextPageToken: entries.length > end ? String(end) : '',
     };
-  }
-
-  /**
-   * Clear all tasks (for testing)
-   */
-  async clear(): Promise<void> {
-    await super.clear();
-    this.memoryFallback.clear();
-    // Note: Redis indexes will expire naturally with TTL
   }
 }

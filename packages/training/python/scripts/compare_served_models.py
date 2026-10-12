@@ -504,7 +504,7 @@ def start_tinker_proxy(
 ) -> subprocess.Popen[str]:
     command = [
         sys.executable,
-        str(Path(__file__).with_name("tinker_openai_proxy.py")),
+        str(Path(__file__).parent / "tools" / "tinker_openai_proxy.py"),
         "--model-ref",
         model_ref,
         "--host",

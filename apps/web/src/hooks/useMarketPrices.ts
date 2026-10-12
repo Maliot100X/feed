@@ -14,25 +14,21 @@ export interface LivePrice {
   changePercent?: number;
 }
 
-const normalizeTicker = (ticker?: string | null) =>
-  ticker ? ticker.toUpperCase() : null;
+const normalizeTicker = (ticker: unknown): string | null =>
+  typeof ticker === 'string' && ticker.length > 0 ? ticker.toUpperCase() : null;
 
+/**
+ * Only the authoritative ticker (top-level, or `metadata.ticker` on org
+ * price updates) identifies a market; organization IDs are not tickers.
+ */
 const deriveTicker = (update: Record<string, unknown>): string | null => {
-  const direct = normalizeTicker(update.ticker as string | undefined);
+  const direct = normalizeTicker(update.ticker);
   if (direct) return direct;
 
   if (update.metadata && typeof update.metadata === 'object') {
-    const metaTicker = normalizeTicker(
-      (update.metadata as Record<string, unknown>).ticker as string | undefined
-    );
-    if (metaTicker) return metaTicker;
+    return normalizeTicker((update.metadata as Record<string, unknown>).ticker);
   }
-
-  const organizationId =
-    typeof update.organizationId === 'string'
-      ? update.organizationId
-      : undefined;
-  return organizationId ? organizationId.toUpperCase().replace(/-/g, '') : null;
+  return null;
 };
 
 const derivePrice = (update: Record<string, unknown>): number | null => {
@@ -112,5 +108,14 @@ export function useMarketPrices(targetTickers: string[]) {
     });
   });
 
-  return prices;
+  // Drop prices for tickers that are no longer targeted.
+  return useMemo(() => {
+    if (normalizedTargets.length === 0) return prices;
+    const visible = new Map<string, LivePrice>();
+    for (const ticker of normalizedTargets) {
+      const price = prices.get(ticker);
+      if (price) visible.set(ticker, price);
+    }
+    return visible;
+  }, [prices, normalizedTargets]);
 }

@@ -4,8 +4,6 @@
  * Returns recent posts for a user (self or another user by ID).
  */
 
-import { db, desc, eq, posts, users } from '@babylon/db';
-import { getTimeAgo } from '@babylon/shared';
 import type {
   Action,
   ActionResult,
@@ -14,6 +12,8 @@ import type {
   Memory,
   State,
 } from '@elizaos/core';
+import { db, desc, eq, posts, users } from '@feed/db';
+import { getTimeAgo } from '@feed/shared';
 import { logger } from '../../../../shared/logger';
 
 export const checkRecentPostsAction: Action = {

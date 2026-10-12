@@ -163,7 +163,7 @@ export function useSignupTracking() {
   );
 
   const trackSocialConnect = useCallback(
-    (platform: 'farcaster' | 'twitter', username: string) => {
+    (platform: 'twitter', username: string) => {
       track('social_connect', {
         platform,
         username,

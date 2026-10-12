@@ -4,16 +4,14 @@
  * Wraps actions with trajectory logging
  */
 
-import type { JsonValue } from '@babylon/shared';
 import type {
   Action,
-  HandlerCallback,
-  HandlerOptions,
   IAgentRuntime,
   Memory,
   Plugin,
   State,
 } from '@elizaos/core';
+import type { JsonValue } from '@feed/shared';
 import { logger } from '../../../shared/logger';
 
 interface RuntimeEnvironmentState {
@@ -31,6 +29,7 @@ interface RuntimeEnvironmentState {
 }
 
 interface RuntimeLLMCall {
+  metadata?: Record<string, JsonValue>;
   model: string;
   modelVersion?: string;
   systemPrompt: string;
@@ -190,94 +189,65 @@ export function wrapActionWithLogging(
   _trajectoryLogger: RuntimeTrajectoryLogger
 ): Action {
   const originalHandler = action.handler;
-
   return {
     ...action,
-    handler: (async (
-      runtime: IAgentRuntime,
-      message: Memory,
-      state?: State,
-      options?: HandlerOptions,
-      callback?: HandlerCallback
-    ): Promise<void> => {
+    handler: async (runtime, message, state, options, callback, responses) => {
       const activeStep = await ensureTrajectoryStep(runtime);
-      if (!activeStep) {
-        // No trajectory context - execute without logging
-        if (originalHandler) {
-          await originalHandler(runtime, message, state, options, callback);
+      let result: Awaited<ReturnType<Action['handler']>>;
+      try {
+        if (typeof originalHandler !== 'function')
+          throw new Error(`Action ${action.name} has no handler`);
+        result = await originalHandler(
+          runtime,
+          message,
+          state,
+          options,
+          callback,
+          responses
+        );
+        if (!result || typeof result.success !== 'boolean')
+          throw new Error(`Action ${action.name} returned no explicit outcome`);
+      } catch (error) {
+        if (activeStep) {
+          const detail = error instanceof Error ? error.message : String(error);
+          activeStep.logger.completeStep(
+            activeStep.trajectoryId,
+            activeStep.stepId,
+            {
+              actionType: action.name,
+              actionName: action.name,
+              parameters: { message: message.content.text ?? '' },
+              success: false,
+              error: detail,
+              result: { error: detail },
+            },
+            { reward: -0.1 }
+          );
         }
-        return;
+        throw error;
       }
-
-      const { trajectoryId, logger: loggerService, stepId } = activeStep;
-
-      // Handle success case
-      const successHandler = (): void => {
-        loggerService.completeStep(
-          trajectoryId,
-          stepId,
+      if (activeStep) {
+        const error =
+          result.error instanceof Error ? result.error.message : result.error;
+        activeStep.logger.completeStep(
+          activeStep.trajectoryId,
+          activeStep.stepId,
           {
             actionType: action.name,
             actionName: action.name,
             parameters: {
-              message: message.content.text || '',
-              state: state ? JSON.parse(JSON.stringify(state)) : undefined,
+              message: message.content.text ?? '',
+              options: options ? JSON.parse(JSON.stringify(options)) : {},
             },
-            success: true,
-            result: { executed: true },
-            reasoning: `Action ${action.name} executed via ${action.description || 'handler'}`,
+            success: result.success,
+            result: JSON.parse(JSON.stringify({ ...result, error })),
+            ...(error ? { error } : {}),
           },
-          {
-            reward: 0.1, // Small reward for successful execution
-          }
+          { reward: result.success ? 0.1 : -0.1 }
         );
-      };
-
-      // Handle error case
-      const errorHandler = (err: unknown): never => {
-        const error = err instanceof Error ? err.message : String(err);
-        logger.error(
-          'Action execution failed',
-          {
-            action: action.name,
-            trajectoryId,
-            error,
-          },
-          'ActionInterceptor'
-        );
-
-        loggerService.completeStep(
-          trajectoryId,
-          stepId,
-          {
-            actionType: action.name,
-            actionName: action.name,
-            parameters: {
-              message: message.content.text || '',
-              state: state ? JSON.parse(JSON.stringify(state)) : undefined,
-            },
-            success: false,
-            result: { error },
-            reasoning: `Action ${action.name} failed: ${error}`,
-          },
-          {
-            reward: -0.1, // Negative reward for failed execution
-          }
-        );
-
-        throw err;
-      };
-
-      // Execute action and handle both success and error cases
-      if (originalHandler) {
-        await originalHandler(runtime, message, state, options, callback).then(
-          successHandler,
-          errorHandler
-        );
-      } else {
-        successHandler();
       }
-    }) as unknown as Action['handler'],
+      return result;
+    },
   };
 }
 

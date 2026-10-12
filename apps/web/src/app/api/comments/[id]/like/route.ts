@@ -116,9 +116,9 @@ import {
   RATE_LIMIT_CONFIGS,
   successResponse,
   withErrorHandling,
-} from '@babylon/api';
-import { and, comments, count, db, eq, reactions } from '@babylon/db';
-import { generateSnowflakeId, IdParamSchema, logger } from '@babylon/shared';
+} from '@feed/api';
+import { and, comments, count, db, eq, reactions } from '@feed/db';
+import { generateSnowflakeId, IdParamSchema, logger } from '@feed/shared';
 import type { NextRequest } from 'next/server';
 
 /**
@@ -141,7 +141,7 @@ export const POST = withErrorHandling(
     const { id: commentId } = IdParamSchema.parse(await context.params);
 
     // Apply rate limiting (no duplicate detection needed - DB prevents duplicate likes)
-    const rateLimitError = checkRateLimitAndDuplicates(
+    const rateLimitError = await checkRateLimitAndDuplicates(
       user.userId,
       null,
       RATE_LIMIT_CONFIGS.LIKE_COMMENT

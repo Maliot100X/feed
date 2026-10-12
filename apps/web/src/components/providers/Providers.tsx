@@ -16,11 +16,9 @@ import { FontSizeProvider } from '@/contexts/FontSizeContext';
 import { WidgetRefreshProvider } from '@/contexts/WidgetRefreshContext';
 import { AutoDailyRewardProvider } from '@/hooks/useAutoDailyReward';
 import { SessionHeartbeatProvider } from '@/hooks/useSessionHeartbeat';
-import { getBrowserDevAuthSession } from '@/lib/auth/dev-auth';
 import { hydrateChatCacheFromIndexedDB } from '@/lib/chat/hydrateChatCache';
 import { useAuthStore } from '@/stores/authStore';
 import { DiscordActivityProvider } from './DiscordActivityProvider';
-import { FarcasterMiniAppProvider } from './FarcasterMiniAppProvider';
 import { GameGuideProvider } from './GameGuideProvider';
 import { GamePlaybackManager } from './GamePlaybackManager';
 import { OnboardingProvider } from './OnboardingProvider';
@@ -40,7 +38,12 @@ function ChatCacheHydrator() {
   const hydratedForRef = useRef<string | null>(null);
 
   useEffect(() => {
-    if (user?.id && hydratedForRef.current !== user.id) {
+    if (!user?.id) {
+      // Logged out: hydrate again on the next login (even the same account).
+      hydratedForRef.current = null;
+      return;
+    }
+    if (hydratedForRef.current !== user.id) {
       hydratedForRef.current = user.id;
       void hydrateChatCacheFromIndexedDB(queryClient, user.id);
     }
@@ -63,7 +66,6 @@ export function Providers({
   minimalChrome?: boolean;
 }) {
   const [mounted, setMounted] = useState(false);
-  const devAuthSession = getBrowserDevAuthSession();
 
   const [queryClient] = useState(
     () =>
@@ -114,68 +116,33 @@ export function Providers({
 
   const fullProviders = (
     <StewardAuthProvider>
-      <FarcasterMiniAppProvider>
-        <TelegramMiniAppProvider>
-          <DiscordActivityProvider>
-            <PostHogIdentifier />
-            <Suspense fallback={null}>
-              <ReferralCaptureProvider />
-            </Suspense>
-            <OnboardingProvider>
-              <SessionHeartbeatProvider>
-                <AutoDailyRewardProvider>
-                  <GameGuideProvider>
-                    <OutcomeNotificationProvider>
-                      <WidgetRefreshProvider>
-                        {mounted ? (
-                          <Fragment>{children}</Fragment>
-                        ) : (
-                          <div className="min-h-dvh bg-sidebar md:min-h-screen" />
-                        )}
-                      </WidgetRefreshProvider>
-                    </OutcomeNotificationProvider>
-                  </GameGuideProvider>
-                </AutoDailyRewardProvider>
-              </SessionHeartbeatProvider>
-            </OnboardingProvider>
-          </DiscordActivityProvider>
-        </TelegramMiniAppProvider>
-      </FarcasterMiniAppProvider>
+      <TelegramMiniAppProvider>
+        <DiscordActivityProvider>
+          <PostHogIdentifier />
+          <Suspense fallback={null}>
+            <ReferralCaptureProvider />
+          </Suspense>
+          <OnboardingProvider>
+            <SessionHeartbeatProvider>
+              <AutoDailyRewardProvider>
+                <GameGuideProvider>
+                  <OutcomeNotificationProvider>
+                    <WidgetRefreshProvider>
+                      {mounted ? (
+                        <Fragment>{children}</Fragment>
+                      ) : (
+                        <div className="min-h-dvh bg-sidebar md:min-h-screen" />
+                      )}
+                    </WidgetRefreshProvider>
+                  </OutcomeNotificationProvider>
+                </GameGuideProvider>
+              </AutoDailyRewardProvider>
+            </SessionHeartbeatProvider>
+          </OnboardingProvider>
+        </DiscordActivityProvider>
+      </TelegramMiniAppProvider>
     </StewardAuthProvider>
   );
-
-  // Dev auth path — skip Steward's own session storage (bearer token injected manually)
-  if (devAuthSession) {
-    return (
-      <div suppressHydrationWarning>
-        <EmbedModeProvider>
-          <PostHogErrorBoundary>
-            <Suspense fallback={null}>
-              <PostHogProvider>
-                <ThemeProvider
-                  attribute="class"
-                  defaultTheme="system"
-                  enableSystem
-                  disableTransitionOnChange={false}
-                >
-                  <TooltipProvider delayDuration={200}>
-                    <DevThemeToggle />
-                    <FontSizeProvider>
-                      <QueryClientProvider client={queryClient}>
-                        <GamePlaybackManager />
-                        <ChatCacheHydrator />
-                        {fullProviders}
-                      </QueryClientProvider>
-                    </FontSizeProvider>
-                  </TooltipProvider>
-                </ThemeProvider>
-              </PostHogProvider>
-            </Suspense>
-          </PostHogErrorBoundary>
-        </EmbedModeProvider>
-      </div>
-    );
-  }
 
   return (
     <div suppressHydrationWarning>

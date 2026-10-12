@@ -6,10 +6,11 @@ import {
   eq,
   inArray,
   sql,
+  type Transaction,
   users,
   WELCOME_BONUS_BALANCE_DESCRIPTION,
-} from '@babylon/db';
-import { generateSnowflakeId, logger } from '@babylon/shared';
+} from '@feed/db';
+import { generateSnowflakeId, logger } from '@feed/shared';
 import { CACHE_KEYS, invalidateCache } from '../cache';
 
 const FUNDING_TRANSACTION_TYPES = [
@@ -40,6 +41,34 @@ export interface TradingBalanceFundingHistoryItem {
   relatedId: string | null;
   createdAt: Date;
 }
+
+/**
+ * Lock the user's row for the rest of the transaction and return the current
+ * balance, or null if the user does not exist.
+ *
+ * Every funding mutation takes this lock BEFORE its idempotency check, so two
+ * concurrent deliveries of the same event serialize: the second one sees the
+ * first one's ledger row and returns alreadyProcessed. The locked balance is
+ * also the one used for ledger balanceBefore/balanceAfter.
+ */
+async function lockUserBalance(
+  tx: Transaction,
+  userId: string
+): Promise<number | null> {
+  const [user] = await tx
+    .select({ virtualBalance: users.virtualBalance })
+    .from(users)
+    .where(eq(users.id, userId))
+    .for('update');
+  return user ? Number(user.virtualBalance ?? 0) : null;
+}
+
+const USER_NOT_FOUND: TradingBalanceFundingResult = {
+  success: false,
+  balanceDelta: 0,
+  newBalance: 0,
+  error: 'User not found',
+};
 
 export class TradingBalanceFundingService {
   /**
@@ -99,80 +128,65 @@ export class TradingBalanceFundingService {
     userId: string,
     amount: number
   ): Promise<TradingBalanceFundingResult> {
-    const result = await db.transaction(async (tx) => {
-      const [existingTransaction] = await tx
-        .select({ id: balanceTransactions.id })
-        .from(balanceTransactions)
-        .where(
-          and(
-            eq(balanceTransactions.userId, userId),
-            eq(
-              balanceTransactions.description,
-              WELCOME_BONUS_BALANCE_DESCRIPTION
+    const result = await db.transaction(
+      async (tx): Promise<TradingBalanceFundingResult> => {
+        const balanceBefore = await lockUserBalance(tx, userId);
+        if (balanceBefore === null) {
+          return USER_NOT_FOUND;
+        }
+
+        const [existingTransaction] = await tx
+          .select({ id: balanceTransactions.id })
+          .from(balanceTransactions)
+          .where(
+            and(
+              eq(balanceTransactions.userId, userId),
+              eq(
+                balanceTransactions.description,
+                WELCOME_BONUS_BALANCE_DESCRIPTION
+              )
             )
           )
-        )
-        .limit(1);
-
-      if (existingTransaction) {
-        const [existingUser] = await tx
-          .select({ virtualBalance: users.virtualBalance })
-          .from(users)
-          .where(eq(users.id, userId))
           .limit(1);
+
+        if (existingTransaction) {
+          return {
+            success: true,
+            balanceDelta: 0,
+            newBalance: balanceBefore,
+            alreadyProcessed: true,
+          };
+        }
+
+        const balanceAfter = balanceBefore + amount;
+        const transactionId = await generateSnowflakeId();
+
+        await tx
+          .update(users)
+          .set({
+            virtualBalance: sql`COALESCE(CAST("virtualBalance" AS NUMERIC), 0) + ${amount}`,
+            totalDeposited: sql`COALESCE(CAST("totalDeposited" AS NUMERIC), 0) + ${amount}`,
+          })
+          .where(eq(users.id, userId));
+
+        await tx.insert(balanceTransactions).values({
+          id: transactionId,
+          userId,
+          type: 'deposit',
+          amount: String(amount),
+          balanceBefore: String(balanceBefore),
+          balanceAfter: String(balanceAfter),
+          description: WELCOME_BONUS_BALANCE_DESCRIPTION,
+        });
 
         return {
           success: true,
-          balanceDelta: 0,
-          newBalance: Number(existingUser?.virtualBalance ?? 0),
-          alreadyProcessed: true,
+          balanceDelta: amount,
+          newBalance: balanceAfter,
+          transactionId,
         };
       }
-
-      const [user] = await tx
-        .select({ virtualBalance: users.virtualBalance })
-        .from(users)
-        .where(eq(users.id, userId))
-        .limit(1);
-
-      if (!user) {
-        return {
-          success: false,
-          balanceDelta: 0,
-          newBalance: 0,
-          error: 'User not found',
-        };
-      }
-
-      const balanceBefore = Number(user.virtualBalance ?? 0);
-      const balanceAfter = balanceBefore + amount;
-      const transactionId = await generateSnowflakeId();
-
-      await tx
-        .update(users)
-        .set({
-          virtualBalance: sql`COALESCE(CAST("virtualBalance" AS NUMERIC), 0) + ${amount}`,
-          totalDeposited: sql`COALESCE(CAST("totalDeposited" AS NUMERIC), 0) + ${amount}`,
-        })
-        .where(eq(users.id, userId));
-
-      await tx.insert(balanceTransactions).values({
-        id: transactionId,
-        userId,
-        type: 'deposit',
-        amount: String(amount),
-        balanceBefore: String(balanceBefore),
-        balanceAfter: String(balanceAfter),
-        description: WELCOME_BONUS_BALANCE_DESCRIPTION,
-      });
-
-      return {
-        success: true,
-        balanceDelta: amount,
-        newBalance: balanceAfter,
-        transactionId,
-      };
-    });
+    );
 
     if (result.success && !result.alreadyProcessed) {
       logger.info(
@@ -192,51 +206,42 @@ export class TradingBalanceFundingService {
     reason: string,
     description?: string
   ): Promise<TradingBalanceFundingResult> {
-    const result = await db.transaction(async (tx) => {
-      const [user] = await tx
-        .select({ virtualBalance: users.virtualBalance })
-        .from(users)
-        .where(eq(users.id, userId))
-        .limit(1);
+    const result = await db.transaction(
+      async (tx): Promise<TradingBalanceFundingResult> => {
+        const balanceBefore = await lockUserBalance(tx, userId);
+        if (balanceBefore === null) {
+          return USER_NOT_FOUND;
+        }
 
-      if (!user) {
+        const balanceAfter = balanceBefore + amount;
+        const transactionId = await generateSnowflakeId();
+
+        await tx
+          .update(users)
+          .set({
+            virtualBalance: sql`COALESCE(CAST("virtualBalance" AS NUMERIC), 0) + ${amount}`,
+            totalDeposited: sql`COALESCE(CAST("totalDeposited" AS NUMERIC), 0) + ${amount}`,
+          })
+          .where(eq(users.id, userId));
+
+        await tx.insert(balanceTransactions).values({
+          id: transactionId,
+          userId,
+          type: 'deposit',
+          amount: String(amount),
+          balanceBefore: String(balanceBefore),
+          balanceAfter: String(balanceAfter),
+          description: description || reason,
+        });
+
         return {
-          success: false,
-          balanceDelta: 0,
-          newBalance: 0,
-          error: 'User not found',
+          success: true,
+          balanceDelta: amount,
+          newBalance: balanceAfter,
+          transactionId,
         };
       }
-
-      const balanceBefore = Number(user.virtualBalance ?? 0);
-      const balanceAfter = balanceBefore + amount;
-      const transactionId = await generateSnowflakeId();
-
-      await tx
-        .update(users)
-        .set({
-          virtualBalance: sql`COALESCE(CAST("virtualBalance" AS NUMERIC), 0) + ${amount}`,
-          totalDeposited: sql`COALESCE(CAST("totalDeposited" AS NUMERIC), 0) + ${amount}`,
-        })
-        .where(eq(users.id, userId));
-
-      await tx.insert(balanceTransactions).values({
-        id: transactionId,
-        userId,
-        type: 'deposit',
-        amount: String(amount),
-        balanceBefore: String(balanceBefore),
-        balanceAfter: String(balanceAfter),
-        description: description || reason,
-      });
-
-      return {
-        success: true,
-        balanceDelta: amount,
-        newBalance: balanceAfter,
-        transactionId,
-      };
-    });
+    );
 
     if (!result.success) {
       return result;
@@ -264,95 +269,100 @@ export class TradingBalanceFundingService {
     const transactionType = `${paymentProvider}_purchase`;
     const relatedId = paymentTxHash || paymentRequestId;
 
-    const result = await db.transaction(async (tx) => {
-      const [existingTransaction] = await tx
-        .select({
-          id: balanceTransactions.id,
-          amount: balanceTransactions.amount,
-        })
-        .from(balanceTransactions)
-        .where(
-          and(
-            eq(balanceTransactions.userId, userId),
-            eq(balanceTransactions.type, transactionType),
-            eq(balanceTransactions.relatedId, relatedId)
-          )
-        )
-        .limit(1);
+    const result = await db.transaction(
+      async (tx): Promise<TradingBalanceFundingResult> => {
+        // Serialize all funding attempts for this payment across users, so a
+        // payment can be credited to at most one account.
+        await tx.execute(
+          sql`SELECT pg_advisory_xact_lock(hashtext(${`funding:${transactionType}:${relatedId}`}))`
+        );
 
-      if (existingTransaction) {
-        const [existingUser] = await tx
-          .select({ virtualBalance: users.virtualBalance })
-          .from(users)
-          .where(eq(users.id, userId))
+        const balanceBefore = await lockUserBalance(tx, userId);
+        if (balanceBefore === null) {
+          return USER_NOT_FOUND;
+        }
+
+        const [existingTransaction] = await tx
+          .select({
+            id: balanceTransactions.id,
+            userId: balanceTransactions.userId,
+            amount: balanceTransactions.amount,
+          })
+          .from(balanceTransactions)
+          .where(
+            and(
+              eq(balanceTransactions.type, transactionType),
+              eq(balanceTransactions.relatedId, relatedId)
+            )
+          )
           .limit(1);
 
-        logger.info(
-          'Trading balance purchase already processed',
-          { userId, paymentRequestId, paymentProvider, relatedId },
-          'TradingBalanceFundingService'
-        );
+        if (existingTransaction && existingTransaction.userId !== userId) {
+          logger.warn(
+            'Purchase payment already credited to another account',
+            { userId, paymentRequestId, paymentProvider, relatedId },
+            'TradingBalanceFundingService'
+          );
+          return {
+            success: false,
+            balanceDelta: 0,
+            newBalance: balanceBefore,
+            error: 'Payment has already been credited to another account',
+          };
+        }
+
+        if (existingTransaction) {
+          logger.info(
+            'Trading balance purchase already processed',
+            { userId, paymentRequestId, paymentProvider, relatedId },
+            'TradingBalanceFundingService'
+          );
+          return {
+            success: true,
+            balanceDelta: Number(existingTransaction.amount),
+            newBalance: balanceBefore,
+            alreadyProcessed: true,
+            transactionId: existingTransaction.id,
+          };
+        }
+
+        const balanceAfter = balanceBefore + balanceDelta;
+        const transactionId = await generateSnowflakeId();
+
+        await tx
+          .update(users)
+          .set({
+            virtualBalance: sql`COALESCE(CAST("virtualBalance" AS NUMERIC), 0) + ${balanceDelta}`,
+            totalDeposited: sql`COALESCE(CAST("totalDeposited" AS NUMERIC), 0) + ${balanceDelta}`,
+          })
+          .where(eq(users.id, userId));
+
+        await tx.insert(balanceTransactions).values({
+          id: transactionId,
+          userId,
+          type: transactionType,
+          amount: String(balanceDelta),
+          balanceBefore: String(balanceBefore),
+          balanceAfter: String(balanceAfter),
+          relatedId,
+          description: JSON.stringify({
+            amountUSD,
+            balanceUnitsPerDollar: 100,
+            purchasedAt: new Date().toISOString(),
+            paymentProvider,
+            paymentRequestId,
+            paymentTxHash,
+          }),
+        });
+
         return {
           success: true,
-          balanceDelta: Number(existingTransaction.amount),
-          newBalance: Number(existingUser?.virtualBalance ?? 0),
-          alreadyProcessed: true,
-          transactionId: existingTransaction.id,
+          balanceDelta,
+          newBalance: balanceAfter,
+          transactionId,
         };
       }
-
-      const [user] = await tx
-        .select({ virtualBalance: users.virtualBalance })
-        .from(users)
-        .where(eq(users.id, userId))
-        .limit(1);
-
-      if (!user) {
-        return {
-          success: false,
-          balanceDelta: 0,
-          newBalance: 0,
-          error: 'User not found',
-        };
-      }
-
-      const balanceBefore = Number(user.virtualBalance ?? 0);
-      const balanceAfter = balanceBefore + balanceDelta;
-      const transactionId = await generateSnowflakeId();
-
-      await tx
-        .update(users)
-        .set({
-          virtualBalance: sql`COALESCE(CAST("virtualBalance" AS NUMERIC), 0) + ${balanceDelta}`,
-          totalDeposited: sql`COALESCE(CAST("totalDeposited" AS NUMERIC), 0) + ${balanceDelta}`,
-        })
-        .where(eq(users.id, userId));
-
-      await tx.insert(balanceTransactions).values({
-        id: transactionId,
-        userId,
-        type: transactionType,
-        amount: String(balanceDelta),
-        balanceBefore: String(balanceBefore),
-        balanceAfter: String(balanceAfter),
-        relatedId,
-        description: JSON.stringify({
-          amountUSD,
-          balanceUnitsPerDollar: 100,
-          purchasedAt: new Date().toISOString(),
-          paymentProvider,
-          paymentRequestId,
-          paymentTxHash,
-        }),
-      });
-
-      return {
-        success: true,
-        balanceDelta,
-        newBalance: balanceAfter,
-        transactionId,
-      };
-    });
+    );
 
     if (result.success && !result.alreadyProcessed) {
       logger.info(
@@ -377,95 +387,80 @@ export class TradingBalanceFundingService {
     const transactionType =
       reason === 'refund' ? 'stripe_refund' : 'stripe_dispute';
 
-    const result = await db.transaction(async (tx) => {
-      const [existingReversal] = await tx
-        .select({
-          id: balanceTransactions.id,
-          amount: balanceTransactions.amount,
-        })
-        .from(balanceTransactions)
-        .where(
-          and(
-            eq(balanceTransactions.userId, userId),
-            eq(balanceTransactions.relatedId, stripeEventId)
-          )
-        )
-        .limit(1);
+    const result = await db.transaction(
+      async (tx): Promise<TradingBalanceFundingResult> => {
+        const balanceBefore = await lockUserBalance(tx, userId);
+        if (balanceBefore === null) {
+          return USER_NOT_FOUND;
+        }
 
-      if (existingReversal) {
-        const [existingUser] = await tx
-          .select({ virtualBalance: users.virtualBalance })
-          .from(users)
-          .where(eq(users.id, userId))
+        const [existingReversal] = await tx
+          .select({
+            id: balanceTransactions.id,
+            amount: balanceTransactions.amount,
+          })
+          .from(balanceTransactions)
+          .where(
+            and(
+              eq(balanceTransactions.userId, userId),
+              eq(balanceTransactions.relatedId, stripeEventId)
+            )
+          )
           .limit(1);
 
-        logger.info(
-          'Trading balance reversal already processed',
-          { userId, stripeEventId, reason },
-          'TradingBalanceFundingService'
-        );
+        if (existingReversal) {
+          logger.info(
+            'Trading balance reversal already processed',
+            { userId, stripeEventId, reason },
+            'TradingBalanceFundingService'
+          );
+          return {
+            success: true,
+            balanceDelta: Number(existingReversal.amount),
+            newBalance: balanceBefore,
+            alreadyProcessed: true,
+            transactionId: existingReversal.id,
+          };
+        }
+
+        const balanceAfter = Math.max(0, balanceBefore - requestedDeduction);
+        const actualDeduction = balanceBefore - balanceAfter;
+        const transactionId = await generateSnowflakeId();
+
+        await tx
+          .update(users)
+          .set({
+            virtualBalance: sql`GREATEST(0, COALESCE(CAST("virtualBalance" AS NUMERIC), 0) - ${requestedDeduction})`,
+            totalWithdrawn: sql`COALESCE(CAST("totalWithdrawn" AS NUMERIC), 0) + ${requestedDeduction}`,
+          })
+          .where(eq(users.id, userId));
+
+        await tx.insert(balanceTransactions).values({
+          id: transactionId,
+          userId,
+          type: transactionType,
+          amount: String(-actualDeduction),
+          balanceBefore: String(balanceBefore),
+          balanceAfter: String(balanceAfter),
+          relatedId: stripeEventId,
+          description: JSON.stringify({
+            amountUSD,
+            balanceUnitsRequested: requestedDeduction,
+            balanceUnitsDeducted: actualDeduction,
+            originalPaymentIntentId: paymentIntentId,
+            reversalReason: reason,
+            reversedAt: new Date().toISOString(),
+          }),
+        });
+
         return {
           success: true,
-          balanceDelta: Number(existingReversal.amount),
-          newBalance: Number(existingUser?.virtualBalance ?? 0),
-          alreadyProcessed: true,
-          transactionId: existingReversal.id,
+          balanceDelta: -actualDeduction,
+          newBalance: balanceAfter,
+          transactionId,
         };
       }
-
-      const [user] = await tx
-        .select({ virtualBalance: users.virtualBalance })
-        .from(users)
-        .where(eq(users.id, userId))
-        .limit(1);
-
-      if (!user) {
-        return {
-          success: false,
-          balanceDelta: 0,
-          newBalance: 0,
-          error: 'User not found',
-        };
-      }
-
-      const balanceBefore = Number(user.virtualBalance ?? 0);
-      const balanceAfter = Math.max(0, balanceBefore - requestedDeduction);
-      const actualDeduction = balanceBefore - balanceAfter;
-      const transactionId = await generateSnowflakeId();
-
-      await tx
-        .update(users)
-        .set({
-          virtualBalance: sql`GREATEST(0, COALESCE(CAST("virtualBalance" AS NUMERIC), 0) - ${requestedDeduction})`,
-          totalWithdrawn: sql`COALESCE(CAST("totalWithdrawn" AS NUMERIC), 0) + ${requestedDeduction}`,
-        })
-        .where(eq(users.id, userId));
-
-      await tx.insert(balanceTransactions).values({
-        id: transactionId,
-        userId,
-        type: transactionType,
-        amount: String(-actualDeduction),
-        balanceBefore: String(balanceBefore),
-        balanceAfter: String(balanceAfter),
-        relatedId: stripeEventId,
-        description: JSON.stringify({
-          amountUSD,
-          balanceUnitsRequested: requestedDeduction,
-          balanceUnitsDeducted: actualDeduction,
-          originalPaymentIntentId: paymentIntentId,
-          reversalReason: reason,
-          reversedAt: new Date().toISOString(),
-        }),
-      });
-
-      return {
-        success: true,
-        balanceDelta: -actualDeduction,
-        newBalance: balanceAfter,
-        transactionId,
-      };
-    });
+    );
 
     if (result.success && !result.alreadyProcessed) {
       logger.info(
@@ -495,92 +490,77 @@ export class TradingBalanceFundingService {
   ): Promise<TradingBalanceFundingResult> {
     const balanceDelta = Math.floor(amountUSD * 100);
 
-    const result = await db.transaction(async (tx) => {
-      const [existingCredit] = await tx
-        .select({
-          id: balanceTransactions.id,
-          amount: balanceTransactions.amount,
-        })
-        .from(balanceTransactions)
-        .where(
-          and(
-            eq(balanceTransactions.userId, userId),
-            eq(balanceTransactions.relatedId, stripeEventId)
-          )
-        )
-        .limit(1);
+    const result = await db.transaction(
+      async (tx): Promise<TradingBalanceFundingResult> => {
+        const balanceBefore = await lockUserBalance(tx, userId);
+        if (balanceBefore === null) {
+          return USER_NOT_FOUND;
+        }
 
-      if (existingCredit) {
-        const [existingUser] = await tx
-          .select({ virtualBalance: users.virtualBalance })
-          .from(users)
-          .where(eq(users.id, userId))
+        const [existingCredit] = await tx
+          .select({
+            id: balanceTransactions.id,
+            amount: balanceTransactions.amount,
+          })
+          .from(balanceTransactions)
+          .where(
+            and(
+              eq(balanceTransactions.userId, userId),
+              eq(balanceTransactions.relatedId, stripeEventId)
+            )
+          )
           .limit(1);
 
-        logger.info(
-          'Dispute win funding credit already processed',
-          { userId, stripeEventId, disputeId },
-          'TradingBalanceFundingService'
-        );
+        if (existingCredit) {
+          logger.info(
+            'Dispute win funding credit already processed',
+            { userId, stripeEventId, disputeId },
+            'TradingBalanceFundingService'
+          );
+          return {
+            success: true,
+            balanceDelta: Number(existingCredit.amount),
+            newBalance: balanceBefore,
+            alreadyProcessed: true,
+            transactionId: existingCredit.id,
+          };
+        }
+
+        const balanceAfter = balanceBefore + balanceDelta;
+        const transactionId = await generateSnowflakeId();
+
+        await tx
+          .update(users)
+          .set({
+            virtualBalance: sql`COALESCE(CAST("virtualBalance" AS NUMERIC), 0) + ${balanceDelta}`,
+            totalWithdrawn: sql`GREATEST(0, COALESCE(CAST("totalWithdrawn" AS NUMERIC), 0) - ${balanceDelta})`,
+          })
+          .where(eq(users.id, userId));
+
+        await tx.insert(balanceTransactions).values({
+          id: transactionId,
+          userId,
+          type: 'stripe_dispute_won',
+          amount: String(balanceDelta),
+          balanceBefore: String(balanceBefore),
+          balanceAfter: String(balanceAfter),
+          relatedId: stripeEventId,
+          description: JSON.stringify({
+            amountUSD,
+            balanceUnitsCredited: balanceDelta,
+            disputeId,
+            creditedAt: new Date().toISOString(),
+          }),
+        });
+
         return {
           success: true,
-          balanceDelta: Number(existingCredit.amount),
-          newBalance: Number(existingUser?.virtualBalance ?? 0),
-          alreadyProcessed: true,
-          transactionId: existingCredit.id,
+          balanceDelta,
+          newBalance: balanceAfter,
+          transactionId,
         };
       }
-
-      const [user] = await tx
-        .select({ virtualBalance: users.virtualBalance })
-        .from(users)
-        .where(eq(users.id, userId))
-        .limit(1);
-
-      if (!user) {
-        return {
-          success: false,
-          balanceDelta: 0,
-          newBalance: 0,
-          error: 'User not found',
-        };
-      }
-
-      const balanceBefore = Number(user.virtualBalance ?? 0);
-      const balanceAfter = balanceBefore + balanceDelta;
-      const transactionId = await generateSnowflakeId();
-
-      await tx
-        .update(users)
-        .set({
-          virtualBalance: sql`COALESCE(CAST("virtualBalance" AS NUMERIC), 0) + ${balanceDelta}`,
-          totalWithdrawn: sql`GREATEST(0, COALESCE(CAST("totalWithdrawn" AS NUMERIC), 0) - ${balanceDelta})`,
-        })
-        .where(eq(users.id, userId));
-
-      await tx.insert(balanceTransactions).values({
-        id: transactionId,
-        userId,
-        type: 'stripe_dispute_won',
-        amount: String(balanceDelta),
-        balanceBefore: String(balanceBefore),
-        balanceAfter: String(balanceAfter),
-        relatedId: stripeEventId,
-        description: JSON.stringify({
-          amountUSD,
-          balanceUnitsCredited: balanceDelta,
-          disputeId,
-          creditedAt: new Date().toISOString(),
-        }),
-      });
-
-      return {
-        success: true,
-        balanceDelta,
-        newBalance: balanceAfter,
-        transactionId,
-      };
-    });
+    );
 
     if (result.success && !result.alreadyProcessed) {
       logger.info(

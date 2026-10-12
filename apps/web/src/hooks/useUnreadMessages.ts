@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react';
 import { useAuth } from '@/hooks/useAuth';
-import { apiUrl } from '@/utils/api-url';
+import { apiFetch } from '@/utils/api-fetch';
 
 /**
  * Represents unread message counts.
@@ -43,68 +43,70 @@ interface UnreadCounts {
  * );
  * ```
  */
+const EMPTY_COUNTS: UnreadCounts = {
+  pendingDMs: 0,
+  unreadMessages: 0,
+  hasNewMessages: false,
+};
+
 export function useUnreadMessages() {
-  const { authenticated, getAccessToken } = useAuth();
-  const [counts, setCounts] = useState<UnreadCounts>({
-    pendingDMs: 0,
-    unreadMessages: 0,
-    hasNewMessages: false,
-  });
+  const { authenticated, user } = useAuth();
+  const userId = authenticated ? (user?.id ?? null) : null;
+  const [counts, setCounts] = useState<UnreadCounts>(EMPTY_COUNTS);
   const [isLoading, setIsLoading] = useState(false);
 
   useEffect(() => {
-    // Only poll if user is authenticated
-    if (!authenticated) {
-      setCounts({ pendingDMs: 0, unreadMessages: 0, hasNewMessages: false });
+    // Reset on logout and on account switch so counts never leak across users.
+    setCounts(EMPTY_COUNTS);
+    if (!userId) {
+      setIsLoading(false);
       return;
     }
 
-    // Fetch unread counts
+    let disposed = false;
+    let controller: AbortController | null = null;
+
     const fetchCounts = async () => {
-      const token = await getAccessToken();
-      if (!token) return;
-
-      const response = await fetch(apiUrl('/api/chats/unread-count'), {
-        headers: {
-          Authorization: `Bearer ${token}`,
-        },
-      });
-
-      if (!response.ok) {
-        setIsLoading(false);
-        return;
+      controller?.abort();
+      const current = new AbortController();
+      controller = current;
+      try {
+        const response = await apiFetch('/api/chats/unread-count', {
+          signal: current.signal,
+        });
+        if (!response.ok) return;
+        const data = (await response.json()) as {
+          pendingDMRequests?: number;
+          unreadMessages?: number;
+          hasNewMessages?: boolean;
+        };
+        if (disposed || current.signal.aborted) return;
+        setCounts({
+          pendingDMs:
+            typeof data.pendingDMRequests === 'number'
+              ? data.pendingDMRequests
+              : 0,
+          unreadMessages:
+            typeof data.unreadMessages === 'number' ? data.unreadMessages : 0,
+          hasNewMessages: data.hasNewMessages === true,
+        });
+      } catch {
+        // Network/abort/JSON failure: keep the last known counts.
+      } finally {
+        if (!disposed && controller === current) setIsLoading(false);
       }
-
-      const data = await response.json();
-      const pendingDMRequests =
-        typeof data.pendingDMRequests === 'number'
-          ? data.pendingDMRequests
-          : typeof data.pendingDMs === 'number'
-            ? data.pendingDMs
-            : 0;
-      const unreadMessages =
-        typeof data.unreadMessages === 'number'
-          ? data.unreadMessages
-          : data.hasNewMessages
-            ? 1
-            : 0;
-      setCounts({
-        pendingDMs: pendingDMRequests,
-        unreadMessages,
-        hasNewMessages: data.hasNewMessages || false,
-      });
-      setIsLoading(false);
     };
 
-    // Initial fetch
     setIsLoading(true);
-    fetchCounts();
+    void fetchCounts();
+    const interval = setInterval(() => void fetchCounts(), 30000);
 
-    // Poll every 30 seconds
-    const interval = setInterval(fetchCounts, 30000);
-
-    return () => clearInterval(interval);
-  }, [authenticated, getAccessToken]);
+    return () => {
+      disposed = true;
+      controller?.abort();
+      clearInterval(interval);
+    };
+  }, [userId]);
 
   return {
     ...counts,

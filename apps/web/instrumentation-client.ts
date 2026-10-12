@@ -19,8 +19,7 @@ const sentryDisabled =
   process.env.NEXT_PUBLIC_DISABLE_SENTRY === 'true' ||
   process.env.DISABLE_SENTRY === 'true';
 const sentryClientRelease =
-  process.env.NEXT_PUBLIC_SENTRY_RELEASE ??
-  process.env.NEXT_PUBLIC_VERCEL_GIT_COMMIT_SHA;
+  process.env.NEXT_PUBLIC_SENTRY_RELEASE ?? process.env.NEXT_PUBLIC_COMMIT_SHA;
 
 // Log initialization status in development
 if (process.env.NODE_ENV === 'development') {
@@ -132,11 +131,16 @@ if (!sentryDisabled) {
         blockAllMedia: true,
         // Performance settings
         networkDetailAllowUrls: [
-          // Only capture network details for Babylon API calls by default.
+          // Only capture network details for Feed API calls by default.
           // If NEXT_PUBLIC_API_URL is configured, we allow that origin as well.
           /\/api\//,
           ...(process.env.NEXT_PUBLIC_API_URL
-            ? [new RegExp(process.env.NEXT_PUBLIC_API_URL)]
+            ? [
+                // Match the configured origin literally (escape regex chars).
+                new RegExp(
+                  `^${process.env.NEXT_PUBLIC_API_URL.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}`
+                ),
+              ]
             : []),
         ],
         networkCaptureBodies: false,

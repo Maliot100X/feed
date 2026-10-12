@@ -97,7 +97,13 @@ export function formatSingleNPCDashboard(
   const allPositions = [...ctx.currentPositions]
     .sort((a, b) => Math.abs(b.unrealizedPnL) - Math.abs(a.unrealizedPnL))
     .map((p) => {
-      const symbol = p.marketType === 'perp' ? p.ticker : `Q${p.marketId}`;
+      const market = ctx.predictionMarkets.find(
+        (market) => market.id === p.marketId
+      );
+      const symbol =
+        p.marketType === 'perp'
+          ? p.ticker
+          : `marketId=${p.marketId}${market ? ` question=${JSON.stringify(market.text)}` : ''}`;
       const posSign = p.unrealizedPnL >= 0 ? '+' : '';
       return `${symbol} ${p.side} ($${p.size.toFixed(0)}, PnL: ${posSign}$${p.unrealizedPnL.toFixed(0)}) [ID:${p.id}]`;
     })
@@ -106,17 +112,20 @@ export function formatSingleNPCDashboard(
   const relationships =
     ctx.relationships && ctx.relationships.length > 0
       ? ctx.relationships
-          .filter((r) => Math.abs(r.sentiment) > 0.4)
-          .slice(0, 6)
-          .map((r) => `${r.sentiment > 0 ? 'Ally' : 'Rival'}:${r.actorName}`)
+          .map(
+            (r) =>
+              `${r.actorName}: ${r.relationshipType}, sentiment=${r.sentiment}, strength=${r.strength}${r.history ? `; ${r.history}` : ''}`
+          )
           .join(', ')
       : 'None';
 
   const privateIntel =
     ctx.groupChatMessages.length > 0
       ? ctx.groupChatMessages
-          .slice(0, 5)
-          .map((m) => `"${m.fromName}: ${m.message}"`)
+          .map(
+            (m) =>
+              `[${m.chatName}; ${m.timestamp}] "${m.fromName}: ${m.message}"`
+          )
           .join(' | ')
       : 'None';
 
@@ -124,9 +133,7 @@ export function formatSingleNPCDashboard(
 
   // Character voice context for in-character trading reasoning
   const voiceHint =
-    'voice' in ctx && ctx.voice
-      ? `Voice: ${String(ctx.voice).slice(0, 120)}`
-      : '';
+    'voice' in ctx && ctx.voice ? `Voice: ${String(ctx.voice)}` : '';
   const domainsHint =
     'domains' in ctx && ctx.domains
       ? `Expertise: ${((ctx.domains as string[]) ?? []).join(', ')}`
@@ -134,12 +141,17 @@ export function formatSingleNPCDashboard(
 
   return `${prefix}TRADER DASHBOARD
 ID: ${ctx.npcId} | Name: ${ctx.npcName}
+Personality: ${ctx.personality}
 Archetype: ${archetype} | Strategy: ${strategy.label} (${strategyKey})
 ${voiceHint ? voiceHint + '\n' : ''}${domainsHint ? domainsHint + '\n' : ''}Bias: ${formatTradingStrategyBias(strategy)} | Cash: $${ctx.availableBalance.toLocaleString()}
 Total PnL: ${pnlSign}$${totalPnL.toFixed(0)} | Exposure: ${exposure.toFixed(1)}%
 Network: ${relationships}
 Positions: ${allPositions || 'None'}
-PRIVATE INTEL: ${privateIntel}`;
+PRIVATE INTEL: ${privateIntel}
+RELEVANT FEED:
+${ctx.recentPosts.map((p) => `[${p.timestamp}] ${p.authorName}: ${p.content}${p.articleTitle ? ` (Article: ${p.articleTitle})` : ''}`).join('\n') || 'None'}
+OBSERVED EVENTS:
+${ctx.recentEvents.map((e) => `[${e.timestamp}] ${e.type}: ${e.description}`).join('\n') || 'None'}`;
 }
 
 /**
@@ -160,8 +172,8 @@ export function formatNPCsDashboardList(contexts: NPCMarketContext[]): string {
  * Takes a single context (all NPCs see the same market state).
  */
 export function formatMarketDataTable(ctx: NPCMarketContext): string {
-  const perps = ctx.perpMarkets || [];
-  const predictions = ctx.predictionMarkets || [];
+  const perps = ctx.perpMarkets;
+  const predictions = ctx.predictionMarkets;
 
   if (perps.length === 0 && predictions.length === 0) {
     return 'No Market Data Available';
@@ -181,8 +193,10 @@ export function formatMarketDataTable(ctx: NPCMarketContext): string {
     const safeText = p.text.replace(/\|/g, '/');
     const contextLabel = `${p.horizonBucket} / ${p.liquidityTier} / ${p.urgencyLevel} / ${p.eventSensitivity}`;
     const maxBetLabel =
-      p.maxSafeBet > 0 ? `$${(p.maxSafeBet / 1000).toFixed(1)}k` : 'thin';
-    table += `| ${p.id} | PRED | Yes: ${p.yesPrice.toFixed(0)}¢ / No: ${p.noPrice.toFixed(0)}¢ | ${daysLeft}d left | "${safeText}" | ${contextLabel} | $${(p.totalVolume / 1000).toFixed(1)}k / max ${maxBetLabel} |\n`;
+      p.maxSafeBet > 0
+        ? `$${(Math.floor(p.maxSafeBet * 100) / 100).toFixed(2)}`
+        : '$0.00';
+    table += `| ${p.id} | PRED | Yes: ${p.yesPrice.toFixed(0)}¢ / No: ${p.noPrice.toFixed(0)}¢ | ${daysLeft}d left; resolves ${p.resolutionDate} | "${safeText}" | ${contextLabel} | $${(p.totalVolume / 1000).toFixed(1)}k / max ${maxBetLabel} |\n`;
   }
 
   return table;

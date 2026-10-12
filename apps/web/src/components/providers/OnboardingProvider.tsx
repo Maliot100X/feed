@@ -1,35 +1,28 @@
 'use client';
 
-import type { OnboardingProfilePayload } from '@babylon/shared';
-import {
-  isValidOnboardingUsername,
-  logger,
-  POINTS,
-  sanitizeOnboardingUsername,
-} from '@babylon/shared';
-// Phase 2: Privy replaced by Steward — no more usePrivy or useIdentityToken
+import type { OnboardingProfilePayload } from '@feed/shared';
+import { logger, POINTS } from '@feed/shared';
 import { usePathname, useRouter } from 'next/navigation';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { ImportedProfileData } from '@/components/onboarding/UserOnboardingFlow';
 import { UserSignupOnboardingContextProvider } from '@/components/onboarding/user-signup-onboarding-context';
 import { useAuth } from '@/hooks/useAuth';
 import { useSignupTracking } from '@/hooks/usePostHog';
+import { safeReturnTo } from '@/lib/auth/safe-return-to';
 import {
   hasCompletedGameGuide,
   markGameGuideCompletedLocal,
 } from '@/lib/game-guide-completion';
 import { useAuthStore } from '@/stores/authStore';
 import { apiFetch } from '@/utils/api-fetch';
-
 import { clearReferralCode, getReferralCode } from './ReferralCaptureProvider';
 
 function getSafeReturnTo(): string {
   if (typeof window === 'undefined') return '/feed';
-  const raw = new URLSearchParams(window.location.search).get('returnTo');
-  if (!raw || !raw.startsWith('/') || raw.startsWith('//')) {
-    return '/feed';
-  }
-  return raw;
+  return safeReturnTo(
+    new URLSearchParams(window.location.search).get('returnTo'),
+    '/feed'
+  );
 }
 
 /**
@@ -53,11 +46,6 @@ export function OnboardingProvider({
     logout,
   } = useAuth();
 
-  // Phase 2: isSocialLogin derived from the Babylon user record (populated at login)
-  const isSocialLogin = useMemo(() => {
-    return !!(user?.hasFarcaster || user?.hasTwitter);
-  }, [user]);
-
   const { setUser, setNeedsOnboarding } = useAuthStore();
   const { trackSignupStarted, trackSignupCompleted, trackOnboardingStep } =
     useSignupTracking();
@@ -66,15 +54,8 @@ export function OnboardingProvider({
   const [guideSubmitting, setGuideSubmitting] = useState(false);
   const guideCompleteInFlight = useRef(false);
   const [error, setError] = useState<string | null>(null);
-  const [_submittedProfile, setSubmittedProfile] =
-    useState<OnboardingProfilePayload | null>(null);
   const [importedProfileData, setImportedProfileData] =
     useState<ImportedProfileData | null>(null);
-  const [_hasProgressedPastSocialImport, setHasProgressedPastSocialImport] =
-    useState(false);
-  const socialAutoSubmitRef = useRef(false);
-  const [socialAutoSubmitAttempted, setSocialAutoSubmitAttempted] =
-    useState(false);
 
   const [isReadyToShow, setIsReadyToShow] = useState(false);
   const [hasInitialized, setHasInitialized] = useState(false);
@@ -131,7 +112,7 @@ export function OnboardingProvider({
     if (typeof window !== 'undefined') {
       const params = new URLSearchParams(window.location.search);
       const isDevMode = params.get('dev') === 'true';
-      const isProduction = window.location.hostname === 'babylon.market';
+      const isProduction = window.location.hostname === 'feed.fun';
       const isHomePage = window.location.pathname === '/';
       const isWaitlistFlow = params.get('waitlist') === 'true';
 
@@ -247,9 +228,7 @@ export function OnboardingProvider({
             coverImageUrl?: string;
             profileComplete?: boolean;
             reputationPoints?: number;
-            hasFarcaster?: boolean;
             hasTwitter?: boolean;
-            farcasterUsername?: string;
             twitterUsername?: string;
             nftTokenId?: number;
             createdAt?: string;
@@ -268,9 +247,7 @@ export function OnboardingProvider({
               u.coverImageUrl ?? payload.coverImageUrl ?? undefined,
             profileComplete: u.profileComplete ?? true,
             reputationPoints: u.reputationPoints ?? user?.reputationPoints,
-            hasFarcaster: u.hasFarcaster ?? user?.hasFarcaster,
             hasTwitter: u.hasTwitter ?? user?.hasTwitter,
-            farcasterUsername: u.farcasterUsername ?? user?.farcasterUsername,
             twitterUsername: u.twitterUsername ?? user?.twitterUsername,
             createdAt: u.createdAt ?? user?.createdAt,
             gameGuideCompletedAt: u.gameGuideCompletedAt ?? null,
@@ -279,11 +256,9 @@ export function OnboardingProvider({
         setNeedsOnboarding(false);
 
         clearReferralCode();
-        setSubmittedProfile(payload);
         trackOnboardingStep('profile', true);
         trackSignupCompleted(data.user?.id ?? '', {
           hasReferrer: Boolean(referralCode),
-          hasFarcaster: data.user?.hasFarcaster ?? false,
           hasTwitter: data.user?.hasTwitter ?? false,
         });
         setIsSubmitting(false);
@@ -302,129 +277,23 @@ export function OnboardingProvider({
     ]
   );
 
+  // Imported social data and errors belong to one account: reset on logout
+  // and on account switch. Social sign-ups are never auto-submitted — the
+  // imported profile only pre-fills the form, and the user must accept the
+  // Terms and Privacy Policy explicitly.
+  const onboardingOwnerId = authenticated ? (user?.id ?? null) : null;
+  // biome-ignore lint/correctness/useExhaustiveDependencies: reset whenever the owning account changes
   useEffect(() => {
-    if (!authenticated) {
-      setSubmittedProfile(null);
-      setError(null);
-      setImportedProfileData(null);
-      setHasProgressedPastSocialImport(false);
-      socialAutoSubmitRef.current = false;
-      setSocialAutoSubmitAttempted(false);
-      return;
-    }
+    setError(null);
+    setImportedProfileData(null);
+  }, [onboardingOwnerId]);
 
-    if (loadingProfile) {
-      return;
-    }
-
-    if (needsOnboarding) {
-      if (
-        isSocialLogin &&
-        importedProfileData &&
-        !socialAutoSubmitRef.current &&
-        !socialAutoSubmitAttempted
-      ) {
-        setSocialAutoSubmitAttempted(true);
-        socialAutoSubmitRef.current = true;
-        logger.info(
-          'Social login user - auto-submitting profile',
-          {
-            platform: importedProfileData.platform,
-            username: importedProfileData.username,
-          },
-          'OnboardingProvider'
-        );
-        const sanitizedUsername = sanitizeOnboardingUsername(
-          importedProfileData.username
-        );
-        if (!isValidOnboardingUsername(sanitizedUsername)) {
-          logger.warn(
-            'Social username not valid after sanitization, falling back to manual onboarding',
-            {
-              raw: importedProfileData.username,
-              sanitized: sanitizedUsername,
-            },
-            'OnboardingProvider'
-          );
-          socialAutoSubmitRef.current = false;
-          return;
-        }
-        const autoProfile: OnboardingProfilePayload = {
-          username: sanitizedUsername,
-          displayName: importedProfileData.displayName,
-          bio: '',
-          profileImageUrl: importedProfileData.profileImageUrl ?? undefined,
-          coverImageUrl: undefined,
-          importedFrom: importedProfileData.platform,
-          twitterId: importedProfileData.twitterId ?? null,
-          twitterUsername:
-            importedProfileData.platform === 'twitter'
-              ? importedProfileData.username
-              : null,
-          farcasterFid: importedProfileData.farcasterFid ?? null,
-          farcasterUsername:
-            importedProfileData.platform === 'farcaster'
-              ? importedProfileData.username
-              : null,
-          tosAccepted: true,
-          privacyPolicyAccepted: true,
-        };
-        handleProfileSubmit(autoProfile).catch((submitError: Error) => {
-          logger.error(
-            'Social login auto-submit failed',
-            {
-              error: submitError.message,
-              platform: importedProfileData.platform,
-            },
-            'OnboardingProvider'
-          );
-          setError(submitError.message);
-          socialAutoSubmitRef.current = false;
-        });
-        return;
-      }
-    }
-  }, [
-    authenticated,
-    loadingProfile,
-    needsOnboarding,
-    isSocialLogin,
-    importedProfileData,
-    handleProfileSubmit,
-    socialAutoSubmitAttempted,
-  ]);
-
-  // Phase 2: Auto-import social profile from Babylon user record
-  // Social data (farcasterUsername, twitterUsername, etc.) is populated at login
-  // by the Farcaster/Twitter auth routes before this effect runs.
+  // Phase 2: Auto-import social profile from Feed user record
+  // by the Twitter auth routes before this effect runs.
   useEffect(() => {
     if (!authenticated || !needsOnboarding || !user) return;
     if (importedProfileData) return;
     if (loadingProfile) return;
-
-    if (user.hasFarcaster && user.farcasterUsername) {
-      const profileData: ImportedProfileData = {
-        platform: 'farcaster',
-        username: user.farcasterUsername,
-        displayName: user.displayName || user.farcasterUsername,
-        bio: user.bio || undefined,
-        profileImageUrl: user.profileImageUrl || null,
-        farcasterFid: undefined,
-      };
-
-      logger.info(
-        'Auto-imported Farcaster profile from Babylon user record',
-        {
-          username: profileData.username,
-          expectedPoints: POINTS.FARCASTER_LINK,
-        },
-        'OnboardingProvider'
-      );
-
-      setImportedProfileData(profileData);
-      setHasProgressedPastSocialImport(true);
-      return;
-    }
 
     if (user.hasTwitter && user.twitterUsername) {
       const profileData: ImportedProfileData = {
@@ -437,13 +306,12 @@ export function OnboardingProvider({
       };
 
       logger.info(
-        'Auto-imported Twitter profile from Babylon user record',
+        'Auto-imported Twitter profile from Feed user record',
         { username: profileData.username, expectedPoints: POINTS.TWITTER_LINK },
         'OnboardingProvider'
       );
 
       setImportedProfileData(profileData);
-      setHasProgressedPastSocialImport(true);
     }
   }, [
     authenticated,
@@ -462,7 +330,9 @@ export function OnboardingProvider({
 
     if (socialImport && dataParam) {
       try {
-        const parsed = JSON.parse(decodeURIComponent(dataParam)) as unknown;
+        // URLSearchParams already decoded the value; decoding again corrupts
+        // text containing '%'.
+        const parsed = JSON.parse(dataParam) as unknown;
 
         if (
           typeof parsed !== 'object' ||
@@ -470,7 +340,7 @@ export function OnboardingProvider({
           !('platform' in parsed) ||
           !('username' in parsed) ||
           !('displayName' in parsed) ||
-          (parsed.platform !== 'twitter' && parsed.platform !== 'farcaster') ||
+          parsed.platform !== 'twitter' ||
           typeof parsed.username !== 'string' ||
           typeof parsed.displayName !== 'string'
         ) {
@@ -490,7 +360,6 @@ export function OnboardingProvider({
         );
 
         setImportedProfileData(profileData);
-        setHasProgressedPastSocialImport(true);
       } catch (parseError) {
         logger.warn(
           'Failed to parse social profile data from URL',

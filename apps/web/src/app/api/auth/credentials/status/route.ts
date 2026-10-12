@@ -6,7 +6,7 @@
  *
  * @description
  * Checks availability of OAuth credentials for social platform integrations.
- * Returns configuration status for Twitter and Farcaster. Used by frontend
+ * Returns configuration status for Twitter. Used by frontend
  * to conditionally display social login options.
  *
  * @openapi
@@ -15,7 +15,7 @@
  *     tags:
  *       - Auth
  *     summary: Check OAuth credentials status
- *     description: Returns configuration status for Twitter and Farcaster OAuth
+ *     description: Returns configuration status for Twitter OAuth
  *     responses:
  *       200:
  *         description: Credentials status retrieved successfully
@@ -27,13 +27,10 @@
  *                 twitter:
  *                   type: boolean
  *                   description: Twitter OAuth 2.0 configured
- *                 farcaster:
- *                   type: boolean
- *                   description: Farcaster authentication configured
  *
  * @example
  * ```typescript
- * const { twitter, farcaster } = await fetch('/api/auth/credentials/status')
+ * const { twitter } = await fetch('/api/auth/credentials/status')
  *   .then(r => r.json());
  *
  * if (twitter) {
@@ -42,10 +39,9 @@
  * ```
  *
  * @see {@link /api/auth/twitter/initiate} Twitter OAuth initiation
- * @see {@link /api/auth/farcaster/callback} Farcaster callback
  */
 
-import { withErrorHandling } from '@babylon/api';
+import { withErrorHandling } from '@feed/api';
 import { NextResponse } from 'next/server';
 
 export const GET = withErrorHandling(async function GET() {
@@ -53,10 +49,7 @@ export const GET = withErrorHandling(async function GET() {
     process.env.TWITTER_CLIENT_ID && process.env.TWITTER_CLIENT_SECRET
   );
 
-  const farcasterAvailable = Boolean(process.env.NEYNAR_API_KEY);
-
   return NextResponse.json({
     twitter: twitterAvailable,
-    farcaster: farcasterAvailable,
   });
 });

@@ -4,14 +4,14 @@
  * User-level rate limiting and duplicate content detection utilities.
  *
  * NOTE:
- * The engine package intentionally does not depend on `@babylon/api`. Historically,
- * these utilities were provided by `@babylon/api` and re-exported from
- * `@babylon/engine` for convenience. That creates circular dependencies in the
+ * The engine package intentionally does not depend on `@feed/api`. Historically,
+ * these utilities were provided by `@feed/api` and re-exported from
+ * `@feed/engine` for convenience. That creates circular dependencies in the
  * monorepo, so the engine now provides a framework-agnostic, in-memory default
  * implementation, plus an optional injection point for API/runtime overrides.
  */
 
-import { logger } from '@babylon/shared';
+import { logger } from '@feed/shared';
 import { createHash } from 'crypto';
 
 // =============================================================================
@@ -304,16 +304,6 @@ export const RATE_LIMIT_CONFIGS = {
     windowMs: 60000,
     actionType: 'public_balance_fetch_anonymous',
   },
-  PUBLIC_NFT_IMAGE: {
-    maxRequests: 60,
-    windowMs: 60000,
-    actionType: 'public_nft_image',
-  },
-  PUBLIC_NFT_IMAGE_ANONYMOUS: {
-    maxRequests: 10,
-    windowMs: 60000,
-    actionType: 'public_nft_image_anonymous',
-  },
 
   // Default fallback
   DEFAULT: { maxRequests: 30, windowMs: 60000, actionType: 'default' },
@@ -324,7 +314,6 @@ export interface RateLimitProvider {
     userId: string,
     config: RateLimitConfig
   ): Promise<UserRateLimitResult>;
-  checkRateLimit(userId: string, config: RateLimitConfig): UserRateLimitResult;
   resetRateLimit(userId: string, actionType: string): Promise<void>;
   clearAllRateLimits(): Promise<void>;
   getRateLimitStatus(
@@ -403,10 +392,6 @@ class InMemoryRateLimitProvider implements RateLimitProvider {
     return checkRateLimitMemory(userId, config);
   }
 
-  checkRateLimit(userId: string, config: RateLimitConfig): UserRateLimitResult {
-    return checkRateLimitMemory(userId, config);
-  }
-
   async resetRateLimit(userId: string, actionType: string): Promise<void> {
     memoryFallbackStore.delete(`${userId}:${actionType}`);
     logger.info(
@@ -456,11 +441,16 @@ export function setRateLimitProvider(next: RateLimitProvider): void {
   provider = next;
 }
 
+/**
+ * Synchronous, process-local rate limit check. It never consults the
+ * configured (distributed) provider; use checkRateLimitAsync for limits that
+ * must hold across instances.
+ */
 export function checkRateLimit(
   userId: string,
   config: RateLimitConfig
 ): UserRateLimitResult {
-  return provider.checkRateLimit(userId, config);
+  return checkRateLimitMemory(userId, config);
 }
 
 export function checkRateLimitAsync(

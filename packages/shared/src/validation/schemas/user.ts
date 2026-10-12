@@ -5,6 +5,7 @@
 import { z } from 'zod';
 import {
   AssetOrUrlSchema,
+  createQueryBooleanSchema,
   createTrimmedStringSchema,
   EmailSchema,
   PaginationSchema,
@@ -41,7 +42,6 @@ export const UpdateUserSchema = z.object({
   profileImageUrl: AssetOrUrlSchema.optional(),
   coverImageUrl: AssetOrUrlSchema.optional(),
   showTwitterPublic: z.boolean().optional(),
-  showFarcasterPublic: z.boolean().optional(),
   showWalletPublic: z.boolean().optional(),
 });
 
@@ -49,7 +49,7 @@ export const UpdateUserSchema = z.object({
  * Social connection schemas
  */
 export const ConnectSocialSchema = z.object({
-  platform: z.enum(['twitter', 'farcaster']),
+  platform: z.enum(['twitter']),
   username: z.string().min(1).max(50),
   verificationToken: z.string().optional(), // For verification purposes
 });
@@ -217,7 +217,6 @@ export const UserResponseSchema = z.object({
   lifetimePnL: z.string(), // Decimal as string
   nftTokenId: z.number().nullable(),
   profileComplete: z.boolean(),
-  hasFarcaster: z.boolean(),
   hasTwitter: z.boolean(),
   referralCode: z.string().nullable(),
   referralCount: z.number(),
@@ -240,13 +239,13 @@ export const UserListResponseSchema = z.object({
  */
 export const UserPostsQuerySchema = z.object({
   type: z.enum(['posts', 'replies']).default('posts'),
-  page: z.coerce.number().min(1).default(1),
-  limit: z.coerce.number().min(1).max(100).default(100),
+  page: z.coerce.number().int().min(1).default(1),
+  limit: z.coerce.number().int().min(1).max(100).default(100),
 });
 
 /**
  * User followers/following query schema
  */
 export const UserFollowersQuerySchema = PaginationSchema.extend({
-  includeMutual: z.coerce.boolean().default(false),
+  includeMutual: createQueryBooleanSchema(false),
 });

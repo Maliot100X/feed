@@ -84,7 +84,7 @@
  * ```
  */
 
-import { optionalAuth, successResponse, withErrorHandling } from '@babylon/api';
+import { optionalAuth, successResponse, withErrorHandling } from '@feed/api';
 import {
   and,
   asPublic,
@@ -95,19 +95,18 @@ import {
   isNull,
   lte,
   notInArray,
-  organizationState,
   posts,
   stockPrices,
   worldEvents,
-} from '@babylon/db';
-import { StaticDataRegistry } from '@babylon/engine';
+} from '@feed/db';
+import { StaticDataRegistry } from '@feed/engine';
 import {
   BreakingNewsQuerySchema,
   FEED_WIDGET_CONFIG,
   getTimeAgo,
   logger,
   toISO,
-} from '@babylon/shared';
+} from '@feed/shared';
 import type { NextRequest } from 'next/server';
 import { selectSignificantWorldEvents } from './helpers';
 
@@ -123,6 +122,8 @@ interface BreakingNewsItem {
   imageUrl?: string; // Actor profile image or organization logo
   relatedQuestion?: number;
   relatedActorId?: string;
+  /** Set only when the item is an actual post (world events have no post). */
+  relatedPostId?: string;
   relatedOrganizationId?: string;
 }
 
@@ -221,24 +222,20 @@ export const GET = withErrorHandling(async (request: NextRequest) => {
           const priceUpdatesRaw = await db
             .select()
             .from(stockPrices)
+            .where(lte(stockPrices.timestamp, currentTime))
             .orderBy(desc(stockPrices.timestamp))
             .limit(FEED_WIDGET_CONFIG.MAX_PRICE_UPDATES_QUERY);
-
-          const orgStates = await db.select().from(organizationState);
-          const orgStateMap = new Map(orgStates.map((s) => [s.id, s]));
 
           const priceUpdates = priceUpdatesRaw.map((stockPrice) => {
             const staticOrg = StaticDataRegistry.getOrganization(
               stockPrice.organizationId
             );
-            const orgState = orgStateMap.get(stockPrice.organizationId);
             return {
               ...stockPrice,
               organization: staticOrg
                 ? {
                     id: staticOrg.id,
                     name: staticOrg.name,
-                    currentPrice: orgState?.currentPrice ?? null,
                     type: staticOrg.type,
                   }
                 : null,
@@ -266,25 +263,21 @@ export const GET = withErrorHandling(async (request: NextRequest) => {
             if (!update.organization) continue;
 
             const org = update.organization;
-            const price = org.currentPrice || update.price || 0;
-            const changePercent = update.changePercent || 0;
-            const isATH =
-              changePercent >= FEED_WIDGET_CONFIG.ATH_THRESHOLD_PERCENT &&
-              update.changePercent &&
-              update.changePercent > 0;
+            // Report the price recorded with this update so price, change
+            // and timestamp all describe the same event.
+            const price = update.price;
+            const changePercent = update.changePercent ?? 0;
 
             const priceTrendingThreshold =
               FEED_WIDGET_CONFIG.PRICE_TRENDING_HOURS * 60 * 60 * 1000;
             const isTrending =
               new Date(update.timestamp).getTime() >
               Date.now() - priceTrendingThreshold;
-            const fullDesc = `Stock price update for ${org.name || org.id}. Current price: $${price.toFixed(2)}. ${changePercent > 0 ? 'Up' : 'Down'} ${Math.abs(changePercent).toFixed(2)}% from previous price.${isATH ? ' This represents a new all-time high for the organization.' : ''}`;
+            const fullDesc = `Stock price update for ${org.name || org.id}. Current price: $${price.toFixed(2)}. ${changePercent > 0 ? 'Up' : 'Down'} ${Math.abs(changePercent).toFixed(2)}% from previous price.`;
 
             items.push({
               id: `price-${update.id}`,
-              title: isATH
-                ? `${org.name || org.id} reaches new ATH`
-                : `${org.name || org.id} ${changePercent > 0 ? 'up' : 'down'} ${Math.abs(changePercent).toFixed(1)}%`,
+              title: `${org.name || org.id} ${changePercent > 0 ? 'up' : 'down'} ${Math.abs(changePercent).toFixed(1)}%`,
               description: `Trading at $${price.toFixed(2)} • ${getTimeAgo(update.timestamp)}${isTrending ? ' • Trending' : ''}`,
               icon: 'chart',
               timestamp: toISO(update.timestamp),
@@ -379,6 +372,7 @@ export const GET = withErrorHandling(async (request: NextRequest) => {
               fullDescription: content,
               imageUrl: actor.profileImageUrl,
               relatedActorId: actor.id,
+              relatedPostId: post.id,
             });
           }
 
@@ -432,6 +426,7 @@ export const GET = withErrorHandling(async (request: NextRequest) => {
                 fullDescription: content,
                 imageUrl: actor.profileImageUrl,
                 relatedActorId: actor.id,
+                relatedPostId: post.id,
               });
             }
           }
@@ -442,7 +437,12 @@ export const GET = withErrorHandling(async (request: NextRequest) => {
             const allRecentEvents = await db
               .select()
               .from(worldEvents)
-              .where(lte(worldEvents.timestamp, currentTime)) // ✅ No future events
+              .where(
+                and(
+                  eq(worldEvents.visibility, 'public'),
+                  lte(worldEvents.timestamp, currentTime)
+                )
+              )
               .orderBy(desc(worldEvents.timestamp))
               .limit(10);
 
@@ -569,24 +569,20 @@ export const GET = withErrorHandling(async (request: NextRequest) => {
           const priceUpdatesRaw = await db
             .select()
             .from(stockPrices)
+            .where(lte(stockPrices.timestamp, currentTime))
             .orderBy(desc(stockPrices.timestamp))
             .limit(FEED_WIDGET_CONFIG.MAX_PRICE_UPDATES_QUERY);
-
-          const orgStates = await db.select().from(organizationState);
-          const orgStateMap = new Map(orgStates.map((s) => [s.id, s]));
 
           const priceUpdates = priceUpdatesRaw.map((stockPrice) => {
             const staticOrg = StaticDataRegistry.getOrganization(
               stockPrice.organizationId
             );
-            const orgState = orgStateMap.get(stockPrice.organizationId);
             return {
               ...stockPrice,
               organization: staticOrg
                 ? {
                     id: staticOrg.id,
                     name: staticOrg.name,
-                    currentPrice: orgState?.currentPrice ?? null,
                     type: staticOrg.type,
                   }
                 : null,
@@ -614,25 +610,21 @@ export const GET = withErrorHandling(async (request: NextRequest) => {
             if (!update.organization) continue;
 
             const org = update.organization;
-            const price = org.currentPrice || update.price || 0;
-            const changePercent = update.changePercent || 0;
-            const isATH =
-              changePercent >= FEED_WIDGET_CONFIG.ATH_THRESHOLD_PERCENT &&
-              update.changePercent &&
-              update.changePercent > 0;
+            // Report the price recorded with this update so price, change
+            // and timestamp all describe the same event.
+            const price = update.price;
+            const changePercent = update.changePercent ?? 0;
 
             const priceTrendingThreshold =
               FEED_WIDGET_CONFIG.PRICE_TRENDING_HOURS * 60 * 60 * 1000;
             const isTrending =
               new Date(update.timestamp).getTime() >
               Date.now() - priceTrendingThreshold;
-            const fullDesc = `Stock price update for ${org.name || org.id}. Current price: $${price.toFixed(2)}. ${changePercent > 0 ? 'Up' : 'Down'} ${Math.abs(changePercent).toFixed(2)}% from previous price.${isATH ? ' This represents a new all-time high for the organization.' : ''}`;
+            const fullDesc = `Stock price update for ${org.name || org.id}. Current price: $${price.toFixed(2)}. ${changePercent > 0 ? 'Up' : 'Down'} ${Math.abs(changePercent).toFixed(2)}% from previous price.`;
 
             items.push({
               id: `price-${update.id}`,
-              title: isATH
-                ? `${org.name || org.id} reaches new ATH`
-                : `${org.name || org.id} ${changePercent > 0 ? 'up' : 'down'} ${Math.abs(changePercent).toFixed(1)}%`,
+              title: `${org.name || org.id} ${changePercent > 0 ? 'up' : 'down'} ${Math.abs(changePercent).toFixed(1)}%`,
               description: `Trading at $${price.toFixed(2)} • ${getTimeAgo(update.timestamp)}${isTrending ? ' • Trending' : ''}`,
               icon: 'chart',
               timestamp: toISO(update.timestamp),
@@ -727,6 +719,7 @@ export const GET = withErrorHandling(async (request: NextRequest) => {
               fullDescription: content,
               imageUrl: actor.profileImageUrl,
               relatedActorId: actor.id,
+              relatedPostId: post.id,
             });
           }
 
@@ -780,6 +773,7 @@ export const GET = withErrorHandling(async (request: NextRequest) => {
                 fullDescription: content,
                 imageUrl: actor.profileImageUrl,
                 relatedActorId: actor.id,
+                relatedPostId: post.id,
               });
             }
           }
@@ -790,7 +784,12 @@ export const GET = withErrorHandling(async (request: NextRequest) => {
             const allRecentEvents = await db
               .select()
               .from(worldEvents)
-              .where(lte(worldEvents.timestamp, currentTime)) // ✅ No future events
+              .where(
+                and(
+                  eq(worldEvents.visibility, 'public'),
+                  lte(worldEvents.timestamp, currentTime)
+                )
+              )
               .orderBy(desc(worldEvents.timestamp))
               .limit(10);
 

@@ -65,7 +65,7 @@ const mockDb = {
   })),
 };
 
-mock.module('@babylon/db', () => ({
+mock.module('@feed/db', () => ({
   db: mockDb,
   and: (...args: unknown[]) => args,
   desc: (col: unknown) => col,
@@ -98,7 +98,7 @@ const mockLogger = {
   error: mock(() => {}),
 };
 
-mock.module('@babylon/shared', () => ({
+mock.module('@feed/shared', () => ({
   generateSnowflakeId: mock(() => Promise.resolve('test-snowflake-id')),
   logger: mockLogger,
 }));
@@ -187,6 +187,7 @@ const mockWorldFactsGenerator = {
 
 mock.module('../services/world-facts-generator', () => ({
   createWorldFactsGenerator: mock(() => mockWorldFactsGenerator),
+  worldFactsGenerator: mockWorldFactsGenerator,
 }));
 
 // Import the function AFTER mocks are set up
@@ -319,33 +320,34 @@ describe('World Facts Update - RSS/Parody Pipeline Error Handling', () => {
     lastAutoFactCreatedAt = new Date(Date.now() - 24 * 60 * 60 * 1000); // 24 hours ago
   });
 
-  test('RSS fetch error should be caught, logged, and return updated:false', async () => {
+  test('RSS fetch error must propagate and release the lock', async () => {
     rssFetchThrows = true;
 
-    const result = await updateWorldFactsIfNeeded();
+    await expect(updateWorldFactsIfNeeded()).rejects.toThrow(
+      'RSS fetch failed'
+    );
 
-    expect(result.updated).toBe(false);
     expect(mockLogger.error).toHaveBeenCalled();
     // Lock should still be released in finally block
     expect(lockReleaseCalls.length).toBe(1);
   });
 
-  test('parody processing error should be caught, logged, and return updated:false', async () => {
+  test('parody processing error must propagate and release the lock', async () => {
     parodyProcessThrows = true;
 
-    const result = await updateWorldFactsIfNeeded();
+    await expect(updateWorldFactsIfNeeded()).rejects.toThrow(
+      'Parody processing failed'
+    );
 
-    expect(result.updated).toBe(false);
     expect(mockLogger.error).toHaveBeenCalled();
     expect(lockReleaseCalls.length).toBe(1);
   });
 
-  test('cleanup error should be caught, logged, and return updated:false', async () => {
+  test('cleanup error must propagate and release the lock', async () => {
     cleanupThrows = true;
 
-    const result = await updateWorldFactsIfNeeded();
+    await expect(updateWorldFactsIfNeeded()).rejects.toThrow('Cleanup failed');
 
-    expect(result.updated).toBe(false);
     expect(mockLogger.error).toHaveBeenCalled();
     expect(lockReleaseCalls.length).toBe(1);
   });
@@ -353,7 +355,9 @@ describe('World Facts Update - RSS/Parody Pipeline Error Handling', () => {
   test('pipeline errors should not prevent lock release', async () => {
     rssFetchThrows = true;
 
-    await updateWorldFactsIfNeeded();
+    await expect(updateWorldFactsIfNeeded()).rejects.toThrow(
+      'RSS fetch failed'
+    );
 
     // Lock must be released even on error
     expect(lockReleaseCalls.length).toBe(1);
@@ -369,25 +373,22 @@ describe('World Facts Update - Generation Marker Error Handling', () => {
     generateFactsThrows = false; // Explicitly ensure generation succeeds
   });
 
-  test('marker insert error should be caught and logged', async () => {
+  test('marker insert error must propagate', async () => {
     markerInsertThrows = true;
 
-    const result = await updateWorldFactsIfNeeded();
+    await expect(updateWorldFactsIfNeeded()).rejects.toThrow(
+      'Marker insert failed'
+    );
 
-    // Should still return success (marker error doesn't abort)
-    expect(result.updated).toBe(true);
     expect(mockLogger.error).toHaveBeenCalled();
   });
 
-  test('marker error should not affect return value', async () => {
+  test('marker error must prevent success', async () => {
     markerInsertThrows = true;
 
-    const result = await updateWorldFactsIfNeeded();
-
-    expect(result.updated).toBe(true);
-    expect(result.stats).toBeDefined();
-    // Note: worldFactsGenerated comes from the generator mock
-    expect(result.stats?.worldFactsGenerated).toBeGreaterThanOrEqual(0);
+    await expect(updateWorldFactsIfNeeded()).rejects.toThrow(
+      'Marker insert failed'
+    );
   });
 });
 
@@ -398,24 +399,22 @@ describe('World Facts Update - Facts Generation Error Handling', () => {
     lastAutoFactCreatedAt = new Date(Date.now() - 24 * 60 * 60 * 1000); // 24 hours ago
   });
 
-  test('facts generation error should be caught and logged', async () => {
+  test('facts generation error must propagate', async () => {
     generateFactsThrows = true;
 
-    const result = await updateWorldFactsIfNeeded();
+    await expect(updateWorldFactsIfNeeded()).rejects.toThrow(
+      'Facts generation failed'
+    );
 
-    // Should still complete (with default values)
-    expect(result.updated).toBe(true);
     expect(mockLogger.error).toHaveBeenCalled();
   });
 
-  test('facts generation error uses default result values', async () => {
+  test('facts generation error must not fabricate default values', async () => {
     generateFactsThrows = true;
 
-    const result = await updateWorldFactsIfNeeded();
-
-    expect(result.updated).toBe(true);
-    expect(result.stats?.worldFactsGenerated).toBe(0); // Default value
-    expect(result.stats?.worldFactsArchived).toBe(0); // Default value
+    await expect(updateWorldFactsIfNeeded()).rejects.toThrow(
+      'Facts generation failed'
+    );
   });
 
   test('facts generation error skips marker to allow immediate retry', async () => {
@@ -425,7 +424,9 @@ describe('World Facts Update - Facts Generation Error Handling', () => {
 
     generateFactsThrows = true;
 
-    await updateWorldFactsIfNeeded();
+    await expect(updateWorldFactsIfNeeded()).rejects.toThrow(
+      'Facts generation failed'
+    );
 
     // Marker should NOT be inserted when generation fails
     // (This allows the next tick to retry immediately)

@@ -366,4 +366,11 @@ async function main() {
   }
 }
 
-main().catch(console.error);
+// Only generate when executed directly: the unit suite imports this module for
+// its prompt helpers and must never trigger paid image generation.
+if (import.meta.main) {
+  main().catch((error) => {
+    console.error(error);
+    process.exit(1);
+  });
+}

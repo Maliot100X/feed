@@ -33,7 +33,7 @@ ENGINE_DIR="$(dirname "$SCRIPT_DIR")/../engine"
 cd "$(dirname "$SCRIPT_DIR")"
 
 echo "=============================================="
-echo "Babylon Training Data Generator"
+echo "Feed Training Data Generator"
 echo "=============================================="
 echo ""
 echo "Configuration:"
@@ -166,7 +166,7 @@ if [ "$FAILED" -gt 0 ]; then
 fi
 
 echo "Next steps:"
-echo "  1. Merge trajectories:   python python/scripts/merge_trajectories.py \"$OUTPUT_DIR\" --output \"$OUTPUT_DIR/merged\""
+echo "  1. Merge trajectories:   python python/scripts/data-prep/merge_trajectories.py \"$OUTPUT_DIR\" --output \"$OUTPUT_DIR/merged\""
 echo "  2. Validate data:        python python/scripts/import_json_trajectories.py --source \"$OUTPUT_DIR/merged\" --dry-run --verbose"
 echo "  3. Import to database:   python python/scripts/import_json_trajectories.py --source \"$OUTPUT_DIR/merged\""
 echo ""

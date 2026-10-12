@@ -19,7 +19,7 @@ function HomePageContent() {
   const searchParams = useSearchParams();
 
   useEffect(() => {
-    // Wait for Privy to be ready before deciding to show login modal
+    // Wait for auth to be ready before deciding to show login modal
     // This prevents the modal from flashing on every page load
     if (!ready) {
       return;
@@ -28,13 +28,14 @@ function HomePageContent() {
     // Show login modal if not authenticated
     if (!authenticated) {
       queueLoginModal({
-        title: 'Welcome to Babylon',
+        title: 'Welcome to Feed',
         message:
           'Log in to start trading prediction markets, replying to NPCs, and earning rewards in this satirical game.',
       });
     }
 
-    router.push(getHomeFeedUrl(searchParams));
+    // replace (not push) so Back does not loop through this redirect.
+    router.replace(getHomeFeedUrl(searchParams));
   }, [ready, authenticated, router, queueLoginModal, searchParams]);
 
   // Show feed skeleton while redirecting

@@ -27,8 +27,8 @@ import pytest
 
 from src.training.rewards import BehaviorMetrics
 
-BABYLON_ROOT = Path(__file__).resolve().parents[5]
-ENGINE_ROOT = BABYLON_ROOT / "packages" / "engine"
+FEED_ROOT = Path(__file__).resolve().parents[5]
+SIM_ROOT = FEED_ROOT / "packages" / "sim"
 
 
 def _find_free_port() -> int:
@@ -60,7 +60,8 @@ def simulation_bridge_url() -> str:
     configured_url = os.getenv("SIMULATION_BRIDGE_URL")
     if configured_url:
         _wait_for_bridge(configured_url.rstrip("/"), None)
-        return configured_url.rstrip("/")
+        yield configured_url.rstrip("/")
+        return
 
     port = _find_free_port()
     url = f"http://127.0.0.1:{port}"
@@ -69,8 +70,8 @@ def simulation_bridge_url() -> str:
     env["SIMULATION_BRIDGE_PORT"] = str(port)
     env["SIMULATION_DATA_PATH"] = simulation_data_path
     process = subprocess.Popen(
-        ["bun", "run", "src/services/simulation-bridge-server.ts"],
-        cwd=ENGINE_ROOT,
+        ["bun", "run", "core/bridge/simulation-bridge-server.ts"],
+        cwd=SIM_ROOT,
         env=env,
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
@@ -180,7 +181,7 @@ def create_step(
             {
                 "model": "gpt-4",
                 "purpose": "action",
-                "systemPrompt": "You are a trading agent in Babylon prediction markets.",
+                "systemPrompt": "You are a trading agent in Feed prediction markets.",
                 "userPrompt": f"Step {step_number}: Analyze market and decide action.",
                 "response": f"<thinking>Analyzing step {step_number}...</thinking>\nAction: {action_type}",
                 "reasoning": f"Based on market analysis at step {step_number}, executing {action_type}.",

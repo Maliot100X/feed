@@ -235,8 +235,8 @@ RULES:
 - amount <= MAX shown in BALANCES table (or REJECTED)
 - Perp actions (open_long/open_short): marketType=perp, ticker required
 - Prediction BUY actions (buy_yes/buy_no): marketType=prediction, marketId required
-- Prediction SELL actions (sell_yes/sell_no): marketType=prediction, marketId required, amount=0 (closes entire position)
-- close_position: positionId required (exact UUID), amount=0
+- Prediction SELL actions (sell_yes/sell_no): marketType=prediction, marketId required, amount=0 (closes entire position). The SAME NPC must hold the EXACT marketId and side in its Positions row; never sell another market or another NPC's position. Copy its positionId.
+- close_position: positionId required (copy the exact opaque ID from this NPC's Positions row), amount=0
 - hold: all fields null, amount=0
 - PREDICTION SLIPPAGE LIMIT: The last column of the market table shows "max $Xk" for each prediction market. Your trade amount MUST stay at or below that value — larger trades are rejected. For thin markets, bet $200-$500; for balanced, up to the listed max.
 

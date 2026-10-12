@@ -44,9 +44,9 @@
  * ```
  */
 
-import { requireAdmin, successResponse, withErrorHandling } from '@babylon/api';
-import { queryMonitor } from '@babylon/db';
-import { logger } from '@babylon/shared';
+import { requireAdmin, successResponse, withErrorHandling } from '@feed/api';
+import { queryMonitor } from '@feed/db';
+import { logger } from '@feed/shared';
 import type { NextRequest } from 'next/server';
 
 /**
@@ -77,11 +77,10 @@ export const GET = withErrorHandling(async (request: NextRequest) => {
       maxDuration: Math.round(stats.maxDuration * 100) / 100,
     }));
 
-  // Get memory usage
-  const memUsage = process.memoryUsage();
-
-  // Get process uptime
-  const uptime = process.uptime();
+  // Workers have no per-process memory or uptime (the methods throw there).
+  const hasProcessMetrics = process.env.DEPLOYMENT_PLATFORM !== 'cloudflare';
+  const memUsage = hasProcessMetrics ? process.memoryUsage() : null;
+  const uptime = hasProcessMetrics ? process.uptime() : null;
 
   logger.info(
     'Network stats requested',
@@ -117,16 +116,19 @@ export const GET = withErrorHandling(async (request: NextRequest) => {
 
     // Server metrics
     server: {
-      uptime: {
-        seconds: Math.floor(uptime),
-        formatted: formatUptime(uptime),
-      },
-      memory: {
-        heapUsed: Math.round((memUsage.heapUsed / 1024 / 1024) * 100) / 100, // MB
-        heapTotal: Math.round((memUsage.heapTotal / 1024 / 1024) * 100) / 100, // MB
-        external: Math.round((memUsage.external / 1024 / 1024) * 100) / 100, // MB
-        rss: Math.round((memUsage.rss / 1024 / 1024) * 100) / 100, // MB
-      },
+      uptime:
+        uptime === null
+          ? null
+          : { seconds: Math.floor(uptime), formatted: formatUptime(uptime) },
+      memory: memUsage
+        ? {
+            heapUsed: Math.round((memUsage.heapUsed / 1024 / 1024) * 100) / 100, // MB
+            heapTotal:
+              Math.round((memUsage.heapTotal / 1024 / 1024) * 100) / 100, // MB
+            external: Math.round((memUsage.external / 1024 / 1024) * 100) / 100, // MB
+            rss: Math.round((memUsage.rss / 1024 / 1024) * 100) / 100, // MB
+          }
+        : null,
       env: process.env.NODE_ENV,
       pid: process.pid,
     },
@@ -139,8 +141,11 @@ export const GET = withErrorHandling(async (request: NextRequest) => {
           : slowQueryRate < 15
             ? 'warning'
             : 'critical',
-      memory:
-        memUsage.heapUsed / memUsage.heapTotal < 0.9 ? 'healthy' : 'warning',
+      memory: !memUsage
+        ? 'unavailable'
+        : memUsage.heapUsed / memUsage.heapTotal < 0.9
+          ? 'healthy'
+          : 'warning',
       overall: determineOverallHealth(slowQueryRate, memUsage),
     },
   });
@@ -169,9 +174,11 @@ function formatUptime(seconds: number): string {
  */
 function determineOverallHealth(
   slowQueryRate: number,
-  memUsage: NodeJS.MemoryUsage
+  memUsage: NodeJS.MemoryUsage | null
 ): 'healthy' | 'warning' | 'critical' {
-  const memoryUsagePercent = (memUsage.heapUsed / memUsage.heapTotal) * 100;
+  const memoryUsagePercent = memUsage
+    ? (memUsage.heapUsed / memUsage.heapTotal) * 100
+    : 0;
 
   if (slowQueryRate > 15 || memoryUsagePercent > 95) {
     return 'critical';

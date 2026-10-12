@@ -5,7 +5,7 @@
  * This file contains only browser-compatible code.
  *
  * @remarks For Node.js file system operations (saveDeployment, updateEnvFile),
- * import from '@babylon/contracts/deployment/validation-node'.
+ * import from '@feed/contracts/deployment/validation-node'.
  */
 
 import { ethers } from 'ethers';
@@ -38,8 +38,8 @@ export interface ContractAddresses {
   identityRegistry: string;
   /** ERC-8004 Reputation System address */
   reputationSystem: string;
-  /** Babylon Game Oracle address (optional) */
-  babylonOracle?: string;
+  /** Feed Game Oracle address (optional) */
+  feedOracle?: string;
   /** Ban Manager address (optional) */
   banManager?: string;
   /** Chainlink Oracle mock address (testnet only) */
@@ -78,20 +78,40 @@ export interface ValidationResult {
 export async function loadDeployment(
   env: DeploymentEnv
 ): Promise<DeploymentInfo | null> {
+  let data: object;
   if (env === 'localnet') {
-    const deployment = await import('../../deployments/local');
-    return deployment.default as DeploymentInfo;
-  }
-  if (env === 'testnet') {
-    const deployment = await import('../../deployments/base-sepolia');
-    return deployment.default as DeploymentInfo;
-  }
-  if (env === 'mainnet') {
-    const deployment = await import('../../deployments/base');
-    return deployment.default as DeploymentInfo;
+    data = (await import('../../deployments/local')).default;
+  } else if (env === 'testnet') {
+    data = (await import('../../deployments/base-sepolia')).default;
+  } else if (env === 'mainnet') {
+    data = (await import('../../deployments/base')).default;
+  } else {
+    return null;
   }
 
-  return null;
+  // Undeployed networks ship an empty JSON object.
+  return isDeploymentInfo(data) ? data : null;
+}
+
+function isDeploymentInfo(data: object): data is DeploymentInfo {
+  return (
+    'chainId' in data &&
+    typeof data.chainId === 'number' &&
+    'contracts' in data &&
+    typeof data.contracts === 'object' &&
+    data.contracts !== null
+  );
+}
+
+/** Contracts every deployment must provide. */
+const REQUIRED_CONTRACTS = [
+  'diamond',
+  'identityRegistry',
+  'reputationSystem',
+] as const satisfies ReadonlyArray<keyof ContractAddresses>;
+
+function hasBytecode(code: string): boolean {
+  return code !== '0x' && code !== '0x0';
 }
 
 /**
@@ -102,10 +122,6 @@ export async function validateDeployment(
   rpcUrl: string,
   expectedContracts?: Partial<ContractAddresses>
 ): Promise<ValidationResult> {
-  const errors: string[] = [];
-  const warnings: string[] = [];
-  const contracts: Partial<ContractAddresses> = {};
-
   const deployment = await loadDeployment(env);
 
   if (!deployment) {
@@ -122,6 +138,31 @@ export async function validateDeployment(
   }
 
   const provider = new ethers.JsonRpcProvider(rpcUrl);
+  try {
+    return await validateDeploymentWithProvider(
+      provider,
+      deployment,
+      expectedContracts
+    );
+  } finally {
+    provider.destroy();
+  }
+}
+
+/**
+ * Validate a loaded deployment against a provider. Every listed contract
+ * address must have bytecode; the required core contracts must be listed.
+ * An empty expectation set is a failure, never a vacuous pass.
+ */
+export async function validateDeploymentWithProvider(
+  provider: Pick<ethers.Provider, 'getNetwork' | 'getCode' | 'call'>,
+  deployment: Pick<DeploymentInfo, 'chainId' | 'contracts'>,
+  expectedContracts?: Partial<ContractAddresses>
+): Promise<ValidationResult> {
+  const errors: string[] = [];
+  const warnings: string[] = [];
+  const contracts: Partial<ContractAddresses> = {};
+
   const network = await provider.getNetwork();
   const deploymentChainId = BigInt(deployment.chainId);
   if (network.chainId !== deploymentChainId) {
@@ -130,64 +171,54 @@ export async function validateDeployment(
     );
   }
 
-  const contractsToValidate = expectedContracts || deployment.contracts;
+  const contractsToValidate = expectedContracts ?? deployment.contracts;
+  const entries = (
+    Object.entries(contractsToValidate) as Array<
+      [keyof ContractAddresses, string | undefined]
+    >
+  ).filter((entry): entry is [keyof ContractAddresses, string] =>
+    Boolean(entry[1])
+  );
 
-  if (contractsToValidate.diamond) {
-    const code = await provider.getCode(contractsToValidate.diamond);
-    if (code === '0x' || code === '0x0') {
-      errors.push(`Diamond not deployed at ${contractsToValidate.diamond}`);
-    } else {
-      contracts.diamond = contractsToValidate.diamond;
-      logger.info(
-        `✅ Diamond verified at ${contractsToValidate.diamond}`,
-        undefined,
-        'DeploymentValidation'
-      );
+  if (entries.length === 0) {
+    errors.push('No contract addresses to validate');
+  }
+  if (!expectedContracts) {
+    for (const name of REQUIRED_CONTRACTS) {
+      if (!contractsToValidate[name]) {
+        errors.push(`Required contract ${name} has no address`);
+      }
     }
   }
 
-  if (contractsToValidate.identityRegistry) {
-    const code = await provider.getCode(contractsToValidate.identityRegistry);
-    if (code === '0x' || code === '0x0') {
-      errors.push(
-        `Identity Registry not deployed at ${contractsToValidate.identityRegistry}`
-      );
-    } else {
-      contracts.identityRegistry = contractsToValidate.identityRegistry;
-      logger.info(
-        `✅ Identity Registry verified at ${contractsToValidate.identityRegistry}`,
-        undefined,
-        'DeploymentValidation'
-      );
+  for (const [name, address] of entries) {
+    if (!ethers.isAddress(address)) {
+      errors.push(`${name} has an invalid address: ${address}`);
+      continue;
     }
-  }
-
-  if (contractsToValidate.reputationSystem) {
-    const code = await provider.getCode(contractsToValidate.reputationSystem);
-    if (code === '0x' || code === '0x0') {
-      errors.push(
-        `Reputation System not deployed at ${contractsToValidate.reputationSystem}`
-      );
-    } else {
-      contracts.reputationSystem = contractsToValidate.reputationSystem;
-      logger.info(
-        `✅ Reputation System verified at ${contractsToValidate.reputationSystem}`,
-        undefined,
-        'DeploymentValidation'
-      );
+    const code = await provider.getCode(address);
+    if (!hasBytecode(code)) {
+      errors.push(`${name} not deployed at ${address}`);
+      continue;
     }
+    contracts[name] = address;
+    logger.info(
+      `✅ ${name} verified at ${address}`,
+      undefined,
+      'DeploymentValidation'
+    );
   }
 
   if (contracts.diamond) {
-    const diamondContract = new ethers.Contract(
-      contracts.diamond,
-      ['function getBalance(address) view returns (uint256)'],
-      provider
-    );
-
-    if (diamondContract.getBalance) {
-      await diamondContract.getBalance(ethers.ZeroAddress);
-    }
+    // Smoke-call a diamond view so a proxy without facets fails validation.
+    const iface = new ethers.Interface([
+      'function getBalance(address) view returns (uint256)',
+    ]);
+    const result = await provider.call({
+      to: contracts.diamond,
+      data: iface.encodeFunctionData('getBalance', [ethers.ZeroAddress]),
+    });
+    iface.decodeFunctionResult('getBalance', result);
     logger.info(
       '✅ Diamond contract is functional',
       undefined,
@@ -212,8 +243,11 @@ export async function isContractDeployed(
   address: string
 ): Promise<boolean> {
   const provider = new ethers.JsonRpcProvider(rpcUrl);
-  const code = await provider.getCode(address);
-  return code !== '0x' && code !== '0x0';
+  try {
+    return hasBytecode(await provider.getCode(address));
+  } finally {
+    provider.destroy();
+  }
 }
 
 /**
@@ -243,7 +277,7 @@ export function printDeploymentValidationResult(
       undefined,
       'DeploymentValidation'
     );
-    return;
+    throw new Error(`No contracts deployed for ${env}`);
   }
 
   if (result.warnings.length > 0) {
@@ -275,53 +309,43 @@ export function printDeploymentValidationResult(
 /**
  * Wait for transaction confirmation.
  *
- * Polls the network until the transaction has the required number of confirmations.
+ * A transaction mined in the latest block has one confirmation.
  *
  * @param provider - Ethers provider instance
  * @param txHash - Transaction hash to wait for
  * @param confirmations - Number of confirmations required (default: 1)
- * @returns Transaction receipt or null if timeout
- * @throws Error if confirmation timeout is reached
+ * @param timeoutMs - Maximum time to wait (default: 5 minutes)
+ * @returns The successful transaction receipt
+ * @throws Error if the transaction reverted or the timeout is reached
  */
 export async function waitForTransaction(
-  provider: ethers.Provider,
+  provider: Pick<ethers.Provider, 'waitForTransaction'>,
   txHash: string,
-  confirmations = 1
-): Promise<ethers.TransactionReceipt | null> {
+  confirmations = 1,
+  timeoutMs = 5 * 60 * 1000
+): Promise<ethers.TransactionReceipt> {
   logger.info(
     `Waiting for transaction ${txHash}...`,
     undefined,
     'DeploymentValidation'
   );
 
-  let attempts = 0;
-  const maxAttempts = 60;
-
-  while (attempts < maxAttempts) {
-    const receipt = await provider.getTransactionReceipt(txHash);
-    if (receipt && receipt.blockNumber) {
-      const currentBlock = await provider.getBlockNumber();
-      const confirmedBlocks = currentBlock - receipt.blockNumber;
-
-      if (confirmedBlocks >= confirmations) {
-        logger.info(
-          `✅ Transaction confirmed (${confirmedBlocks} blocks)`,
-          undefined,
-          'DeploymentValidation'
-        );
-        return receipt;
-      }
-
-      logger.info(
-        `Transaction has ${confirmedBlocks}/${confirmations} confirmations`,
-        undefined,
-        'DeploymentValidation'
-      );
-    }
-
-    await new Promise((resolve) => setTimeout(resolve, 5000));
-    attempts++;
+  const receipt = await provider.waitForTransaction(
+    txHash,
+    confirmations,
+    timeoutMs
+  );
+  if (!receipt) {
+    throw new Error(`Transaction ${txHash} was not mined`);
+  }
+  if (receipt.status !== 1) {
+    throw new Error(`Transaction ${txHash} reverted`);
   }
 
-  throw new Error('Transaction confirmation timeout');
+  logger.info(
+    `✅ Transaction confirmed (${confirmations} confirmations)`,
+    undefined,
+    'DeploymentValidation'
+  );
+  return receipt;
 }

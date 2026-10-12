@@ -10,7 +10,7 @@
  *   bun run scripts/seed-test-users.ts
  */
 
-import { closeDatabase, db, generateSnowflakeId } from '@babylon/db';
+import { closeDatabase, db, generateSnowflakeId } from '@feed/db';
 
 const TEST_USERS = [
   {
@@ -68,7 +68,6 @@ async function main(): Promise<void> {
         hasBio: true,
         reputationPoints: 0,
         bannerDismissCount: 0,
-        showFarcasterPublic: true,
         showTwitterPublic: true,
         showWalletPublic: true,
         appealCount: 0,

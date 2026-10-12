@@ -1,6 +1,6 @@
 'use client';
 
-import { cn } from '@babylon/shared';
+import { cn } from '@feed/shared';
 import {
   Calendar,
   MessageCircle,
@@ -9,10 +9,9 @@ import {
   User as UserIcon,
   Users,
 } from 'lucide-react';
-import { useCallback, useEffect, useState, useTransition } from 'react';
+import { useCallback, useEffect, useRef, useState, useTransition } from 'react';
 import { z } from 'zod';
-import { getAuthToken } from '@/lib/auth';
-import { apiUrl } from '@/utils/api-url';
+import { apiFetch } from '@/utils/api-fetch';
 
 /**
  * Participant schema for validation.
@@ -89,36 +88,42 @@ export function GroupsTab() {
   >('createdAt');
   const [sortOrder, setSortOrder] = useState<'asc' | 'desc'>('desc');
   const [isRefreshing, startRefresh] = useTransition();
+  const [loadError, setLoadError] = useState<string | null>(null);
+  // Only the latest request (current sort) may commit results.
+  const requestSeqRef = useRef(0);
 
-  const fetchGroups = useCallback(async () => {
+  const fetchGroups = useCallback(() => {
+    const seq = ++requestSeqRef.current;
+    const isCurrent = () => seq === requestSeqRef.current;
     startRefresh(async () => {
       setIsLoading(true);
-      const token = getAuthToken();
-
-      if (!token) {
-        throw new Error('Not authenticated');
-      }
-
-      const response = await fetch(
-        apiUrl(`/api/admin/groups?sortBy=${sortBy}&sortOrder=${sortOrder}`),
-        {
-          headers: {
-            Authorization: `Bearer ${token}`,
-          },
+      try {
+        const response = await apiFetch(
+          `/api/admin/groups?sortBy=${sortBy}&sortOrder=${sortOrder}`
+        );
+        if (!response.ok) {
+          throw new Error(`Failed to fetch groups (${response.status})`);
         }
-      );
-
-      if (!response.ok) {
-        throw new Error('Failed to fetch groups');
+        const data = (await response.json()) as {
+          data?: { groups?: unknown };
+        };
+        const validation = z
+          .array(GroupChatSchema)
+          .safeParse(data.data?.groups);
+        if (!validation.success) {
+          throw new Error('Invalid group data structure');
+        }
+        if (!isCurrent()) return;
+        setGroups(validation.data);
+        setLoadError(null);
+      } catch (err) {
+        if (!isCurrent()) return;
+        setLoadError(
+          err instanceof Error ? err.message : 'Failed to fetch groups'
+        );
+      } finally {
+        if (isCurrent()) setIsLoading(false);
       }
-
-      const data = await response.json();
-      const validation = z.array(GroupChatSchema).safeParse(data.data.groups);
-      if (!validation.success) {
-        throw new Error('Invalid group data structure');
-      }
-      setGroups(validation.data || []);
-      setIsLoading(false);
     });
   }, [sortBy, sortOrder]);
 
@@ -251,6 +256,17 @@ export function GroupsTab() {
       {isLoading ? (
         <div className="flex items-center justify-center py-12">
           <RefreshCw className="h-8 w-8 animate-spin text-muted-foreground" />
+        </div>
+      ) : loadError ? (
+        <div role="alert" className="py-12 text-center text-red-500">
+          <p>{loadError}</p>
+          <button
+            type="button"
+            onClick={() => fetchGroups()}
+            className="mt-4 rounded-lg bg-muted px-4 py-2 text-foreground text-sm"
+          >
+            Retry
+          </button>
         </div>
       ) : filteredGroups.length === 0 ? (
         <div className="py-12 text-center text-muted-foreground">

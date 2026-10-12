@@ -1,16 +1,10 @@
 /**
  * Create Post Action
  *
- * Creates a post on the Babylon feed. The content is provided as a parameter
+ * Creates a post on the Feed feed. The content is provided as a parameter
  * (determined by the LLM in the multi-step decision).
  */
 
-import { db, posts } from '@babylon/db';
-import {
-  type GeneratedTag,
-  generateTagsFromPost,
-  storeTagsForPost,
-} from '@babylon/engine';
 import type {
   Action,
   ActionResult,
@@ -19,6 +13,12 @@ import type {
   Memory,
   State,
 } from '@elizaos/core';
+import { db, posts } from '@feed/db';
+import {
+  type GeneratedTag,
+  generateTagsFromPost,
+  storeTagsForPost,
+} from '@feed/engine';
 import { logger } from '../../../../shared/logger';
 import { generateSnowflakeId } from '../../../../shared/snowflake';
 
@@ -29,11 +29,11 @@ export interface CreatePostParams {
 /**
  * CREATE_POST Action
  *
- * Creates a post on the Babylon social feed.
+ * Creates a post on the Feed social feed.
  */
 export const createPostAction: Action = {
   name: 'CREATE_POST',
-  description: 'Create a post on the Babylon social feed',
+  description: 'Create a post on the Feed social feed',
 
   parameters: {
     content: {

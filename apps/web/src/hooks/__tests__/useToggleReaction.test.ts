@@ -139,3 +139,17 @@ describe('applyReactionDelta', () => {
     });
   });
 });
+
+describe('applyReactionDelta rollback', () => {
+  it('the inverse delta restores the original summary', () => {
+    const original = [summary('👍', 2, false), summary('🔥', 1, true)];
+    for (const [emoji, action, inverse] of [
+      ['👍', 'added', 'removed'],
+      ['🔥', 'removed', 'added'],
+    ] as const) {
+      const optimistic = applyReactionDelta(original, emoji, action, true);
+      const restored = applyReactionDelta(optimistic, emoji, inverse, true);
+      expect(restored).toEqual(original);
+    }
+  });
+});

@@ -10,7 +10,7 @@
  *
  * @example
  * ```typescript
- * import { verifyCronAuth } from '@babylon/api';
+ * import { verifyCronAuth } from '@feed/api';
  *
  * export async function POST(request: NextRequest) {
  *   if (!verifyCronAuth(request)) {
@@ -21,7 +21,7 @@
  * ```
  */
 
-import { logger } from '@babylon/shared';
+import { logger } from '@feed/shared';
 import type { NextRequest } from 'next/server';
 import { NextResponse } from 'next/server';
 import { isValidCronSecret } from './dev-credentials';
@@ -32,8 +32,6 @@ const isDevelopment = process.env.NODE_ENV !== 'production';
 interface CronAuthOptions {
   /** Name of the cron job for logging */
   jobName?: string;
-  /** Allow Vercel Cron user-agent as auth (for GET endpoints) */
-  allowVercelCronUserAgent?: boolean;
 }
 
 /**
@@ -50,25 +48,9 @@ export function verifyCronAuth(
   request: NextRequest,
   options: CronAuthOptions = {}
 ): boolean {
-  const { jobName = 'Cron', allowVercelCronUserAgent = false } = options;
+  const { jobName = 'Cron' } = options;
   const authHeader = request.headers.get('authorization');
   const cronSecret = process.env.CRON_SECRET;
-
-  // Check for Vercel Cron user-agent (some cron services use this)
-  if (allowVercelCronUserAgent) {
-    const userAgent = request.headers.get('user-agent')?.toLowerCase() || '';
-    const isVercelCron = userAgent.includes('vercel-cron');
-    const hasVercelHeader = request.headers.has('x-vercel-id');
-
-    if (isVercelCron || hasVercelHeader) {
-      logger.info(
-        'Cron request authorized via Vercel headers',
-        { userAgent, hasVercelHeader },
-        jobName
-      );
-      return true;
-    }
-  }
 
   // Development mode: flexible auth for smooth DX
   if (isDevelopment) {

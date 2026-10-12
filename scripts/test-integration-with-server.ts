@@ -30,10 +30,7 @@ const serverPort =
   requestedUrl.port || (requestedUrl.protocol === 'https:' ? '443' : '80');
 const includeOptionalIntegrationTests =
   process.env.RUN_OPTIONAL_INTEGRATION_TESTS === '1';
-const portReservationDir = path.join(
-  tmpdir(),
-  'babylon-integration-server-ports'
-);
+const portReservationDir = path.join(tmpdir(), 'feed-integration-server-ports');
 const optionalIntegrationTestMatchers = [
   /agent-actions-persistence\.integration\.test\.ts$/,
   /agent0-localnet\.test\.ts$/,
@@ -87,17 +84,23 @@ function isProcessAlive(pid: number): boolean {
 
 async function supportsTestPrivyDidAuth(baseUrl: string): Promise<boolean> {
   try {
-    const response = await fetch(`${baseUrl}/api/waitlist/bonus/email`, {
-      method: 'POST',
+    const response = await fetch(`${baseUrl}/api/waitlist/position`, {
       headers: {
-        'Content-Type': 'application/json',
         Authorization: 'Bearer did:privy:test-123456789012345',
       },
-      body: JSON.stringify({ email: 'probe@example.com' }),
       signal: AbortSignal.timeout(10_000),
     });
 
-    return response.status !== 401;
+    // Auth is supported only if the route accepted the token: a success or a
+    // request-validation error. Auth rejections, a missing route (404) and
+    // server errors must not be mistaken for support.
+    if (response.ok) return true;
+    const authRejectedOrUnavailable = [401, 403, 404].includes(response.status);
+    return (
+      response.status >= 400 &&
+      response.status < 500 &&
+      !authRejectedOrUnavailable
+    );
   } catch {
     return false;
   }
@@ -189,7 +192,7 @@ function releasePortReservation(reservation: PortReservation | null) {
 
 function prepareIsolatedWorkspace(port: number): IsolatedWorkspace {
   const workspaceDir = mkdtempSync(
-    path.join(tmpdir(), `babylon-integration-workspace-${port}-`)
+    path.join(tmpdir(), `feed-integration-workspace-${port}-`)
   );
   const isolatedAppDir = path.join(workspaceDir, 'apps', 'web');
   const appNodeModulesPath = path.join(appDir, 'node_modules');

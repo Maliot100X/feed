@@ -66,9 +66,9 @@ import {
   requireAdmin,
   successResponse,
   withErrorHandling,
-} from '@babylon/api';
-import { db } from '@babylon/db';
-import { logger } from '@babylon/shared';
+} from '@feed/api';
+import { db } from '@feed/db';
+import { logger } from '@feed/shared';
 import type { NextRequest } from 'next/server';
 import { z } from 'zod';
 
@@ -165,7 +165,6 @@ export const POST = withErrorHandling(
         walletAddress: true,
         profileImageUrl: true,
         isAdmin: true,
-        hasFarcaster: true,
         hasTwitter: true,
         createdAt: true,
         updatedAt: true,
@@ -185,22 +184,25 @@ export const POST = withErrorHandling(
 
     // Audit log the privilege change (persist to database)
     // This is a critical security operation that MUST be logged
-    logAdminAction(action === 'promote' ? 'PROMOTE_ADMIN' : 'DEMOTE_ADMIN', {
-      adminId: adminUser.userId,
-      ipAddress: getClientIp(request.headers) ?? undefined,
-      resourceType: 'user',
-      resourceId: userId,
-      previousValue: {
-        isAdmin: targetUser.isAdmin,
-      },
-      newValue: {
-        isAdmin: action === 'promote',
-      },
-      metadata: {
-        targetUsername: updatedUser.username,
-        action,
-      },
-    }).catch((err) => {
+    await logAdminAction(
+      action === 'promote' ? 'PROMOTE_ADMIN' : 'DEMOTE_ADMIN',
+      {
+        adminId: adminUser.userId,
+        ipAddress: getClientIp(request.headers) ?? undefined,
+        resourceType: 'user',
+        resourceId: userId,
+        previousValue: {
+          isAdmin: targetUser.isAdmin,
+        },
+        newValue: {
+          isAdmin: action === 'promote',
+        },
+        metadata: {
+          targetUsername: updatedUser.username,
+          action,
+        },
+      }
+    ).catch((err) => {
       logger.error(
         'Failed to persist critical audit log for privilege change',
         { err, userId, action },

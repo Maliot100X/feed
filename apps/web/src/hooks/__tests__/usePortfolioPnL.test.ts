@@ -44,10 +44,7 @@ describe('fetchPortfolioBreakdownSnapshot', () => {
     );
     globalThis.fetch = fetchMock as unknown as typeof fetch;
 
-    const snapshot = await fetchPortfolioBreakdownSnapshot(
-      'user-1',
-      new AbortController().signal
-    );
+    const snapshot = await fetchPortfolioBreakdownSnapshot('user-1');
 
     expect(snapshot).toEqual({
       wallet: 12.5,
@@ -82,25 +79,8 @@ describe('fetchPortfolioBreakdownSnapshot', () => {
       new Response('{}', { status: 503 })
     ) as unknown as typeof fetch;
 
-    await expect(
-      fetchPortfolioBreakdownSnapshot('user-1', new AbortController().signal)
-    ).rejects.toThrow('Failed to fetch portfolio breakdown');
-  });
-
-  it('preserves AbortError rejections so callers can ignore intentional aborts', async () => {
-    const controller = new AbortController();
-    controller.abort();
-    const abortError = new DOMException(
-      'The user aborted a request.',
-      'AbortError'
+    await expect(fetchPortfolioBreakdownSnapshot('user-1')).rejects.toThrow(
+      'Failed to fetch portfolio breakdown'
     );
-
-    globalThis.fetch = mock().mockRejectedValue(
-      abortError
-    ) as unknown as typeof fetch;
-
-    await expect(
-      fetchPortfolioBreakdownSnapshot('user-1', controller.signal)
-    ).rejects.toBe(abortError);
   });
 });

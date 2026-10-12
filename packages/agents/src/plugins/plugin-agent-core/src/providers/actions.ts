@@ -2,7 +2,7 @@
  * Actions Provider
  *
  * Lists available actions for the agent to call during multi-step execution.
- * Adapted from Otaku's actionsProvider for Babylon.
+ * Adapted from Otaku's actionsProvider for Feed.
  */
 
 import type {
@@ -94,6 +94,7 @@ export const actionsProvider: Provider = {
           },
           'AgentActions'
         );
+        throw e;
       }
       return null;
     });

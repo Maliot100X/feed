@@ -11,7 +11,7 @@
  * - All messaging operations are mapped
  * - All notification operations are mapped
  * - Map values follow the "category.snake_case" format
- * - No duplicate values in the map
+ * - Only intentional aliases share values
  * - Critical operations that existed before are still present
  */
 
@@ -28,7 +28,7 @@ import { resolve } from 'path';
 
 const filePath = resolve(
   import.meta.dir,
-  '../../../agents/src/plugins/babylon/integration-a2a-sdk.ts'
+  '../../../agents/src/plugins/feed/integration-a2a-sdk.ts'
 );
 const fileContent = readFileSync(filePath, 'utf-8');
 
@@ -138,17 +138,29 @@ describe('operationMap completeness', () => {
       }
     });
 
-    test('no duplicate values in the map', () => {
+    test('only documented market aliases share executor operations', () => {
       const mapBlock = fileContent.match(
         /const operationMap[\s\S]*?=[\s\S]*?\{([\s\S]*?)\}\s*(?:as|;)/
       );
 
-      if (mapBlock) {
-        const entries = mapBlock[1]!.match(/['"]([a-z_]+\.[a-z_]+)['"]/g) || [];
-        const values = entries.map((e) => e.replace(/['"]/g, ''));
-        const unique = new Set(values);
-        expect(values.length).toBe(unique.size);
+      expect(mapBlock).toBeTruthy();
+      const entries = [
+        ...mapBlock![1]!.matchAll(/(\w+): '([a-z_]+\.[a-z_]+)'/g),
+      ];
+      const byOperation = new Map<string, string[]>();
+      for (const [, action, operation] of entries) {
+        const names = byOperation.get(operation!) ?? [];
+        names.push(action!);
+        byOperation.set(operation!, names);
       }
+      expect(
+        Object.fromEntries(
+          [...byOperation].filter(([, names]) => names.length > 1)
+        )
+      ).toEqual({
+        'markets.list_prediction': ['getPredictions', 'listPredictionMarkets'],
+        'markets.list_perpetuals': ['getPerpetuals', 'listPerpetualMarkets'],
+      });
     });
   });
 });

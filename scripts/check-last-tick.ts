@@ -4,9 +4,9 @@
  * Check when the last agent tick ran
  */
 
-import { db } from '@babylon/db';
-import { agentLogs, games, users } from '@babylon/db/schema';
-import { getTimeAgo } from '@babylon/shared';
+import { db } from '@feed/db';
+import { agentLogs, games, users } from '@feed/db/schema';
+import { getTimeAgo } from '@feed/shared';
 import { desc, eq, sql } from 'drizzle-orm';
 
 async function checkLastTick() {
@@ -52,7 +52,9 @@ async function checkLastTick() {
       })
       .from(users)
       .where(eq(users.isAgent, true))
-      .orderBy(desc(users.agentLastTickAt))
+      // Postgres sorts NULLs first for DESC; never-ticked agents must not hide
+      // the most recent ticks.
+      .orderBy(sql`${users.agentLastTickAt} DESC NULLS LAST`)
       .limit(10);
 
     console.log('Agents with most recent ticks:');

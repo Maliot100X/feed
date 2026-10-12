@@ -65,7 +65,7 @@ import {
   requireUserByIdentifier,
   successResponse,
   withErrorHandling,
-} from '@babylon/api';
+} from '@feed/api';
 import {
   and,
   count,
@@ -80,12 +80,8 @@ import {
   sum,
   tradingFees,
   users,
-} from '@babylon/db';
-import {
-  logger,
-  ReferralQuerySchema,
-  UserIdParamSchema,
-} from '@babylon/shared';
+} from '@feed/db';
+import { logger, ReferralQuerySchema, UserIdParamSchema } from '@feed/shared';
 import type { NextRequest } from 'next/server';
 
 /**
@@ -144,10 +140,8 @@ export const GET = withErrorHandling(
         reputationPoints: users.reputationPoints,
         totalFeesEarned: users.totalFeesEarned,
         pointsAwardedForProfile: users.pointsAwardedForProfile,
-        pointsAwardedForFarcaster: users.pointsAwardedForFarcaster,
         pointsAwardedForTwitter: users.pointsAwardedForTwitter,
         pointsAwardedForWallet: users.pointsAwardedForWallet,
-        farcasterUsername: users.farcasterUsername,
         twitterUsername: users.twitterUsername,
         walletAddress: users.walletAddress,
       })
@@ -221,7 +215,6 @@ export const GET = withErrorHandling(
         reputationPoints: users.reputationPoints,
         profileComplete: users.profileComplete,
         email: users.email,
-        farcasterUsername: users.farcasterUsername,
         twitterUsername: users.twitterUsername,
       })
       .from(users)
@@ -332,14 +325,13 @@ export const GET = withErrorHandling(
       joinedAt: null,
       status: 'pending' as const,
       email: u.email,
-      farcasterUsername: u.farcasterUsername,
       twitterUsername: u.twitterUsername,
     }));
 
     // Use username as referral code (without @)
     const referralCode = user.username || null;
     const referralUrl = referralCode
-      ? `${process.env.NEXT_PUBLIC_APP_URL || 'https://babylon.market'}?ref=${referralCode}`
+      ? `${process.env.NEXT_PUBLIC_APP_URL || 'https://feed.fun'}?ref=${referralCode}`
       : null;
 
     logger.info(
@@ -363,10 +355,8 @@ export const GET = withErrorHandling(
         reputationPoints: user.reputationPoints,
         totalFeesEarned: user.totalFeesEarned,
         pointsAwardedForProfile: user.pointsAwardedForProfile,
-        pointsAwardedForFarcaster: user.pointsAwardedForFarcaster,
         pointsAwardedForTwitter: user.pointsAwardedForTwitter,
         pointsAwardedForWallet: user.pointsAwardedForWallet,
-        farcasterUsername: user.farcasterUsername,
         twitterUsername: user.twitterUsername,
         walletAddress: user.walletAddress,
       },

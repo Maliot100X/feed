@@ -7,9 +7,9 @@ import {
   type IAgentRuntime,
   type Memory,
   type State,
-  type UUID,
 } from '@elizaos/core';
 import { v4 as uuidv4 } from 'uuid';
+import { getAdminHistory } from './admin-history';
 
 interface AutonomyService {
   getAutonomousRoomId?: () => string | undefined;
@@ -62,7 +62,7 @@ export const sendToAdminAction: Action = {
     message: Memory
   ): Promise<boolean> => {
     // Only allow this action in autonomous context
-    const autonomyService = runtime.getService('autonomy');
+    const autonomyService = runtime.getService('AUTONOMOUS');
     if (!autonomyService) {
       return false; // Service not available
     }
@@ -110,7 +110,7 @@ export const sendToAdminAction: Action = {
     void _options; // Options currently unused but retained for API parity
 
     // Double-check we're in autonomous context
-    const autonomyService = runtime.getService('autonomy');
+    const autonomyService = runtime.getService('AUTONOMOUS');
     if (!autonomyService) {
       return {
         success: false,
@@ -140,29 +140,21 @@ export const sendToAdminAction: Action = {
       };
     }
 
-    /**
-     * Find the most recent room where admin and agent have communicated.
-     *
-     * Since we can't directly query by entityId, use a fallback approach.
-     */
-    const adminMessages = await runtime.getMemories({
-      roomId: runtime.agentId, // Use agent's default room as fallback
-      count: 10,
-      tableName: 'memories',
-    });
-
-    let targetRoomId: UUID;
-    const latestAdminMessage = adminMessages?.[adminMessages.length - 1];
-    if (latestAdminMessage?.roomId) {
-      // Use the room from the most recent admin message
-      targetRoomId = latestAdminMessage.roomId;
-    } else {
-      // No existing conversation, use agent's primary room
-      targetRoomId = runtime.agentId; // Fallback to agent's default room
-    }
+    const adminMessages = await getAdminHistory(runtime, asUUID(adminUserId));
+    const latestAdminMessage = adminMessages
+      .filter((item) => item.entityId === adminUserId)
+      .at(-1);
+    if (!latestAdminMessage?.roomId)
+      throw new Error('No existing shared admin conversation');
+    const targetRoomId = latestAdminMessage.roomId;
+    const targetRoom = await runtime.getRoom(targetRoomId);
+    if (!targetRoom?.source)
+      throw new Error('Admin conversation requires a delivery source');
 
     // Extract message content - determine what to send based on the autonomous thought
-    const autonomousThought = message.content.text || '';
+    const autonomousThought = message.content.text;
+    if (!autonomousThought?.trim())
+      throw new Error('Admin message requires nonempty content');
 
     // Generate appropriate message to admin
     let messageToAdmin: string;
@@ -204,7 +196,16 @@ export const sendToAdminAction: Action = {
     };
 
     // Store the message in memory
-    await runtime.createMemory(adminMessage, 'memories');
+    await runtime.sendMessageToTarget(
+      {
+        $typeName: 'eliza.v1.TargetInfo',
+        source: targetRoom.source,
+        roomId: targetRoomId,
+        entityId: asUUID(adminUserId),
+      },
+      adminMessage.content
+    );
+    await runtime.createMemory(adminMessage, 'messages');
 
     const successMessage = `Message sent to admin in room ${targetRoomId.slice(0, 8)}...`;
 

@@ -5,14 +5,14 @@
  * Environment properties match apps/web/src/lib/posthog/server.ts for consistent filtering.
  */
 
-import { checkProgress } from '@babylon/api';
+import { checkProgress } from '@feed/api';
 import { PostHog } from 'posthog-node';
 
 let client: PostHog | null = null;
 
 function getServerEnvironment(): 'production' | 'staging' | 'development' {
-  if (process.env.VERCEL_ENV === 'production') return 'production';
-  if (process.env.VERCEL_ENV === 'preview') return 'staging';
+  if (process.env.DEPLOYMENT_ENV === 'staging') return 'staging';
+  if (process.env.DEPLOYMENT_ENV === 'production') return 'production';
   if (process.env.NODE_ENV === 'production') return 'production';
   return 'development';
 }
@@ -20,8 +20,8 @@ function getServerEnvironment(): 'production' | 'staging' | 'development' {
 function getEnvironmentProperties(): Record<string, string> {
   return {
     environment: getServerEnvironment(),
-    deployment_url: process.env.VERCEL_URL || 'localhost:3000',
-    app_version: process.env.VERCEL_GIT_COMMIT_SHA || 'dev',
+    deployment_url: process.env.NEXT_PUBLIC_APP_URL || 'localhost:3000',
+    app_version: process.env.COMMIT_SHA || 'dev',
   };
 }
 

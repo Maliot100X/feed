@@ -8,41 +8,42 @@
  *
  * Design notes:
  * - broadcastChatMessage is injected as broadcastFn to avoid importing
- *   @babylon/api from packages/agents (architectural separation)
+ *   @feed/api from packages/agents (architectural separation)
  * - Only handles team-chat mode (coordinator dispatch always targets a team chat)
  * - Always uses ModelType.TEXT_SMALL (free tier = 0 pts cost)
- * - Max 4 iterations (vs 5 in the coordinator) to stay within latency budget
+ * - Max 2 iterations per dispatch.
  *
  * Efficiency optimizations (refactor/coordinator-efficiency):
- * - composeState() called only on first iteration; subsequent iterations
- *   reuse the state object (providers return identical data within a request)
- * - Summary phase reuses last decision state instead of re-composing
+ * - Providers are refreshed before each decision and summary.
  * - Parse retries use format reinforcement hints + lower temperature (0.3)
  * - All dispatches instrumented with action-type and timing telemetry
  */
 
-import { db, eq, messages, userAgentConfigs } from '@babylon/db';
-import type { MessageMetadata, MessageTag } from '@babylon/shared';
-import { checkUserInput, logger } from '@babylon/shared';
 import {
   composePromptFromState,
   type Memory,
   ModelType,
   parseKeyValueXml,
-  type State,
 } from '@elizaos/core';
+import { db, eq, messages, userAgentConfigs } from '@feed/db';
+import type { MessageMetadata, MessageTag } from '@feed/shared';
+import { checkUserInput, logger } from '@feed/shared';
 import { v4 as uuidv4 } from 'uuid';
 import { getEventBus } from '../communication/EventBus';
 import { AuthorizationError } from '../errors';
 import { generateSnowflakeId } from '../shared/snowflake';
 import { agentService } from './AgentService';
+import {
+  formatAgentActionResults,
+  requireAgentAction,
+} from './agent-action-context';
 import { notifyTeamChatMessage } from './team-chat-notifications';
 
 // =============================================================================
 // Types
 // =============================================================================
 
-/** Minimal broadcast function signature matching broadcastChatMessage from @babylon/api */
+/** Minimal broadcast function signature matching broadcastChatMessage from @feed/api */
 export type BroadcastFn = (
   chatId: string,
   message: {
@@ -64,7 +65,7 @@ export interface CoordinatorDispatchParams {
   teamChatId: string;
   ownerName?: string;
   ownerUsername?: string;
-  /** Injected from route layer — avoids importing @babylon/api in packages/agents */
+  /** Injected from route layer — avoids importing @feed/api in packages/agents */
   broadcastFn: BroadcastFn;
 }
 
@@ -193,6 +194,11 @@ Do NOT address "the coordinator" or refer to yourself in third person.
 
 ---
 
+# Recent Conversation
+{{recentMessages}}
+
+---
+
 # Actions You Completed
 {{actionResults}}
 
@@ -231,34 +237,6 @@ type ActionTraceResult = {
   durationMs?: number;
   tag?: MessageTag;
 };
-
-function formatTraceResults(results: ActionTraceResult[]): string {
-  if (results.length === 0) return 'No actions taken yet in this request.';
-
-  return results
-    .map((result, index) => {
-      const status = result.success ? '✓ Success' : '✗ Failed';
-      let output = `${index + 1}. **${result.actionType}** - ${status}`;
-
-      if (result.text) {
-        output += `\n   Summary: ${result.text}`;
-      }
-
-      if (result.error) {
-        output += `\n   Error: ${result.error}`;
-      }
-
-      if (result.values && Object.keys(result.values).length > 0) {
-        const valuesStr = Object.entries(result.values)
-          .map(([key, value]) => `   - ${key}: ${JSON.stringify(value)}`)
-          .join('\n');
-        output += `\n   Values:\n${valuesStr}`;
-      }
-
-      return output;
-    })
-    .join('\n\n');
-}
 
 // =============================================================================
 // Core Dispatch Function
@@ -332,19 +310,29 @@ export async function dispatchAgentChat(
       ]).has(needleNormalized);
 
       // 1. Exact match on username or displayName
-      let match = ownerAgents.find(
+      const exactMatches = ownerAgents.filter(
         (a) =>
           a.username?.toLowerCase() === needle ||
           a.displayName?.toLowerCase() === needle
       );
 
+      if (exactMatches.length > 1)
+        throw new Error('Ambiguous agent name; use its ID');
+      let match = exactMatches[0];
+
       // 2. Normalized match (strip spaces/punctuation for "larry david" vs "larrydavid")
       if (!match) {
-        match = ownerAgents.find((a) => {
+        const normalizedMatches = ownerAgents.filter((a) => {
           const uNorm = normalizeAgentName(a.username);
           const dNorm = normalizeAgentName(a.displayName);
-          return uNorm === needleNormalized || dNorm === needleNormalized;
+          return (
+            Boolean(needleNormalized) &&
+            (uNorm === needleNormalized || dNorm === needleNormalized)
+          );
         });
+        if (normalizedMatches.length > 1)
+          throw new Error('Ambiguous normalized agent name; use its ID');
+        match = normalizedMatches[0];
       }
 
       // 3. Partial match (needle contained in name or name contained in needle).
@@ -481,7 +469,7 @@ export async function dispatchAgentChat(
     entityId: ownerId as `${string}-${string}-${string}-${string}-${string}`,
     roomId:
       resolvedAgentId as `${string}-${string}-${string}-${string}-${string}`,
-    content: { text: message },
+    content: { text: message, teamChatId, ownerId, agentId: resolvedAgentId },
     createdAt: Date.now(),
   };
 
@@ -492,15 +480,11 @@ export async function dispatchAgentChat(
   const MAX_ITERATIONS = 2;
   const traceActionResults: ActionTraceResult[] = [];
   let finalResponse: string | null = null;
-  let isLLMFailure = false;
+  const isLLMFailure = false;
   let totalParseRetries = 0;
   let iterationsRan = 0;
 
-  // State reuse: compose once on first iteration, reuse on subsequent.
-  // Agent providers (AGENT_CONTEXT, RECENT_MESSAGES, TEAM_MEMBERS) return
-  // identical data within a single dispatch. ACTION_STATE reads from the
-  // local traceActionResults we update manually.
-  let lastState: State | null = null;
+  // Refresh context after actions; use only the configured chat providers.
 
   const agentProviders = [
     'AGENT_CONTEXT',
@@ -519,14 +503,22 @@ export async function dispatchAgentChat(
       'AgentChatService'
     );
 
-    let state: State;
+    // Providers can depend on state changed by the preceding action.
+    const state = await runtime.composeState(
+      elizaMessage,
+      agentProviders,
+      true,
+      true
+    );
 
-    if (iteration === 1) {
-      // First iteration: full composeState (2 DB queries — TEAM_MEMBERS, RECENT_MESSAGES)
-      state = await runtime.composeState(elizaMessage, agentProviders, true);
-    } else {
-      // Subsequent iterations: reuse state, skip redundant DB queries
-      state = lastState!;
+    if (
+      typeof state.values.recentMessages !== 'string' ||
+      !state.values.recentMessages.trim()
+    ) {
+      throw new Error('Required conversation history context is missing');
+    }
+    if (typeof state.values.actionsWithParams !== 'string') {
+      throw new Error('Required action schema context is missing');
     }
 
     state.values = {
@@ -552,17 +544,15 @@ export async function dispatchAgentChat(
 
     state.data = {
       ...state.data,
-      // Cast: Babylon ActionTraceResult is a superset of elizaos ActionResult
+      // Cast: Feed ActionTraceResult is a superset of elizaos ActionResult
       actionResults:
         traceActionResults as unknown as typeof state.data.actionResults,
     };
     state.values = {
       ...state.values,
-      actionResults: formatTraceResults(traceActionResults),
+      actionResults: formatAgentActionResults(traceActionResults),
       hasActionResults: traceActionResults.length > 0,
     };
-
-    lastState = state;
 
     const prompt = composePromptFromState({
       state,
@@ -576,6 +566,7 @@ export async function dispatchAgentChat(
       const response = await runtime.useModel(modelType, {
         prompt: attempt > 1 ? prompt + DECISION_XML_FORMAT_HINT : prompt,
         temperature: attempt > 1 ? 0.3 : 0.7,
+        maxTokens: 1200,
       });
 
       parsedStep = parseKeyValueXml(response);
@@ -591,43 +582,47 @@ export async function dispatchAgentChat(
     }
 
     if (!parsedStep) {
-      finalResponse =
-        "I'm having trouble processing this request. Please try again.";
-      isLLMFailure = true;
-      break;
+      return {
+        success: false,
+        response: '',
+        agentId: resolvedAgentId,
+        actionsExecuted: traceActionResults.length,
+        isLLMFailure: true,
+        error: 'Agent decision could not be parsed after three attempts',
+      };
     }
 
-    const action = ((parsedStep.action as string) ?? '').trim();
-    const parameters = parsedStep.parameters;
+    if (
+      typeof parsedStep.action !== 'string' ||
+      !['true', 'false', true, false].includes(
+        parsedStep.isFinish as string | boolean
+      )
+    ) {
+      throw new Error('Agent decision requires action and boolean isFinish');
+    }
+    const action = parsedStep.action.trim();
     const isFinish = parsedStep.isFinish;
-
-    if (!action || action === '') {
+    if (!action) {
+      if (isFinish !== 'true' && isFinish !== true) {
+        throw new Error('Empty action requires an explicit finish decision');
+      }
       break;
     }
 
-    // Parse action parameters
+    await requireAgentAction(runtime, action, elizaMessage, state);
     const actionStartMs = Date.now();
-    let actionParams: Record<string, unknown> = {};
-    if (parameters) {
-      if (typeof parameters === 'string') {
-        try {
-          const parsed: unknown = JSON.parse(parameters);
-          if (
-            typeof parsed === 'object' &&
-            parsed !== null &&
-            !Array.isArray(parsed)
-          ) {
-            actionParams = parsed as Record<string, unknown>;
-          }
-        } catch {
-          logger.warn(
-            `[AgentChatService] Failed to parse action params: ${parameters}`
-          );
-        }
-      } else if (typeof parameters === 'object' && !Array.isArray(parameters)) {
-        actionParams = parameters as Record<string, unknown>;
-      }
+    const parameters: unknown =
+      typeof parsedStep.parameters === 'string'
+        ? JSON.parse(parsedStep.parameters)
+        : parsedStep.parameters;
+    if (
+      typeof parameters !== 'object' ||
+      parameters === null ||
+      Array.isArray(parameters)
+    ) {
+      throw new Error('Agent action parameters must be a JSON object');
     }
+    const actionParams = parameters as Record<string, unknown>;
 
     state.data = {
       ...state.data,
@@ -724,15 +719,23 @@ export async function dispatchAgentChat(
             }
           | undefined;
         const cached = cachedState?.values?.actionResults || [];
-        actionResult = cached.length > 0 ? (cached[0] ?? null) : null;
+        actionResult =
+          cached.length > 0 ? (cached[cached.length - 1] ?? null) : null;
       }
 
-      const success = actionResult?.success ?? false;
+      if (!actionResult || typeof actionResult.success !== 'boolean') {
+        throw new Error(`Action ${action} did not return a completion result`);
+      }
+      const success = actionResult.success;
 
       traceActionResults.push({
         actionType: action,
         success,
-        text: actionResult?.text || `${action} executed`,
+        text:
+          actionResult?.text ||
+          (success
+            ? `${action} executed`
+            : `${action} returned no successful result`),
         error: success ? undefined : actionResult?.text,
         values: actionResult?.values,
         parameters: actionParams,
@@ -751,6 +754,18 @@ export async function dispatchAgentChat(
         timestamp: Date.now(),
         durationMs: Date.now() - actionStartMs,
       });
+    }
+
+    const failedAction = traceActionResults.at(-1);
+    if (failedAction && !failedAction.success) {
+      return {
+        success: false,
+        response: '',
+        agentId: resolvedAgentId,
+        actionsExecuted: traceActionResults.length,
+        isLLMFailure: false,
+        error: failedAction.error || failedAction.text || `${action} failed`,
+      };
     }
 
     if (isFinish === 'true' || isFinish === true) {
@@ -774,12 +789,23 @@ export async function dispatchAgentChat(
   );
 
   // --- Generate summary response ---
-  // Reuse the last decision state instead of calling composeState() again.
-  // This saves 2 DB queries (TEAM_MEMBERS, RECENT_MESSAGES) per dispatch.
+  // Refresh providers after the final action so the summary sees its effects.
   if (!finalResponse) {
-    const summaryState =
-      lastState ??
-      (await runtime.composeState(elizaMessage, agentProviders, true));
+    const summaryState = await runtime.composeState(
+      elizaMessage,
+      agentProviders,
+      true,
+      true
+    );
+
+    if (
+      typeof summaryState.values.recentMessages !== 'string' ||
+      !summaryState.values.recentMessages.trim()
+    ) {
+      throw new Error(
+        'Required summary conversation history context is missing'
+      );
+    }
 
     summaryState.values = {
       ...summaryState.values,
@@ -798,12 +824,12 @@ export async function dispatchAgentChat(
       agentName,
       agentUsername: agentUsername ?? '',
       actionCount: traceActionResults.length,
-      actionResults: formatTraceResults(traceActionResults),
+      actionResults: formatAgentActionResults(traceActionResults),
       hasActionResults: traceActionResults.length > 0,
     };
     summaryState.data = {
       ...summaryState.data,
-      // Cast: Babylon ActionTraceResult is a superset of elizaos ActionResult
+      // Cast: Feed ActionTraceResult is a superset of elizaos ActionResult
       actionResults:
         traceActionResults as unknown as typeof summaryState.data.actionResults,
     };
@@ -821,19 +847,11 @@ export async function dispatchAgentChat(
         prompt:
           attempt > 1 ? summaryPrompt + SUMMARY_XML_FORMAT_HINT : summaryPrompt,
         temperature: attempt > 1 ? 0.3 : 0.7,
+        maxTokens: 1200,
       });
 
       const summary = parseKeyValueXml(summaryResponse);
       extractedText = summary?.text as string | undefined;
-
-      if (!extractedText) {
-        const textMatch = summaryResponse.match(
-          /<text\b[^>]*?>([\s\S]*?)<\/text>/i
-        );
-        if (textMatch?.[1]) {
-          extractedText = textMatch[1].trim();
-        }
-      }
 
       if (extractedText) break;
 
@@ -845,14 +863,21 @@ export async function dispatchAgentChat(
       );
     }
 
-    finalResponse =
-      extractedText ||
-      (traceActionResults.length > 0
-        ? 'Task completed.'
-        : "I'm ready to help!");
+    if (!extractedText?.trim()) {
+      return {
+        success: false,
+        response: '',
+        agentId: resolvedAgentId,
+        actionsExecuted: traceActionResults.length,
+        isLLMFailure: true,
+        error: 'Agent summary could not be generated after three attempts',
+      };
+    }
+    finalResponse = extractedText;
   }
 
-  const responseText = finalResponse ?? "I'm here to help!";
+  if (!finalResponse?.trim()) throw new Error('Agent response is missing');
+  const responseText = finalResponse;
 
   // --- Collect rich tags for metadata ---
   const tags: MessageTag[] = traceActionResults
@@ -874,7 +899,7 @@ export async function dispatchAgentChat(
     metadata: messageMetadata,
   });
 
-  void notifyTeamChatMessage({
+  await notifyTeamChatMessage({
     chatId: teamChatId,
     messageId: responseMessageId,
     senderId: resolvedAgentId,
@@ -888,7 +913,7 @@ export async function dispatchAgentChat(
     .where(eq(userAgentConfigs.userId, resolvedAgentId));
 
   // --- Broadcast so SSE clients see the agent response immediately ---
-  broadcastFn(teamChatId, {
+  await broadcastFn(teamChatId, {
     id: responseMessageId,
     content: responseText,
     chatId: teamChatId,
@@ -896,12 +921,6 @@ export async function dispatchAgentChat(
     type: 'user',
     createdAt: responseTime.toISOString(),
     metadata: messageMetadata,
-  }).catch((err) => {
-    logger.warn(
-      `[AgentChatService] Failed to broadcast agent message`,
-      { teamChatId, agentId: resolvedAgentId, error: err },
-      'AgentChatService'
-    );
   });
 
   // Full dispatch telemetry (Phase 0 instrumentation)

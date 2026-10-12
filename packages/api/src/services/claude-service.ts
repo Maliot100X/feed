@@ -1,3 +1,4 @@
+import OpenAI from 'openai';
 /**
  * Direct Claude (Anthropic) LLM calls
  *
@@ -5,7 +6,7 @@
  */
 
 import Anthropic from '@anthropic-ai/sdk';
-import { logger } from '@babylon/shared';
+import { getSurplusConfig, logger } from '@feed/shared';
 
 export async function callClaudeDirect(params: {
   prompt: string;
@@ -14,6 +15,27 @@ export async function callClaudeDirect(params: {
   temperature?: number;
   maxTokens?: number;
 }): Promise<string> {
+  const surplus = getSurplusConfig();
+  if (surplus) {
+    const client = new OpenAI({
+      apiKey: surplus.apiKey,
+      baseURL: surplus.baseURL,
+    });
+    const response = await client.chat.completions.create({
+      model: surplus.model,
+      messages: [
+        ...(params.system
+          ? [{ role: 'system' as const, content: params.system }]
+          : []),
+        { role: 'user', content: params.prompt },
+      ],
+      temperature: params.temperature ?? 0.3,
+      max_tokens: params.maxTokens || 8192,
+    });
+    const text = response.choices[0]?.message.content;
+    if (!text) throw new Error('Inference returned no text');
+    return text;
+  }
   const elizacloudKey = process.env.ELIZACLOUD_API_KEY;
   const anthropicKey = process.env.ANTHROPIC_API_KEY;
 

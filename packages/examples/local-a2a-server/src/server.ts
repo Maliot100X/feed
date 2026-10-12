@@ -2,10 +2,11 @@
  * Local A2A Server - Standalone implementation for agent development
  *
  * This server provides a complete A2A protocol implementation that works
- * with local anvil and doesn't require the full Babylon infrastructure.
+ * with local anvil and doesn't require the full Feed infrastructure.
  */
 
 import { Database } from 'bun:sqlite';
+import { mkdirSync } from 'node:fs';
 import cors from 'cors';
 import dotenv from 'dotenv';
 import { ethers } from 'ethers';
@@ -27,7 +28,8 @@ const PORT = process.env.A2A_PORT || 3001;
 const RPC_URL = process.env.RPC_URL || 'http://localhost:8545';
 const CHAIN_ID = process.env.CHAIN_ID || '31337';
 
-// Initialize database using Bun's native SQLite
+// Initialize database using Bun's native SQLite (runtime file, not committed)
+mkdirSync('./data', { recursive: true });
 const db = new Database('./data/a2a.db', { create: true });
 setupDatabase(db);
 

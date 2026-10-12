@@ -60,6 +60,9 @@ export const questions = pgTable(
   {
     id: text('id').primaryKey(),
     questionNumber: integer('questionNumber').notNull().unique(),
+    marketId: text('marketId').references(() => markets.id, {
+      onDelete: 'set null',
+    }),
     text: text('text').notNull(),
     scenarioId: integer('scenarioId').notNull(),
     outcome: boolean('outcome').notNull(),
@@ -86,6 +89,7 @@ export const questions = pgTable(
     resolutionReviewedBy: text('resolutionReviewedBy'),
   },
   (table) => [
+    index('Question_marketId_idx').on(table.marketId),
     index('Question_createdDate_idx').on(table.createdDate),
     index('Question_status_resolutionDate_idx').on(
       table.status,

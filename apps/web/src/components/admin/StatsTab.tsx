@@ -1,6 +1,6 @@
 'use client';
 
-import { cn } from '@babylon/shared';
+import { cn } from '@feed/shared';
 import {
   Activity,
   Award,
@@ -94,7 +94,6 @@ const SystemStatsSchema = z.object({
     UserStatsSchema.extend({
       walletAddress: z.string().nullable(),
       createdAt: z.string(),
-      hasFarcaster: z.boolean(),
       hasTwitter: z.boolean(),
     })
   ),
@@ -777,11 +776,6 @@ export function StatsTab() {
                   </div>
                 </div>
                 <div className="flex gap-1">
-                  {user.hasFarcaster && (
-                    <span className="rounded bg-purple-500/20 px-2 py-0.5 text-purple-500 text-xs">
-                      FC
-                    </span>
-                  )}
                   {user.hasTwitter && (
                     <span className="rounded bg-blue-500/20 px-2 py-0.5 text-blue-500 text-xs">
                       X

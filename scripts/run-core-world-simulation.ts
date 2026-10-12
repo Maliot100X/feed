@@ -61,13 +61,13 @@ import {
   trendingTags,
   worldEvents,
   worldFacts,
-} from '@babylon/db';
+} from '@feed/db';
 import {
   bootstrapGameIfNeeded,
   executeGameTick,
   StaticDataRegistry,
-} from '@babylon/engine';
-import { logger } from '@babylon/shared';
+} from '@feed/engine';
+import { logger } from '@feed/shared';
 import { Actions } from '../packages/agents/src/autonomous/templates/multi-step-decision';
 import {
   getLLMCallCallback,
@@ -452,11 +452,12 @@ mkdirSync(feedsDir, { recursive: true });
 mkdirSync(widgetsDir, { recursive: true });
 mkdirSync(rssCacheDir, { recursive: true });
 
-process.env.BABYLON_DAG_TRACE = 'true';
+process.env.FEED_DAG_TRACE = 'true';
 process.env.DEBUG_SAVE_PROMPTS = 'true';
 process.env.GAME_START ??= 'true';
 process.env.NODE_ENV ??= 'development';
-process.env.VERCEL_ENV ??= 'production';
+process.env.DEPLOYMENT_ENV ??= 'production';
+process.env.ENABLE_INTERNAL_CRON_SCHEDULER ??= 'false';
 process.env.REDIRECT_CRON_STAGING = 'false';
 process.env.NPC_TRADE_PROBABILITY = npcTradeProbability.toString();
 
@@ -1009,7 +1010,7 @@ async function invokeCronRoute(
     headers: {
       authorization: 'Bearer development',
       'content-type': 'application/json',
-      'user-agent': 'babylon-core-sim/1.0',
+      'user-agent': 'feed-core-sim/1.0',
     },
   });
 
@@ -1027,7 +1028,7 @@ async function invokeGetRoute(
   const request = new Request(`http://localhost${urlPath}`, {
     method: 'GET',
     headers: {
-      'user-agent': 'babylon-core-sim/1.0',
+      'user-agent': 'feed-core-sim/1.0',
     },
   });
 

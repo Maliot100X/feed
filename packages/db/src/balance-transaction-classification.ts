@@ -3,7 +3,7 @@ import {
   AGENT_TRANSFER_OUT_TRANSACTION_TYPE,
   PEER_TRANSFER_IN_TRANSACTION_TYPE,
   PEER_TRANSFER_OUT_TRANSACTION_TYPE,
-} from '@babylon/shared';
+} from '@feed/shared';
 import type { BalanceTransaction } from './model-types';
 
 export const WELCOME_BONUS_BALANCE_DESCRIPTION =
@@ -485,22 +485,37 @@ function buildDepositContributionSql(
   `;
 }
 
+/**
+ * SQL twin of extractCapitalBaseAmount for reversal rows. Must stay in parity
+ * with extractRequestedBalanceUnits: invalid JSON, missing, non-numeric or
+ * non-finite values fall back to |amount|, and requested units are absolute.
+ */
 function buildReversalAmountSql(transactionAlias: string): string {
+  const description = `${transactionAlias}."description"`;
+  const requested = `(${description}::jsonb -> 'balanceUnitsRequested')`;
+  const requestedText = `(${description}::jsonb ->> 'balanceUnitsRequested')`;
+  const fallback = `ABS(${transactionAlias}."amount"::numeric)`;
   return `
     CASE
-      WHEN ${transactionAlias}."description" IS NOT NULL
-        AND LEFT(${transactionAlias}."description", 1) = '{'
-      THEN COALESCE(
-        NULLIF(
-          (${transactionAlias}."description"::jsonb ->> 'balanceUnitsRequested'),
-          ''
-        )::numeric,
-        ABS(${transactionAlias}."amount"::numeric)
-      )
-      ELSE ABS(${transactionAlias}."amount"::numeric)
+      WHEN ${description} IS NOT NULL
+        AND LEFT(${description}, 1) = '{'
+        AND pg_input_is_valid(${description}, 'jsonb')
+      THEN CASE
+        WHEN jsonb_typeof(${requested}) = 'number'
+          THEN ABS(${requestedText}::numeric)
+        WHEN jsonb_typeof(${requested}) = 'string'
+          AND ${requestedText} ~ '${REQUESTED_UNITS_PATTERN_SQL}'
+          THEN ABS(${requestedText}::numeric)
+        ELSE ${fallback}
+      END
+      ELSE ${fallback}
     END
   `;
 }
+
+/** Plain decimal number (string form of balanceUnitsRequested). */
+const REQUESTED_UNITS_PATTERN = /^-?[0-9]+(\.[0-9]+)?$/;
+const REQUESTED_UNITS_PATTERN_SQL = '^-?[0-9]+(\\.[0-9]+)?$';
 
 function extractRequestedBalanceUnits(
   description: string | null
@@ -519,11 +534,11 @@ function extractRequestedBalanceUnits(
       return Math.abs(requested);
     }
 
-    if (typeof requested === 'string') {
-      const numericValue = Number(requested);
-      if (Number.isFinite(numericValue)) {
-        return Math.abs(numericValue);
-      }
+    if (
+      typeof requested === 'string' &&
+      REQUESTED_UNITS_PATTERN.test(requested)
+    ) {
+      return Math.abs(Number(requested));
     }
   } catch {
     return null;

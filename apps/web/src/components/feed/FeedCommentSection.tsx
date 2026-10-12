@@ -1,11 +1,12 @@
 'use client';
 
-import type { CommentData, CommentWithReplies } from '@babylon/shared';
-import { cn, getProfileUrl } from '@babylon/shared';
+import type { CommentData, CommentWithReplies } from '@feed/shared';
+import { cn, getProfileUrl } from '@feed/shared';
 import { MessageCircle, X } from 'lucide-react';
 import Link from 'next/link';
 import { useRouter } from 'next/navigation';
 import { useCallback, useEffect, useMemo, useState } from 'react';
+import { toast } from 'sonner';
 import { CommentCard } from '@/components/interactions/CommentCard';
 import { CommentInput } from '@/components/interactions/CommentInput';
 import { Avatar } from '@/components/shared/Avatar';
@@ -351,13 +352,19 @@ export function FeedCommentSection({
   };
 
   const handleEdit = async (commentId: string, content: string) => {
-    await editComment(commentId, content);
+    if (!(await editComment(commentId, content))) {
+      toast.error('Failed to edit comment');
+      return;
+    }
     await loadCommentsData();
   };
 
   const handleDelete = async (commentId: string) => {
     if (!postId) return;
-    await deleteComment(commentId, postId);
+    if (!(await deleteComment(commentId, postId))) {
+      toast.error('Failed to delete comment');
+      return;
+    }
     setComments((prev) => removeCommentById(prev, commentId));
   };
 

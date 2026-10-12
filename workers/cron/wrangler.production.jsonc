@@ -1,0 +1,41 @@
+{
+  "$schema": "../../node_modules/wrangler/config-schema.json",
+  "name": "feed-cron-production",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-10-10",
+  "workers_dev": false,
+  "observability": {
+    "enabled": true
+  },
+  "triggers": {
+    "crons": ["* * * * *"]
+  },
+  "services": [
+    {
+      "binding": "APP",
+      "service": "feed-web-production"
+    }
+  ],
+  "vars": {
+    "APP_ORIGIN": "https://feed.fun",
+    "CRON_ENABLED": "true"
+  },
+  "queues": {
+    "producers": [
+      {
+        "binding": "JOBS",
+        "queue": "feed-cron-production"
+      }
+    ],
+    "consumers": [
+      {
+        "queue": "feed-cron-production",
+        "max_batch_size": 1,
+        "max_batch_timeout": 1,
+        "max_concurrency": 3,
+        "max_retries": 2,
+        "dead_letter_queue": "feed-cron-production-failed"
+      }
+    ]
+  }
+}

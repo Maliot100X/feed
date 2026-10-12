@@ -1,34 +1,42 @@
-import { cn } from '@babylon/shared';
+import { cn } from '@feed/shared';
 import type React from 'react';
 
+const variantClasses = {
+  default: 'bg-primary/15 text-primary',
+  secondary: 'bg-muted text-muted-foreground',
+  outline: 'border border-border text-foreground',
+  destructive: 'bg-red-500/15 text-red-500',
+} as const;
+
 /**
- * Badge component for displaying labels and status indicators.
- *
- * Simple badge component that extends span element. Currently accepts
- * variant prop but styling is handled via className.
- *
- * @param props - Badge component props
- * @returns Badge element
+ * Small label / status indicator. `variant` selects the colour treatment;
+ * `className` can override it.
  *
  * @example
  * ```tsx
- * <Badge variant="default">New</Badge>
+ * <Badge variant="secondary">Pending</Badge>
  * ```
  */
 export interface BadgeProps extends React.ComponentPropsWithoutRef<'span'> {
-  variant?: 'default' | 'secondary' | 'outline' | 'destructive';
+  variant?: keyof typeof variantClasses;
 }
 
 export const Badge = ({
   children,
-  variant: _variant,
+  variant = 'default',
   className,
   ...props
 }: BadgeProps) => {
   return (
-    <span className={cn(className)} {...props}>
+    <span
+      className={cn(
+        'inline-flex items-center rounded-md px-2 py-0.5 font-medium text-xs',
+        variantClasses[variant],
+        className
+      )}
+      {...props}
+    >
       {children}
     </span>
   );
 };
-export const badgeVariants = () => '';

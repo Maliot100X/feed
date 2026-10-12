@@ -7,8 +7,6 @@ import { MarketsPanel } from '@/components/feed/MarketsPanel';
 import { TrendingPanel } from '@/components/feed/TrendingPanel';
 
 interface WidgetSidebarProps {
-  showPortfolio?: boolean;
-  showPositions?: boolean;
   showLatestNews?: boolean;
   showTrending?: boolean;
   showMarkets?: boolean;
@@ -45,98 +43,59 @@ export function WidgetSidebar({
     const inner = innerRef.current;
     if (!container || !inner) return;
 
-    // Only run on xl+ screens
-    if (window.innerWidth < 1280) return;
+    // Smart sticky behaviour only applies on xl+ screens; the listener stays
+    // attached so resizing across the breakpoint enables/resets it.
+    const desktop = window.matchMedia('(min-width: 1280px)');
+    let frame: number | null = null;
 
-    let lastScrollTop = 0;
-    let direction: 'up' | 'down' = 'down';
-    let translateY = 0;
-    let ticking = false;
+    const resetStyles = () => {
+      inner.style.position = '';
+      inner.style.top = '';
+      inner.style.transform = '';
+    };
 
     const updateSidebar = () => {
+      frame = null;
+      if (!desktop.matches) {
+        resetStyles();
+        return;
+      }
       const scrollTop = document.scrollingElement?.scrollTop || 0;
       const viewportHeight = window.innerHeight;
       const sidebarHeight = inner.offsetHeight;
 
-      // Determine scroll direction
-      if (scrollTop > lastScrollTop) {
-        direction = 'down';
-      } else if (scrollTop < lastScrollTop) {
-        direction = 'up';
-      }
-      lastScrollTop = scrollTop;
+      // Top offset from the container's viewport position so fixed
+      // positioning stays aligned with any shell content above.
+      const topOffset = Math.max(0, container.getBoundingClientRect().top);
+      inner.style.position = 'fixed';
+      inner.style.top = `${topOffset}px`;
 
-      // Check if sidebar fits in viewport
-      const fitsInViewport = sidebarHeight <= viewportHeight;
-
-      // Calculate the top offset dynamically from the container's viewport
-      // position so fixed positioning stays aligned with any shell content above.
-      const containerTop = container.getBoundingClientRect().top;
-      const topOffset = Math.max(0, containerTop);
-
-      if (fitsInViewport) {
-        // Sidebar fits - simple sticky to the visible top offset
-        inner.style.position = 'fixed';
-        inner.style.top = `${topOffset}px`;
+      if (sidebarHeight <= viewportHeight) {
+        // Fits: simple sticky to the visible top offset.
         inner.style.transform = '';
-      } else {
-        // Sidebar is taller than viewport
-        const effectiveViewportHeight = viewportHeight - topOffset;
-
-        if (direction === 'down') {
-          // Scrolling down - sidebar bottom should stick to viewport bottom
-          const maxTranslate = sidebarHeight - effectiveViewportHeight;
-
-          // Calculate how much we should translate
-          // As we scroll down, increase translateY until maxTranslate
-          translateY = Math.min(scrollTop, maxTranslate);
-
-          inner.style.position = 'fixed';
-          inner.style.top = `${topOffset}px`;
-          inner.style.transform = `translateY(-${translateY}px)`;
-        } else {
-          // Scrolling up - keep current translation until we scroll back up enough
-          const maxTranslate = sidebarHeight - effectiveViewportHeight;
-          translateY = Math.min(scrollTop, maxTranslate);
-
-          inner.style.position = 'fixed';
-          inner.style.top = `${topOffset}px`;
-          inner.style.transform = `translateY(-${translateY}px)`;
-        }
-      }
-
-      ticking = false;
-    };
-
-    const handleScroll = () => {
-      if (!ticking) {
-        requestAnimationFrame(updateSidebar);
-        ticking = true;
-      }
-    };
-
-    const handleResize = () => {
-      if (window.innerWidth < 1280) {
-        // Reset styles below breakpoint
-        if (inner) {
-          inner.style.position = '';
-          inner.style.top = '';
-          inner.style.transform = '';
-        }
         return;
       }
-      updateSidebar();
+      // Taller than the viewport: translate with scroll until the sidebar's
+      // bottom reaches the viewport bottom.
+      const maxTranslate = sidebarHeight - (viewportHeight - topOffset);
+      const translateY = Math.min(scrollTop, maxTranslate);
+      inner.style.transform = `translateY(-${translateY}px)`;
     };
 
-    // Initialize
-    updateSidebar();
+    const schedule = () => {
+      if (frame === null) frame = requestAnimationFrame(updateSidebar);
+    };
 
-    window.addEventListener('scroll', handleScroll, { passive: true });
-    window.addEventListener('resize', handleResize, { passive: true });
+    updateSidebar();
+    window.addEventListener('scroll', schedule, { passive: true });
+    window.addEventListener('resize', schedule, { passive: true });
+    desktop.addEventListener('change', schedule);
 
     return () => {
-      window.removeEventListener('scroll', handleScroll);
-      window.removeEventListener('resize', handleResize);
+      if (frame !== null) cancelAnimationFrame(frame);
+      window.removeEventListener('scroll', schedule);
+      window.removeEventListener('resize', schedule);
+      desktop.removeEventListener('change', schedule);
     };
   }, []);
 

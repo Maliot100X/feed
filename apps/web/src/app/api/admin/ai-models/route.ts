@@ -46,7 +46,8 @@ import {
   logAdminView,
   requireAdmin,
   withErrorHandling,
-} from '@babylon/api';
+} from '@feed/api';
+import { getSurplusConfig } from '@feed/shared';
 import type { NextRequest } from 'next/server';
 import { NextResponse } from 'next/server';
 
@@ -66,15 +67,19 @@ export const GET = withErrorHandling(async (req: NextRequest) => {
   });
 
   // Check available providers
+  const surplus = getSurplusConfig();
   const providers = {
+    surplus: !!surplus,
     groq: !!process.env.GROQ_API_KEY,
     claude: !!process.env.ANTHROPIC_API_KEY,
     openai: !!process.env.OPENAI_API_KEY,
   };
 
-  // Get active provider (based on priority: Groq > Claude > OpenAI)
-  let activeProvider: 'groq' | 'claude' | 'openai' = 'openai';
-  if (providers.groq) {
+  // Get active provider (based on priority: Surplus > Groq > Claude > OpenAI)
+  let activeProvider: 'surplus' | 'groq' | 'claude' | 'openai' = 'openai';
+  if (providers.surplus) {
+    activeProvider = 'surplus';
+  } else if (providers.groq) {
     activeProvider = 'groq';
   } else if (providers.claude) {
     activeProvider = 'claude';
@@ -85,20 +90,28 @@ export const GET = withErrorHandling(async (req: NextRequest) => {
     data: {
       providers,
       activeProvider,
-      recommendedModels: [
-        {
-          id: 'openai/gpt-oss-120b',
-          name: 'GPT OSS 120B (Groq)',
-          description:
-            '⭐ Best for quality content: events, articles, posts, decisions',
-        },
-        {
-          id: 'llama-3.1-8b-instant',
-          name: 'Llama 3.1 8B Instant (Groq)',
-          description:
-            '🚀 Best for frequent operations: comments, DMs, tags, evaluations',
-        },
-      ],
+      recommendedModels: surplus
+        ? [
+            {
+              id: surplus.model,
+              name: `${surplus.model} (Surplus)`,
+              description: 'Configured inference model',
+            },
+          ]
+        : [
+            {
+              id: 'openai/gpt-oss-120b',
+              name: 'GPT OSS 120B (Groq)',
+              description:
+                '⭐ Best for quality content: events, articles, posts, decisions',
+            },
+            {
+              id: 'llama-3.1-8b-instant',
+              name: 'Llama 3.1 8B Instant (Groq)',
+              description:
+                '🚀 Best for frequent operations: comments, DMs, tags, evaluations',
+            },
+          ],
     },
   });
 });

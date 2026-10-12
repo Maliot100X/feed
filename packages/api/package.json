@@ -1,13 +1,12 @@
 {
-  "name": "@babylon/api",
+  "name": "@feed/api",
   "version": "0.1.0",
   "private": true,
-  "description": "Babylon API Middleware and Utilities",
+  "description": "Feed API Middleware and Utilities",
   "main": "./src/index.ts",
   "types": "./src/index.ts",
   "exports": {
-    ".": "./src/index.ts",
-    "./solana-registration-debug": "./src/solana-registration-debug.ts"
+    ".": "./src/index.ts"
   },
   "scripts": {
     "lint": "biome lint .",
@@ -17,19 +16,19 @@
     "@anthropic-ai/sdk": "^0.71.0",
     "@aws-sdk/client-s3": "^3.943.0",
     "@aws-sdk/lib-storage": "^3.943.0",
-    "@babylon/agents": "workspace:*",
-    "@babylon/shared": "workspace:*",
-    "@vercel/blob": "2.3.2",
+    "@feed/agents": "workspace:*",
+    "@feed/shared": "workspace:*",
     "graphql": "16.13.2",
     "graphql-request": "7.4.0",
     "ioredis": "5.10.1",
     "jose": "6.2.2",
     "nanoid": "5.1.7",
-    "zod": "^4.3.6"
+    "zod": "^4.3.6",
+    "@opennextjs/cloudflare": "1.20.10"
   },
   "peerDependencies": {
-    "@babylon/db": "workspace:*",
-    "@babylon/engine": "workspace:*",
+    "@feed/db": "workspace:*",
+    "@feed/engine": "workspace:*",
     "next": "^16.0.7",
     "viem": "^2.45.1"
   },

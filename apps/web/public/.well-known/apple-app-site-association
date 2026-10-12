@@ -3,13 +3,12 @@
     "apps": [],
     "details": [
       {
-        "appIDs": ["TEAM_ID.market.babylon.app"],
+        "appIDs": ["TEAM_ID.fun.feed.app"],
         "paths": [
           "/redirect",
           "/post/*",
           "/agents/*",
           "/markets/*",
-          "/nft/*",
           "/feed",
           "/u/*",
           "/actors/*",

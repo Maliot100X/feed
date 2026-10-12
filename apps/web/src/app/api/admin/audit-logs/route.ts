@@ -64,18 +64,9 @@ import {
   requireAdmin,
   successResponse,
   withErrorHandling,
-} from '@babylon/api';
-import {
-  adminAuditLogs,
-  and,
-  count,
-  db,
-  desc,
-  eq,
-  lt,
-  users,
-} from '@babylon/db';
-import { logger, toISO } from '@babylon/shared';
+} from '@feed/api';
+import { adminAuditLogs, and, count, db, desc, eq, lt, users } from '@feed/db';
+import { logger, toISO } from '@feed/shared';
 import type { NextRequest } from 'next/server';
 import { z } from 'zod';
 

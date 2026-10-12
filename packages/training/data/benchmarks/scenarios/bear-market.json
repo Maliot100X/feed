@@ -19,7 +19,7 @@
   "snapshot": {
     "id": "scenario-bear-market-v1",
     "version": "1.0.0",
-    "createdAt": 1774399868351,
+    "createdAt": 1735689600000,
     "duration": 1900800,
     "tickInterval": 3600,
     "initialState": {
@@ -95,8 +95,8 @@
       "perpetualMarkets": [
         {
           "ticker": "BTCAI",
-          "price": 73009.44603425064,
-          "priceChange24h": 0.8236266294837372,
+          "price": 120000,
+          "priceChange24h": 0,
           "volume24h": 2000000,
           "openInterest": 800000,
           "fundingRate": 0.0001,
@@ -104,8 +104,8 @@
         },
         {
           "ticker": "ETHAI",
-          "price": 2423.232595343391,
-          "priceChange24h": 0.7891225921369963,
+          "price": 4000,
+          "priceChange24h": 0,
           "volume24h": 1500000,
           "openInterest": 600000,
           "fundingRate": 0.00005,
@@ -113,8 +113,8 @@
         },
         {
           "ticker": "SOLAI",
-          "price": 120.3329025226551,
-          "priceChange24h": 0.7183678869027259,
+          "price": 200,
+          "priceChange24h": 0,
           "volume24h": 800000,
           "openInterest": 400000,
           "fundingRate": 0.00008,
@@ -122,8 +122,8 @@
         },
         {
           "ticker": "TSLAI",
-          "price": 270.13280822256803,
-          "priceChange24h": 0.8668121776196703,
+          "price": 450,
+          "priceChange24h": 0,
           "volume24h": 1200000,
           "openInterest": 500000,
           "fundingRate": 0.0001,
@@ -131,8 +131,8 @@
         },
         {
           "ticker": "METAI",
-          "price": 314.419365249467,
-          "priceChange24h": 0.7194670710240045,
+          "price": 520,
+          "priceChange24h": 0,
           "volume24h": 900000,
           "openInterest": 450000,
           "fundingRate": 0.00007,

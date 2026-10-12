@@ -11,7 +11,7 @@ import {
   InternalServerError,
   isAuthenticationError,
   isAuthorizationError,
-  isBabylonError,
+  isFeedAppError,
   isOperationalError,
   NotFoundError,
   RateLimitError,
@@ -112,11 +112,10 @@ describe('Error Classes', () => {
   });
 
   describe('RateLimitError', () => {
-    it('creates error with reset time', () => {
-      const resetTime = Date.now() + 60000;
-      const error = new RateLimitError('Too many requests', resetTime);
+    it('creates error with retry-after seconds', () => {
+      const error = new RateLimitError('Too many requests', 30);
       expect(error.statusCode).toBe(429);
-      expect(error.reset).toBe(resetTime);
+      expect(error.reset).toBe(30);
     });
   });
 
@@ -176,20 +175,20 @@ describe('Type Guards', () => {
     });
   });
 
-  describe('isBabylonError', () => {
-    it('returns true for all BabylonError subclasses', () => {
-      expect(isBabylonError(new AuthenticationError())).toBe(true);
-      expect(isBabylonError(new AuthorizationError())).toBe(true);
-      expect(isBabylonError(new BadRequestError('test'))).toBe(true);
-      expect(isBabylonError(new NotFoundError())).toBe(true);
-      expect(isBabylonError(new InternalServerError())).toBe(true);
+  describe('isFeedAppError', () => {
+    it('returns true for all FeedAppError subclasses', () => {
+      expect(isFeedAppError(new AuthenticationError())).toBe(true);
+      expect(isFeedAppError(new AuthorizationError())).toBe(true);
+      expect(isFeedAppError(new BadRequestError('test'))).toBe(true);
+      expect(isFeedAppError(new NotFoundError())).toBe(true);
+      expect(isFeedAppError(new InternalServerError())).toBe(true);
     });
 
-    it('returns false for non-BabylonError', () => {
-      expect(isBabylonError(new Error())).toBe(false);
-      expect(isBabylonError(new ApiError('test'))).toBe(false);
-      expect(isBabylonError('string')).toBe(false);
-      expect(isBabylonError(null)).toBe(false);
+    it('returns false for non-FeedAppError', () => {
+      expect(isFeedAppError(new Error())).toBe(false);
+      expect(isFeedAppError(new ApiError('test'))).toBe(false);
+      expect(isFeedAppError('string')).toBe(false);
+      expect(isFeedAppError(null)).toBe(false);
     });
   });
 
@@ -204,7 +203,7 @@ describe('Type Guards', () => {
       expect(isOperationalError(new InternalServerError())).toBe(false);
     });
 
-    it('returns false for non-BabylonError', () => {
+    it('returns false for non-FeedAppError', () => {
       expect(isOperationalError(new Error())).toBe(false);
     });
   });

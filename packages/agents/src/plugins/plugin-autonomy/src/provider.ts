@@ -6,6 +6,7 @@ import {
   type State,
 } from '@elizaos/core';
 import { logger } from '../../../shared/logger';
+import { getAdminHistory } from './admin-history';
 import type { AutonomyService } from './service';
 
 /**
@@ -19,7 +20,7 @@ export const adminChatProvider: Provider = {
 
   get: async (runtime: IAgentRuntime, message: Memory, _state?: State) => {
     // Only provide admin chat context in autonomous room
-    const autonomyService = runtime.getService<AutonomyService>('AUTONOMY');
+    const autonomyService = runtime.getService<AutonomyService>('AUTONOMOUS');
     if (!autonomyService) {
       logger.error(
         'Autonomy service not available',
@@ -46,12 +47,7 @@ export const adminChatProvider: Provider = {
     const adminUUID = asUUID(adminUserId);
 
     // Get recent messages from/to admin user
-    const adminMessages = await runtime.getMemories({
-      entityId: adminUUID,
-      count: 15, // Get last 15 messages for context
-      unique: false,
-      tableName: 'memories',
-    });
+    const adminMessages = await getAdminHistory(runtime, adminUUID);
 
     if (!adminMessages || adminMessages.length === 0) {
       return {
@@ -78,7 +74,7 @@ export const adminChatProvider: Provider = {
 
         return `${timestamp} ${sender}: ${text}`;
       })
-      .join('\\n');
+      .join('\n');
 
     // Get recent admin message summary
     const recentAdminMessages = adminMessages

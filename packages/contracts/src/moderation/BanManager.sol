@@ -10,7 +10,7 @@ import {Pausable} from "@openzeppelin/contracts/utils/Pausable.sol";
  * @dev Separates app-level bans from network-level bans for granular moderation
  * 
  * Key Features:
- * - Network bans: Block agent from ALL Babylon apps
+ * - Network bans: Block agent from ALL Feed apps
  * - App-specific bans: Block agent from specific apps only
  * - Governance-controlled ban/unban operations
  * - Event-driven cache updates for performance
@@ -75,6 +75,10 @@ contract BanManager is Ownable, Pausable {
         uint256 timestamp
     );
     
+    event AddressBanApplied(address indexed account, uint256 timestamp);
+
+    event AddressBanRemoved(address indexed account, uint256 timestamp);
+
     event GovernanceUpdated(
         address indexed oldGovernance,
         address indexed newGovernance
@@ -261,6 +265,7 @@ contract BanManager is Ownable, Pausable {
     function banAddress(address account) external onlyGovernance whenNotPaused {
         require(account != address(0), "Invalid address");
         addressBans[account] = true;
+        emit AddressBanApplied(account, block.timestamp);
     }
     
     /**
@@ -269,6 +274,7 @@ contract BanManager is Ownable, Pausable {
      */
     function unbanAddress(address account) external onlyGovernance {
         addressBans[account] = false;
+        emit AddressBanRemoved(account, block.timestamp);
     }
     
     /**

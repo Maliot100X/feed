@@ -9,12 +9,9 @@
  * Awards reputation for the completed step.
  */
 
-import { authenticate, successResponse, withErrorHandling } from '@babylon/api';
-import { completeOnboardingStep } from '@babylon/engine';
-import {
-  type GameOnboardingStep,
-  ONBOARDING_STEP_ORDER,
-} from '@babylon/shared';
+import { authenticate, successResponse, withErrorHandling } from '@feed/api';
+import { completeOnboardingStep } from '@feed/engine';
+import { type GameOnboardingStep, ONBOARDING_STEP_ORDER } from '@feed/shared';
 import type { NextRequest } from 'next/server';
 import { z } from 'zod';
 

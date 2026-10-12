@@ -60,8 +60,9 @@ export const FEEDBACK_STEPS_MAX_LENGTH = 2000;
  * Prevents users from injecting arbitrary URLs.
  */
 const ALLOWED_SCREENSHOT_DOMAINS = [
-  // Vercel Blob Storage (production)
-  '.public.blob.vercel-storage.com',
+  // Cloudflare R2 public media (R2_PUBLIC_URL: https://feed.fun/media, https://staging.feed.fun/media)
+  'feed.fun',
+  '.feed.fun',
   // MinIO (local development)
   'localhost:9000',
   '127.0.0.1:9000',
@@ -80,11 +81,10 @@ function isAllowedScreenshotUrl(url: string): boolean {
   // Parse the URL and check domain
   try {
     const parsed = new URL(url);
-    return ALLOWED_SCREENSHOT_DOMAINS.some(
-      (domain) =>
-        parsed.hostname === domain ||
-        parsed.hostname.endsWith(domain) ||
-        parsed.host === domain
+    return ALLOWED_SCREENSHOT_DOMAINS.some((domain) =>
+      domain.startsWith('.')
+        ? parsed.hostname.endsWith(domain)
+        : parsed.hostname === domain || parsed.host === domain
     );
   } catch {
     return false;

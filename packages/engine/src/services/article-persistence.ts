@@ -1,3 +1,4 @@
+import { runInBackground } from '@feed/shared/server/request-scope';
 /**
  * Article Persistence Service
  *
@@ -14,9 +15,9 @@
  * @module services/article-persistence
  */
 
-import { db, eq, posts } from '@babylon/db';
-import type { ArticlePersistInput } from '@babylon/shared';
-import { generateSnowflakeId, logger } from '@babylon/shared';
+import { db, eq, posts } from '@feed/db';
+import type { ArticlePersistInput } from '@feed/shared';
+import { generateSnowflakeId, logger } from '@feed/shared';
 import { formatError } from '../utils/error-utils';
 import { generateArticleImageWithRetry } from './article-image-service';
 import { articleRateLimiter } from './article-rate-limiter';
@@ -166,69 +167,73 @@ export async function persistArticle(
 
     // Fire-and-forget image generation
     if (generateImage && !article.imageUrl) {
-      void generateArticleImageWithRetry({
-        title: article.title,
-        summary: article.summary,
-        category: article.category || 'news',
-      })
-        .then(async (imageUrl) => {
-          if (imageUrl) {
-            try {
-              await db
-                .update(posts)
-                .set({ imageUrl })
-                .where(eq(posts.id, articleId));
-              logger.debug(
-                'Article image updated',
-                { articleId, imageUrl: imageUrl.slice(0, 50) },
-                'ArticlePersistence'
-              );
-            } catch (updateError) {
-              logger.warn(
-                'Failed to update article with image URL',
-                {
-                  articleId,
-                  error: formatError(updateError),
-                },
-                'ArticlePersistence'
-              );
-            }
-          }
+      runInBackground(
+        generateArticleImageWithRetry({
+          title: article.title,
+          summary: article.summary,
+          category: article.category || 'news',
         })
-        .catch((err) => {
-          logger.debug(
-            'Image generation failed (non-blocking)',
-            {
-              articleId,
-              error: formatError(err),
-            },
-            'ArticlePersistence'
-          );
-        });
+          .then(async (imageUrl) => {
+            if (imageUrl) {
+              try {
+                await db
+                  .update(posts)
+                  .set({ imageUrl })
+                  .where(eq(posts.id, articleId));
+                logger.debug(
+                  'Article image updated',
+                  { articleId, imageUrl: imageUrl.slice(0, 50) },
+                  'ArticlePersistence'
+                );
+              } catch (updateError) {
+                logger.warn(
+                  'Failed to update article with image URL',
+                  {
+                    articleId,
+                    error: formatError(updateError),
+                  },
+                  'ArticlePersistence'
+                );
+              }
+            }
+          })
+          .catch((err) => {
+            logger.debug(
+              'Image generation failed (non-blocking)',
+              {
+                articleId,
+                error: formatError(err),
+              },
+              'ArticlePersistence'
+            );
+          })
+      );
     }
 
     // Fire-and-forget tag generation and storage
-    void generateTagsFromPost(article.summary)
-      .then(async (generatedTags) => {
-        if (generatedTags.length > 0) {
-          await storeTagsForPost(articleId, generatedTags);
-          logger.debug(
-            'Article tags stored',
-            { articleId, tagCount: generatedTags.length },
+    runInBackground(
+      generateTagsFromPost(article.summary)
+        .then(async (generatedTags) => {
+          if (generatedTags.length > 0) {
+            await storeTagsForPost(articleId, generatedTags);
+            logger.debug(
+              'Article tags stored',
+              { articleId, tagCount: generatedTags.length },
+              'ArticlePersistence'
+            );
+          }
+        })
+        .catch((tagError) => {
+          logger.warn(
+            'Failed to generate/store article tags (non-blocking)',
+            {
+              articleId,
+              error: formatError(tagError),
+            },
             'ArticlePersistence'
           );
-        }
-      })
-      .catch((tagError) => {
-        logger.warn(
-          'Failed to generate/store article tags (non-blocking)',
-          {
-            articleId,
-            error: formatError(tagError),
-          },
-          'ArticlePersistence'
-        );
-      });
+        })
+    );
 
     return { success: true, articleId };
   } catch (error) {

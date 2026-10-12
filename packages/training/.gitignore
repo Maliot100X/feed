@@ -26,5 +26,3 @@ logs/
 # HuggingFace dataset exports
 hf_datasets/
 
-# tmp
-deploy/phala/

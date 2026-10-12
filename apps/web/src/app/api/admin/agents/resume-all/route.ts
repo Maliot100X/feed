@@ -15,17 +15,9 @@ import {
   logAdminModify,
   requireAdmin,
   withErrorHandling,
-} from '@babylon/api';
-import {
-  db,
-  eq,
-  gte,
-  inArray,
-  sql,
-  userAgentConfigs,
-  users,
-} from '@babylon/db';
-import { logger } from '@babylon/shared';
+} from '@feed/api';
+import { db, eq, gte, inArray, sql, userAgentConfigs, users } from '@feed/db';
+import { logger } from '@feed/shared';
 import type { NextRequest } from 'next/server';
 import { NextResponse } from 'next/server';
 

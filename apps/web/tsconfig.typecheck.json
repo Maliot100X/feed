@@ -1,4 +1,11 @@
 {
   "extends": "./tsconfig.json",
-  "include": ["src/**/*", "next.config.ts", "types/**/*.d.ts"]
+  "include": [
+    "src/**/*",
+    "next.config.ts",
+    "types/**/*.d.ts",
+    "cloudflare-worker.ts",
+    "cloudflare-tokenizer.ts",
+    "open-next.config.ts"
+  ]
 }

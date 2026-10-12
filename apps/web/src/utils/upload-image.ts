@@ -1,5 +1,5 @@
 /**
- * Upload an image to the app's image API (Vercel Blob or MinIO).
+ * Upload an image to the app's image API (R2 or MinIO).
  * Used by edit profile and onboarding for profile/cover image uploads.
  */
 

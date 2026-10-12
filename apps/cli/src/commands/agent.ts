@@ -9,15 +9,17 @@
  * @module cli/commands/agent
  */
 
-import { createTestAgent } from '@babylon/agents';
+import { createTestAgent } from '@feed/agents';
 import {
+  and,
   closeDatabase,
   db,
   desc,
   eq,
+  or,
   userAgentConfigs,
   users,
-} from '@babylon/db';
+} from '@feed/db';
 import { existsSync, readFileSync, writeFileSync } from 'fs';
 import { join } from 'path';
 import { getFlag, getOption, parseArgs, wantsHelp } from '../lib/args.js';
@@ -28,7 +30,7 @@ function printHelp(): void {
 Agent Management
 
 USAGE:
-  babylon agent <command> [options]
+  feed agent <command> [options]
 
 COMMANDS:
   spawn     Create test agents for simulation/training
@@ -57,11 +59,11 @@ OPTIONS (enable/disable):
   --all                  Toggle all features
 
 EXAMPLES:
-  babylon agent spawn --count=10 --trading --posting
-  babylon agent spawn -c 5 -p scammer --all
-  babylon agent list --active
-  babylon agent enable --id=abc123 --trading
-  babylon agent disable --id=abc123 --all
+  feed agent spawn --count=10 --trading --posting
+  feed agent spawn -c 5 -p scammer --all
+  feed agent list --active
+  feed agent enable --id=abc123 --trading
+  feed agent disable --id=abc123 --all
 `);
 }
 
@@ -107,7 +109,14 @@ async function spawnAgents(args: ReturnType<typeof parseArgs>): Promise<void> {
 
 async function listAgents(args: ReturnType<typeof parseArgs>): Promise<void> {
   const activeOnly = getFlag(args, 'active');
-  const limit = parseInt(getOption(args, 'limit') || '20', 10);
+  const limitOption = getOption(args, 'limit') || '20';
+  const limit = Number(limitOption);
+  if (!Number.isInteger(limit) || limit < 1) {
+    logger.fail(
+      `--limit must be a positive integer, received "${limitOption}"`
+    );
+    process.exit(1);
+  }
 
   logger.header('Agents');
 
@@ -127,27 +136,30 @@ async function listAgents(args: ReturnType<typeof parseArgs>): Promise<void> {
     })
     .from(users)
     .leftJoin(userAgentConfigs, eq(users.id, userAgentConfigs.userId))
-    .where(eq(users.isAgent, true))
+    // Filter active agents in SQL before LIMIT; filtering the page afterwards
+    // hid active agents that were not among the newest `limit` agents.
+    .where(
+      activeOnly
+        ? and(
+            eq(users.isAgent, true),
+            or(
+              eq(userAgentConfigs.autonomousTrading, true),
+              eq(userAgentConfigs.autonomousPosting, true),
+              eq(userAgentConfigs.autonomousCommenting, true),
+              eq(userAgentConfigs.autonomousDMs, true),
+              eq(userAgentConfigs.autonomousGroupChats, true)
+            )
+          )
+        : eq(users.isAgent, true)
+    )
     .orderBy(desc(users.createdAt))
     .limit(limit);
 
-  const agents = await baseQuery;
-
-  // Filter for active agents if requested
-  const filteredAgents = activeOnly
-    ? agents.filter(
-        (a) =>
-          a.autonomousTrading ||
-          a.autonomousPosting ||
-          a.autonomousCommenting ||
-          a.autonomousDMs ||
-          a.autonomousGroupChats
-      )
-    : agents;
+  const filteredAgents = await baseQuery;
 
   if (filteredAgents.length === 0) {
     console.log('No agents found.');
-    console.log('\nCreate agents with: babylon agent spawn');
+    console.log('\nCreate agents with: feed agent spawn');
     return;
   }
 
@@ -196,7 +208,7 @@ async function configureAgent0(): Promise<void> {
     enabled: getEnvValue(envContent, 'AGENT0_ENABLED'),
     network: getEnvValue(envContent, 'AGENT0_NETWORK'),
     rpcUrl: getEnvValue(envContent, 'AGENT0_RPC_URL'),
-    privateKey: getEnvValue(envContent, 'BABYLON_GAME_PRIVATE_KEY'),
+    privateKey: getEnvValue(envContent, 'FEED_GAME_PRIVATE_KEY'),
     subgraphUrl: getEnvValue(envContent, 'AGENT0_SUBGRAPH_URL'),
     ipfsProvider: getEnvValue(envContent, 'AGENT0_IPFS_PROVIDER'),
     pinataJwt: getEnvValue(envContent, 'PINATA_JWT'),
@@ -212,7 +224,7 @@ async function configureAgent0(): Promise<void> {
     `  AGENT0_RPC_URL:         ${currentConfig.rpcUrl ? '✅ set' : '❌ not set'}`
   );
   console.log(
-    `  BABYLON_GAME_PRIVATE_KEY: ${currentConfig.privateKey ? '✅ set' : '❌ not set'}`
+    `  FEED_GAME_PRIVATE_KEY: ${currentConfig.privateKey ? '✅ set' : '❌ not set'}`
   );
   console.log(
     `  AGENT0_SUBGRAPH_URL:    ${currentConfig.subgraphUrl || 'not set'}`
@@ -271,7 +283,7 @@ async function configureAgent0(): Promise<void> {
   console.log('Next steps:\n');
 
   if (!currentConfig.privateKey) {
-    console.log('1. Set BABYLON_GAME_PRIVATE_KEY in .env.testnet');
+    console.log('1. Set FEED_GAME_PRIVATE_KEY in .env.testnet');
     console.log('   (Private key for game agent, needs ETH for registration)');
   }
 

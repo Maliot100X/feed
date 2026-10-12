@@ -20,16 +20,16 @@
  * ```
  */
 
-import type { PerpPosition, UserPredictionPosition } from '@babylon/shared';
-import { toNumber } from '@babylon/shared';
+import type { PerpPosition, UserPredictionPosition } from '@feed/shared';
+import { toNumber } from '@feed/shared';
 import { useCallback, useEffect, useRef } from 'react';
 import { create } from 'zustand';
 import { useShallow } from 'zustand/react/shallow';
 
 // Re-export types for convenience
-export type { PerpPosition, UserPredictionPosition } from '@babylon/shared';
+export type { PerpPosition, UserPredictionPosition } from '@feed/shared';
 
-import { apiUrl } from '@/utils/api-url';
+import { apiFetch } from '@/utils/api-fetch';
 
 interface PerpStats {
   totalPositions: number;
@@ -49,7 +49,13 @@ interface UserPositionsState {
 
   // Internal state
   fetchPromise: Promise<void> | null;
+  /** Identity of the latest fetch; only it may commit results. */
+  fetchSeq: number;
   pollingInterval: ReturnType<typeof setInterval> | null;
+  /** User the active polling interval belongs to. */
+  pollingUserId: string | null;
+  /** Bumped whenever polling is (re)started for a user; stale unsubscribes are ignored. */
+  pollingGeneration: number;
   subscriberCount: number;
 
   // Actions
@@ -193,7 +199,10 @@ export const useUserPositionsStore = create<UserPositionsState>((set, get) => ({
   lastFetchedAt: null,
   userId: null,
   fetchPromise: null,
+  fetchSeq: 0,
   pollingInterval: null,
+  pollingUserId: null,
+  pollingGeneration: 0,
   subscriberCount: 0,
 
   fetchPositions: async (userId: string, force = false) => {
@@ -212,22 +221,23 @@ export const useUserPositionsStore = create<UserPositionsState>((set, get) => ({
     // Re-fetch fresh state after await to avoid stale cache checks
     const currentState = get();
 
-    // Return cached data if fresh and not forced
+    // Return cached data if fresh and not forced (an empty list is a valid,
+    // cacheable result).
     if (
       !force &&
       currentState.userId === userId &&
       currentState.lastFetchedAt &&
-      Date.now() - currentState.lastFetchedAt < CACHE_TTL &&
-      (currentState.perpPositions.length > 0 ||
-        currentState.predictionPositions.length > 0)
+      Date.now() - currentState.lastFetchedAt < CACHE_TTL
     ) {
       return;
     }
 
-    // Capture the requested userId to prevent cross-user data leakage
     const requestedUserId = userId;
+    const seq = currentState.fetchSeq + 1;
+    // Only the latest request for the current user may commit anything.
+    const isCurrent = () =>
+      get().fetchSeq === seq && get().userId === requestedUserId;
 
-    // Create and store the fetch promise
     const fetchPromise = (async () => {
       // Only show loading on initial fetch (no cached data yet)
       const isInitialLoad =
@@ -239,10 +249,8 @@ export const useUserPositionsStore = create<UserPositionsState>((set, get) => ({
       set({ error: null, userId: requestedUserId });
 
       try {
-        const response = await fetch(
-          apiUrl(
-            `/api/markets/positions/${encodeURIComponent(requestedUserId)}`
-          )
+        const response = await apiFetch(
+          `/api/markets/positions/${encodeURIComponent(requestedUserId)}`
         );
 
         if (!response.ok) {
@@ -251,11 +259,7 @@ export const useUserPositionsStore = create<UserPositionsState>((set, get) => ({
 
         const data = await response.json();
 
-        // Verify user hasn't changed during fetch to prevent data leakage
-        if (get().userId !== requestedUserId) {
-          // User changed during fetch - discard stale response
-          return;
-        }
+        if (!isCurrent()) return;
 
         const perpetuals = data?.perpetuals ?? {};
         const predictions = data?.predictions ?? {};
@@ -289,21 +293,19 @@ export const useUserPositionsStore = create<UserPositionsState>((set, get) => ({
           error: null,
         });
       } catch (err) {
-        // Only set error if user hasn't changed
-        if (get().userId === requestedUserId) {
+        if (isCurrent()) {
           const errorMessage =
             err instanceof Error ? err.message : 'Failed to fetch positions';
           set({ error: errorMessage });
         }
       } finally {
-        // Only clear loading/promise if this fetch is still relevant
-        if (get().userId === requestedUserId) {
-          set({ loading: false, fetchPromise: null });
-        }
+        // Never clear a newer request's loading flag or promise.
+        if (get().fetchSeq === seq) set({ fetchPromise: null });
+        if (isCurrent()) set({ loading: false });
       }
     })();
 
-    set({ fetchPromise });
+    set({ fetchPromise, fetchSeq: seq });
     return fetchPromise;
   },
 
@@ -319,6 +321,9 @@ export const useUserPositionsStore = create<UserPositionsState>((set, get) => ({
         predictionPositions: [],
         perpStats: { ...DEFAULT_STATS },
         fetchPromise: null,
+        // Invalidate any in-flight request for the previous user.
+        fetchSeq: state.fetchSeq + 1,
+        loading: false,
         error: null,
       });
     }
@@ -342,52 +347,55 @@ export const useUserPositionsStore = create<UserPositionsState>((set, get) => ({
       lastFetchedAt: null,
       userId: null,
       fetchPromise: null,
+      fetchSeq: state.fetchSeq + 1,
       pollingInterval: null,
+      pollingUserId: null,
+      pollingGeneration: state.pollingGeneration + 1,
       subscriberCount: 0,
     });
   },
 
-  // Combined subscribe/unsubscribe that handles polling lifecycle
+  // Combined subscribe/unsubscribe that handles polling lifecycle.
+  // Polling belongs to exactly one user; subscribing for a different user
+  // restarts it, and unsubscribes from an earlier generation are no-ops.
   subscribe: (userId: string, intervalMs: number) => {
     const state = get();
 
-    // If userId changed while polling is active, reset the polling
-    if (state.pollingInterval && state.userId !== userId) {
-      clearInterval(state.pollingInterval);
-      set({ pollingInterval: null, subscriberCount: 0, userId });
-    }
-
-    const newCount = state.subscriberCount + 1;
-    set({ subscriberCount: newCount, userId });
-
-    // Start polling on first subscriber
-    if (newCount === 1) {
-      // Initial fetch
-      get().fetchPositions(userId);
-
-      // Set up interval with userId validation
+    let generation = state.pollingGeneration;
+    if (state.pollingInterval === null || state.pollingUserId !== userId) {
+      if (state.pollingInterval) clearInterval(state.pollingInterval);
+      generation = state.pollingGeneration + 1;
       const interval = setInterval(() => {
-        const currentState = get();
-        // Only fetch if userId hasn't changed (prevents stale closure)
-        if (currentState.userId === userId) {
-          currentState.fetchPositions(userId, true);
+        const current = get();
+        if (current.userId === userId) {
+          void current.fetchPositions(userId, true);
         }
       }, intervalMs);
-
-      set({ pollingInterval: interval });
+      set({
+        pollingInterval: interval,
+        pollingUserId: userId,
+        pollingGeneration: generation,
+        subscriberCount: 1,
+        userId,
+      });
+      void get().fetchPositions(userId);
+    } else {
+      set({ subscriberCount: state.subscriberCount + 1 });
     }
 
-    // Return unsubscribe function
+    let active = true;
     return () => {
-      const currentState = get();
-      const updatedCount = currentState.subscriberCount - 1;
-      set({ subscriberCount: updatedCount });
-
-      // Stop polling when last subscriber leaves
-      if (updatedCount === 0 && currentState.pollingInterval) {
-        clearInterval(currentState.pollingInterval);
-        set({ pollingInterval: null });
+      if (!active) return;
+      active = false;
+      const current = get();
+      if (current.pollingGeneration !== generation) return;
+      const remaining = current.subscriberCount - 1;
+      if (remaining > 0) {
+        set({ subscriberCount: remaining });
+        return;
       }
+      if (current.pollingInterval) clearInterval(current.pollingInterval);
+      set({ subscriberCount: 0, pollingInterval: null, pollingUserId: null });
     };
   },
 

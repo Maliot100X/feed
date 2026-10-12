@@ -3,16 +3,17 @@
  * Standalone script to run a traced game tick.
  * Writes trace data to runs/dag-traces/ for the visualizer.
  *
- * Usage: BABYLON_DAG_TRACE=true bun run scripts/run-traced-tick.ts
+ * Usage: FEED_DAG_TRACE=true bun run scripts/run-traced-tick.ts
  */
 
 import 'dotenv/config';
 
 // Force enable tracing
-process.env.BABYLON_DAG_TRACE = 'true';
+process.env.FEED_DAG_TRACE = 'true';
 
-import { executeGameTick } from '@babylon/engine';
-import { logger } from '@babylon/shared';
+import { $disconnect } from '@feed/db';
+import { executeGameTick } from '@feed/engine';
+import { logger } from '@feed/shared';
 
 async function main() {
   logger.info('Starting traced game tick...', {}, 'TracedTick');
@@ -64,9 +65,10 @@ async function main() {
       error instanceof Error ? error : new Error(String(error)),
       'TracedTick'
     );
+    process.exitCode = 1;
+  } finally {
+    await $disconnect();
   }
-
-  process.exit(0);
 }
 
-main();
+await main();

@@ -48,21 +48,21 @@ const SKIP_DIR_NAMES = new Set([
   '.git',
   'node_modules',
   '.turbo',
-  '.vercel',
   '.next',
   '.output',
+  '.open-next',
+  '.wrangler',
   'dist',
   'build',
   'coverage',
 ]);
 
-const PLATFORM_PREFIXES = ['VERCEL_', 'TURBO_', 'NX_'];
+const PLATFORM_PREFIXES = ['TURBO_', 'NX_'];
 
 const PLATFORM_KEYS = new Set([
   'CI',
   'NODE_ENV',
   'BUN_ENV',
-  'VERCEL',
   'NEXT_PHASE',
   'NEXT_RUNTIME',
   'PWD',
@@ -204,8 +204,6 @@ function isPlatformKey(key: string): boolean {
   for (const prefix of PLATFORM_PREFIXES) {
     if (key.startsWith(prefix)) return true;
   }
-  if (key.startsWith('NEXT_PUBLIC_VERCEL_')) return true;
-  if (key.startsWith('VERCEL_')) return true;
   return false;
 }
 

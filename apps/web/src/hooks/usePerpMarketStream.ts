@@ -87,19 +87,14 @@ export function usePerpMarketStream(
   const handleMessage = useCallback(
     (payload: Record<string, unknown>) => {
       if (!isPerpTradePayload(payload)) return;
-      if (
-        normalizedTicker &&
-        payload.ticker.toUpperCase() !== normalizedTicker
-      ) {
-        return;
-      }
-
+      if (payload.ticker.toUpperCase() !== normalizedTicker) return;
       onTradeRef.current?.(payload);
     },
     [normalizedTicker]
   );
 
-  useSSEChannel('markets', handleMessage);
+  // A null ticker unsubscribes; use usePerpMarketsSubscription for all markets.
+  useSSEChannel(normalizedTicker ? 'markets' : null, handleMessage);
 }
 
 /**

@@ -1,6 +1,5 @@
 const LEGACY_CANONICAL_HOSTS: Record<string, string> = {
-  'babylon.social': 'babylon.market',
-  'www.babylon.social': 'babylon.market',
+  'www.feed.fun': 'feed.fun',
 };
 
 function normalizeHostname(hostname: string): string {
@@ -15,7 +14,6 @@ export function isAssetRequest(pathname: string): boolean {
     pathname.startsWith('/images') ||
     pathname.startsWith('/fonts') ||
     pathname.startsWith('/.well-known') ||
-    pathname.startsWith('/_vercel') ||
     pathname.startsWith('/monitoring') ||
     /\.[^/]+$/.test(pathname)
   );

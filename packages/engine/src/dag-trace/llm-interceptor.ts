@@ -4,11 +4,11 @@
  * Hooks into the global LLM call callback to capture full prompt/response
  * text and associate it with the current active DAG node.
  *
- * Also installs the agent LLM bridge so that LLM calls from @babylon/agents
+ * Also installs the agent LLM bridge so that LLM calls from @feed/agents
  * (callGroqDirect, callAgentLLM, etc.) are forwarded into the active trace.
  */
 
-import type { AgentLLMBridgeData } from '@babylon/shared';
+import { type AgentLLMBridgeData, setAgentLLMBridge } from '@feed/shared';
 
 import { getActiveTracer } from './tracer';
 import type { LLMCallInput } from './types';
@@ -38,7 +38,7 @@ export function getLLMCallCallback(): LLMCallCallback | null {
 
 /**
  * Install the LLM interceptor that forwards calls to the active TickTracer.
- * Also installs the agent LLM bridge if @babylon/shared provides it.
+ * Also installs the agent LLM bridge if @feed/shared provides it.
  */
 export function installLLMInterceptor(): void {
   // Core engine LLM callback
@@ -49,45 +49,19 @@ export function installLLMInterceptor(): void {
     }
   });
 
-  // Agent LLM bridge — forward agent package LLM calls into the DAG trace
-  // Uses dynamic import to avoid hard dependency if shared doesn't have the bridge yet
-  import('@babylon/shared')
-    .then((shared) => {
-      if (typeof shared.setAgentLLMBridge === 'function') {
-        shared.setAgentLLMBridge((data: AgentLLMBridgeData) => {
-          const tracer = getActiveTracer();
-          if (tracer) {
-            // Apply defaults for optional fields to prevent NaN poisoning
-            const call: LLMCallInput = {
-              provider: '',
-              model: '',
-              promptType: 'agent',
-              format: 'text',
-              temperature: 0,
-              maxTokens: 0,
-              systemPrompt: '',
-              userPrompt: '',
-              rawResponse: '',
-              parsedResponse: null,
-              inputTokens: 0,
-              outputTokens: 0,
-              totalTokens: 0,
-              durationMs: 0,
-              success: true,
-              ...(data as Partial<LLMCallInput>),
-            };
-            // Ensure totalTokens is computed if not provided
-            if (!call.totalTokens && (call.inputTokens || call.outputTokens)) {
-              call.totalTokens = call.inputTokens + call.outputTokens;
-            }
-            tracer.recordLLMCall(call);
-          }
-        });
-      }
-    })
-    .catch(() => {
-      // @babylon/shared may not have the bridge yet — that's fine
-    });
+  // Install synchronously and route through the same callback as engine calls.
+  // This also lets standalone capture tools observe agent calls outside a tick.
+  setAgentLLMBridge((data: AgentLLMBridgeData) => {
+    const call: LLMCallInput = {
+      format: 'text',
+      temperature: 0,
+      maxTokens: 0,
+      parsedResponse: null,
+      ...data,
+      totalTokens: data.totalTokens ?? data.inputTokens + data.outputTokens,
+    };
+    getLLMCallCallback()?.(call);
+  });
 }
 
 /**
@@ -96,14 +70,5 @@ export function installLLMInterceptor(): void {
 export function uninstallLLMInterceptor(): void {
   setLLMCallCallback(null);
 
-  // Clear agent bridge
-  import('@babylon/shared')
-    .then((shared) => {
-      if (typeof shared.setAgentLLMBridge === 'function') {
-        shared.setAgentLLMBridge(null);
-      }
-    })
-    .catch(() => {
-      // Fine if not available
-    });
+  setAgentLLMBridge(null);
 }

@@ -11,28 +11,6 @@
  */
 
 import {
-  agentRuntimeManager,
-  agentService,
-  notifyTeamChatMessage,
-  teamChatService,
-} from '@babylon/agents';
-import {
-  authenticateUser,
-  broadcastChatMessage,
-  checkProgress,
-  withErrorHandling,
-} from '@babylon/api';
-import { db, eq, messages, userAgentConfigs, users } from '@babylon/db';
-import {
-  checkUserInput,
-  GROQ_MODELS,
-  generateSnowflakeId,
-  logger,
-  type MessageMetadata,
-  type MessageTag,
-  toISO,
-} from '@babylon/shared';
-import {
   type ActionResult,
   composePromptFromState,
   type Memory,
@@ -40,6 +18,30 @@ import {
   parseKeyValueXml,
   type State,
 } from '@elizaos/core';
+import {
+  agentRuntimeManager,
+  agentService,
+  describeRuntimeModel,
+  formatAgentActionResults,
+  notifyTeamChatMessage,
+  requireAgentAction,
+  teamChatService,
+} from '@feed/agents';
+import {
+  authenticateUser,
+  broadcastChatMessage,
+  checkProgress,
+  withErrorHandling,
+} from '@feed/api';
+import { db, eq, messages, userAgentConfigs, users } from '@feed/db';
+import {
+  checkUserInput,
+  generateSnowflakeId,
+  logger,
+  type MessageMetadata,
+  type MessageTag,
+  toISO,
+} from '@feed/shared';
 import type { NextRequest } from 'next/server';
 import { NextResponse } from 'next/server';
 import { v4 as uuidv4 } from 'uuid';
@@ -307,13 +309,17 @@ export const POST = withErrorHandling(
       ? MODEL_TIER_POINTS_COST.pro
       : MODEL_TIER_POINTS_COST.free;
     const modelType = usePro ? ModelType.TEXT_LARGE : ModelType.TEXT_SMALL;
-    const modelUsed = usePro
-      ? GROQ_MODELS.PRO.displayName
-      : GROQ_MODELS.FREE.displayName;
 
     // Check balance BEFORE processing (to return clear error upfront)
     // Points will be deducted AFTER successful response generation
-    let newBalance = Number(agentWithConfig.virtualBalance ?? 0);
+    if (
+      agentWithConfig.virtualBalance == null ||
+      String(agentWithConfig.virtualBalance).trim() === ''
+    )
+      throw new Error('Agent balance is required');
+    let newBalance = Number(agentWithConfig.virtualBalance);
+    if (!Number.isFinite(newBalance) || newBalance < 0)
+      throw new Error('Agent balance must be finite and nonnegative');
     if (pointsCost > 0 && newBalance < pointsCost) {
       return NextResponse.json(
         {
@@ -326,6 +332,7 @@ export const POST = withErrorHandling(
 
     // Get runtime
     const runtime = await agentRuntimeManager.getRuntime(agentId);
+    const modelUsed = describeRuntimeModel(runtime, modelType);
 
     // Fetch owner info for personalized conversation
     const [ownerProfile] = await db
@@ -342,7 +349,12 @@ export const POST = withErrorHandling(
       id: uuidv4() as `${string}-${string}-${string}-${string}-${string}`,
       entityId: user.id as `${string}-${string}-${string}-${string}-${string}`,
       roomId: agentId as `${string}-${string}-${string}-${string}-${string}`,
-      content: { text: message },
+      content: {
+        text: message,
+        agentId,
+        ownerId: user.id,
+        ...(teamChatId ? { teamChatId } : {}),
+      },
       createdAt: Date.now(),
     };
 
@@ -360,7 +372,7 @@ export const POST = withErrorHandling(
       > = [];
       let finalResponse: string | null = null;
       // Track if response is due to LLM failure (don't charge points)
-      let isLLMFailure = false;
+      const isLLMFailure = false;
 
       for (let iteration = 1; iteration <= MAX_ITERATIONS; iteration++) {
         // Check if client cancelled the request
@@ -379,7 +391,7 @@ export const POST = withErrorHandling(
 
         // Compose state with providers
         // Use strict filtering (3rd param = true) to ONLY run the specified providers
-        // This prevents all Babylon A2A providers from running unnecessarily
+        // This prevents all Feed A2A providers from running unnecessarily
         // Include TEAM_MEMBERS provider when in team chat mode
         const providers = isTeamChatMode
           ? [
@@ -393,12 +405,23 @@ export const POST = withErrorHandling(
         const state: State = await runtime.composeState(
           elizaMessage,
           providers,
+          true,
           true
         );
+
+        if (
+          typeof state.values.recentMessages !== 'string' ||
+          !state.values.recentMessages.trim()
+        )
+          throw new Error('Required conversation history context is missing');
+        if (typeof state.values.actionsWithParams !== 'string')
+          throw new Error('Required action schema context is missing');
 
         // Add custom values to state
         state.values = {
           ...state.values,
+          actionResults: formatAgentActionResults(traceActionResults),
+          hasActionResults: traceActionResults.length > 0,
           agentId, // Pass agentId for actions that need it
           system:
             agentConfig?.systemPrompt ?? 'You are a helpful AI assistant.',
@@ -441,6 +464,7 @@ export const POST = withErrorHandling(
           const response = await runtime.useModel(modelType, {
             prompt,
             temperature: attempt > 1 ? 0.5 : 0.7,
+            maxTokens: 1200,
           });
 
           // Check cancellation after LLM call
@@ -469,20 +493,28 @@ export const POST = withErrorHandling(
           );
         }
 
-        if (!parsedStep) {
-          finalResponse =
-            "I'm having trouble processing your request. Could you try rephrasing?";
-          isLLMFailure = true; // Don't charge points for LLM parse failures
-          break;
+        if (!parsedStep)
+          throw new Error(
+            'Agent decision could not be parsed after three attempts'
+          );
+        if (
+          typeof parsedStep.action !== 'string' ||
+          !['true', 'false', true, false].includes(
+            parsedStep.isFinish as string | boolean
+          )
+        ) {
+          throw new Error(
+            'Agent decision requires action and boolean isFinish'
+          );
         }
-
-        const thought = (parsedStep.thought as string) ?? '';
-        const action = (parsedStep.action as string) ?? '';
+        const thought =
+          typeof parsedStep.thought === 'string' ? parsedStep.thought : '';
+        const action = parsedStep.action.trim();
         const parameters = parsedStep.parameters;
         const isFinish = parsedStep.isFinish;
-
-        // No action - go to summary phase
-        if (!action || action === '') {
+        if (!action) {
+          if (isFinish !== true && isFinish !== 'true')
+            throw new Error('Empty action requires explicit finish');
           break;
         }
 
@@ -494,6 +526,8 @@ export const POST = withErrorHandling(
           );
         }
 
+        await requireAgentAction(runtime, action, elizaMessage, state);
+
         // Execute action via runtime.processActions
         logger.info(
           `[MultiStep] Executing action: ${action}`,
@@ -501,21 +535,16 @@ export const POST = withErrorHandling(
           'AgentChat'
         );
 
-        // Parse parameters
-        let actionParams = {};
-        if (parameters) {
-          if (typeof parameters === 'string') {
-            try {
-              actionParams = JSON.parse(parameters);
-            } catch {
-              logger.warn(
-                `[MultiStep] Failed to parse parameters: ${parameters}`
-              );
-            }
-          } else if (typeof parameters === 'object') {
-            actionParams = parameters;
-          }
+        const parsedParameters: unknown =
+          typeof parameters === 'string' ? JSON.parse(parameters) : parameters;
+        if (
+          !parsedParameters ||
+          typeof parsedParameters !== 'object' ||
+          Array.isArray(parsedParameters)
+        ) {
+          throw new Error(`Action ${action} requires a parameters object`);
         }
+        const actionParams = parsedParameters as Record<string, unknown>;
 
         // Store params in state for action handler
         state.data = {
@@ -621,11 +650,15 @@ export const POST = withErrorHandling(
               cachedState?.values?.actionResults || [];
             actionResult =
               actionResultsFromCache.length > 0
-                ? (actionResultsFromCache[0] ?? null)
+                ? (actionResultsFromCache.at(-1) ?? null)
                 : null;
           }
 
-          const success = actionResult?.success ?? false;
+          if (!actionResult || typeof actionResult.success !== 'boolean')
+            throw new Error(
+              `Action ${action} did not return a completion result`
+            );
+          const success = actionResult.success;
 
           traceActionResults.push({
             actionType: action,
@@ -650,6 +683,12 @@ export const POST = withErrorHandling(
           });
         }
 
+        const latestAction = traceActionResults.at(-1);
+        if (!latestAction?.success)
+          throw latestAction?.error instanceof Error
+            ? latestAction.error
+            : new Error(latestAction?.error || `Action ${action} failed`);
+
         // Check if done - always go to summary phase for proper response
         if (isFinish === 'true' || isFinish === true) {
           break;
@@ -660,15 +699,29 @@ export const POST = withErrorHandling(
       {
         // Include TEAM_MEMBERS provider when in team chat mode
         const summaryProviders = isTeamChatMode
-          ? ['AGENT_CONTEXT', 'RECENT_MESSAGES', 'ACTION_STATE', 'TEAM_MEMBERS']
-          : ['AGENT_CONTEXT', 'RECENT_MESSAGES', 'ACTION_STATE'];
+          ? [
+              'AGENT_CONTEXT',
+              'RECENT_MESSAGES',
+              'ACTION_STATE',
+              'ACTIONS',
+              'TEAM_MEMBERS',
+            ]
+          : ['AGENT_CONTEXT', 'RECENT_MESSAGES', 'ACTION_STATE', 'ACTIONS'];
         const state = await runtime.composeState(
           elizaMessage,
           summaryProviders,
+          true,
           true
         );
+        if (
+          typeof state.values.recentMessages !== 'string' ||
+          !state.values.recentMessages.trim()
+        )
+          throw new Error('Required conversation history context is missing');
         state.values = {
           ...state.values,
+          actionResults: formatAgentActionResults(traceActionResults),
+          hasActionResults: traceActionResults.length > 0,
           agentId, // Pass agentId for actions that need it
           system:
             agentConfig?.systemPrompt ?? 'You are a helpful AI assistant.',
@@ -713,18 +766,11 @@ export const POST = withErrorHandling(
           const summaryResponse = await runtime.useModel(modelType, {
             prompt: summaryPrompt,
             temperature: attempt > 1 ? 0.5 : 0.7,
+            maxTokens: 1200,
           });
 
           const summary = parseKeyValueXml(summaryResponse);
           extractedText = summary?.text as string | undefined;
-
-          // Fallback: Try regex if parseKeyValueXml fails
-          if (!extractedText) {
-            const textMatch = summaryResponse.match(/<?\/?text>([^<]+)/i);
-            if (textMatch?.[1]) {
-              extractedText = textMatch[1].trim();
-            }
-          }
 
           if (extractedText) {
             logger.debug(
@@ -742,15 +788,15 @@ export const POST = withErrorHandling(
           );
         }
 
-        finalResponse =
-          extractedText ||
-          (traceActionResults.length > 0
-            ? 'Actions completed.'
-            : "I'm here to help!");
+        if (typeof extractedText !== 'string' || !extractedText.trim()) {
+          throw new Error(
+            'Agent summary could not be parsed after three attempts'
+          );
+        }
+        finalResponse = extractedText;
       }
-
-      // Ensure finalResponse is never null
-      const responseText = finalResponse ?? "I'm here to help!";
+      if (!finalResponse?.trim()) throw new Error('Agent returned no response');
+      const responseText = finalResponse;
 
       // Calculate actual points cost early - skip charging for LLM failures
       // This needs to happen before DB writes so stored pointsCost is accurate
@@ -784,7 +830,7 @@ export const POST = withErrorHandling(
           metadata: messageMetadata,
         });
 
-        void notifyTeamChatMessage({
+        await notifyTeamChatMessage({
           chatId: teamChatId,
           messageId: responseMessageId,
           senderId: agentId,
@@ -792,7 +838,7 @@ export const POST = withErrorHandling(
         });
 
         // Broadcast agent response to team chat
-        broadcastChatMessage(teamChatId, {
+        await broadcastChatMessage(teamChatId, {
           id: responseMessageId,
           content: responseText,
           chatId: teamChatId,
@@ -800,12 +846,6 @@ export const POST = withErrorHandling(
           type: 'user',
           createdAt: assistantMessageTime.toISOString(),
           metadata: messageMetadata,
-        }).catch((err) => {
-          logger.warn(
-            `Failed to broadcast agent message to team chat: ${err}`,
-            { teamChatId, agentId },
-            'AgentChat'
-          );
         });
 
         logger.info(
@@ -897,7 +937,7 @@ export const POST = withErrorHandling(
             { agentId, pointsCost: actualPointsCost, error: err },
             'AgentChat'
           );
-          // Keep original balance in response (will be slightly incorrect but safe)
+          throw err;
         }
       }
 
@@ -921,7 +961,11 @@ export const POST = withErrorHandling(
         );
       });
 
-      void checkProgress(user.userId, { type: 'agent_message_sent' });
+      await checkProgress(
+        user.userId,
+        { type: 'agent_message_sent' },
+        { failOnError: true }
+      );
 
       return NextResponse.json({
         success: true,

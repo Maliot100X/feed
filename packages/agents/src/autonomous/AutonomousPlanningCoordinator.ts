@@ -5,9 +5,11 @@
  * Considers goals, constraints, and opportunities to generate comprehensive action plans.
  */
 
-import { countTokensSync, truncateToTokenLimitSync } from '@babylon/api';
-import type { JsonValue } from '@babylon/db';
+import type { IAgentRuntime } from '@elizaos/core';
+import { countTokensSync } from '@feed/api';
+import type { JsonValue } from '@feed/db';
 import {
+  actorState,
   agentLogs,
   and,
   db,
@@ -19,10 +21,10 @@ import {
   perpPositions,
   positions,
   users,
-} from '@babylon/db';
-import { StaticDataRegistry, type StaticOrganization } from '@babylon/engine';
-import type { IAgentRuntime } from '@elizaos/core';
+} from '@feed/db';
+import { StaticDataRegistry, type StaticOrganization } from '@feed/engine';
 import { sql } from 'drizzle-orm';
+import { z } from 'zod';
 import { callGroqDirect } from '../llm/direct-groq';
 import { getAgentConfig } from '../shared/agent-config';
 import { logger } from '../shared/logger';
@@ -45,6 +47,7 @@ import {
   gatherPendingChatMessages,
   gatherPendingCommentReplies,
 } from './utils';
+import { requireContextNumber } from './utils/context-validation';
 import { getPredictionMarketPrices } from './utils/prediction-pricing';
 
 /**
@@ -199,7 +202,7 @@ export class AutonomousPlanningCoordinator {
       .where(eq(users.id, agentUserId))
       .limit(1);
 
-    if (!agent) {
+    if (!agent?.isAgent) {
       throw new Error('Agent not found');
     }
 
@@ -236,21 +239,12 @@ export class AutonomousPlanningCoordinator {
 
     // Ensure prompt fits within 32K context limit (W&B trained models)
     const estimatedTokens = countTokensSync(prompt);
-    let finalPrompt = prompt;
+    const finalPrompt = prompt;
 
     if (estimatedTokens > 30000) {
-      // 30K with 2K safety margin
-      logger.warn(
-        `Planning prompt too long: ${estimatedTokens} tokens, truncating`,
-        { agentUserId: agent.id }
+      throw new Error(
+        `AutonomousPlanningCoordinator required context exceeds token budget: ${estimatedTokens}`
       );
-      const truncated = truncateToTokenLimitSync(prompt, 30000, {
-        ellipsis: true,
-      });
-      finalPrompt = truncated.text;
-      logger.info(`Truncated to ${truncated.tokens} tokens`, {
-        agentUserId: agent.id,
-      });
     }
 
     // Use LARGE model (trained W&B model if available, else qwen3-32b) for complex planning
@@ -324,6 +318,27 @@ export class AutonomousPlanningCoordinator {
       .where(eq(users.id, agentUserId))
       .limit(1);
 
+    if (!user) throw new Error(`Missing planning user ${agentUserId}`);
+    const npc = StaticDataRegistry.getActor(agentUserId);
+    const [npcState] = npc
+      ? await db
+          .select()
+          .from(actorState)
+          .where(eq(actorState.id, agentUserId))
+          .limit(1)
+      : [];
+    if (npc && !npcState)
+      throw new Error(`Missing actorState for ${agentUserId}`);
+    const planningBalance = requireContextNumber(
+      npc ? npcState?.tradingBalance : user.virtualBalance,
+      'planning balance',
+      0
+    );
+    const planningPnL = requireContextNumber(
+      user.lifetimePnL,
+      'planning lifetimePnL'
+    );
+
     const config = await getAgentConfig(agentUserId);
 
     const directives = config?.directives
@@ -350,7 +365,11 @@ export class AutonomousPlanningCoordinator {
       .where(
         and(eq(positions.userId, agentUserId), eq(positions.status, 'active'))
       );
-    const positionsCount = positionCountResult?.count ?? 0;
+    const positionsCount = requireContextNumber(
+      positionCountResult?.count,
+      'prediction count',
+      0
+    );
 
     const [perpPositionCountResult] = await db
       .select({ count: sql<number>`count(*)::int` })
@@ -361,7 +380,11 @@ export class AutonomousPlanningCoordinator {
           isNull(perpPositions.closedAt)
         )
       );
-    const perpPositionsCount = perpPositionCountResult?.count ?? 0;
+    const perpPositionsCount = requireContextNumber(
+      perpPositionCountResult?.count,
+      'perp count',
+      0
+    );
 
     // Get pending interactions using new utilities
     const [pendingCommentReplies, pendingChatMessages] = await Promise.all([
@@ -385,7 +408,7 @@ export class AutonomousPlanningCoordinator {
     // Detect trading opportunities
     const tradingOpportunities = await detectTradingOpportunities(
       agentUserId,
-      Number(user?.virtualBalance ?? 0)
+      planningBalance
     );
 
     // Detect social opportunities
@@ -422,8 +445,8 @@ export class AutonomousPlanningCoordinator {
       },
       constraints,
       portfolio: {
-        balance: Number(user?.virtualBalance ?? 0),
-        pnl: Number(user?.lifetimePnL ?? 0),
+        balance: planningBalance,
+        pnl: planningPnL,
         positions: positionsCount + perpPositionsCount,
       },
       pending: pendingForContext.slice(0, 10),
@@ -561,44 +584,36 @@ Your action plan (JSON only):`;
    */
   private parseActionPlan(
     response: string,
-    _context: PlanningContext
+    context: PlanningContext
   ): ActionPlan {
     const jsonMatch = response.match(/\{[\s\S]*\}/);
     if (!jsonMatch) {
-      logger.warn(
-        'No JSON found in planning response, using empty plan',
-        undefined,
-        'PlanningCoordinator'
-      );
-      return {
-        actions: [],
-        totalActions: 0,
-        reasoning: 'No valid plan generated',
-        goalsAddressed: [],
-        estimatedCost: 0,
-      };
+      throw new Error('No valid JSON action plan returned by model');
     }
 
-    const parsed = JSON.parse(jsonMatch[0]) as {
-      reasoning: string;
-      actions: Array<{
-        type: string;
-        priority: number;
-        goalId?: string;
-        reasoning: string;
-        estimatedImpact: number;
-        params?: Record<string, JsonValue>;
-      }>;
-    };
-
-    const actions: PlannedAction[] = parsed.actions.map((a) => ({
-      type: a.type as PlannedAction['type'],
-      priority: a.priority,
-      goalId: a.goalId,
-      reasoning: a.reasoning,
-      estimatedImpact: a.estimatedImpact,
-      params: a.params || {},
-    }));
+    const parsed = z
+      .object({
+        reasoning: z.string().min(1),
+        actions: z.array(
+          z.object({
+            type: z.enum(['trade', 'post', 'comment', 'message', 'respond']),
+            priority: z.number().int().min(1).max(10),
+            goalId: z.string().min(1).optional(),
+            reasoning: z.string().min(1),
+            estimatedImpact: z.number().finite().min(0).max(1),
+            params: z.record(z.string(), z.json()),
+            constraints: z.array(z.string()).optional(),
+          })
+        ),
+      })
+      .parse(JSON.parse(jsonMatch[0]));
+    const actions: PlannedAction[] = parsed.actions;
+    const activeGoals = new Set(context.goals.active.map((g) => g.id));
+    for (const action of actions) {
+      if (action.goalId && !activeGoals.has(action.goalId)) {
+        throw new Error(`Plan references unknown active goal ${action.goalId}`);
+      }
+    }
 
     const goalsAddressed = [
       ...new Set(actions.map((a) => a.goalId).filter(Boolean)),
@@ -827,12 +842,15 @@ Your action plan (JSON only):`;
       'PlanningCoordinator'
     );
 
+    const planningContext = `Execute this selected plan action. Preserve its goal, reasoning, parameters, and constraints when choosing the concrete action:\n${JSON.stringify(action)}`;
+
     // Fail fast - don't catch errors here, let them propagate
     switch (action.type) {
       case 'trade': {
         const tradeResult = await autonomousTradingService.executeTrades(
           agentUserId,
-          runtime
+          runtime,
+          planningContext
         );
         return {
           success: tradeResult.tradesExecuted > 0,
@@ -843,7 +861,8 @@ Your action plan (JSON only):`;
       case 'post': {
         const postId = await autonomousPostingService.createAgentPost(
           agentUserId,
-          runtime
+          runtime,
+          planningContext
         );
         return { success: !!postId, data: { postId } };
       }
@@ -851,7 +870,8 @@ Your action plan (JSON only):`;
       case 'respond': {
         const responses = await autonomousBatchResponseService.processBatch(
           agentUserId,
-          runtime
+          runtime,
+          planningContext
         );
         return { success: responses > 0, data: { responses } };
       }
@@ -859,7 +879,8 @@ Your action plan (JSON only):`;
       case 'comment': {
         const commentId = await autonomousCommentingService.createAgentComment(
           agentUserId,
-          runtime
+          runtime,
+          planningContext
         );
         return { success: !!commentId, data: { commentId } };
       }
@@ -867,7 +888,8 @@ Your action plan (JSON only):`;
       case 'message': {
         const dmResponses = await autonomousDMService.respondToDMs(
           agentUserId,
-          runtime
+          runtime,
+          planningContext
         );
         return { success: dmResponses > 0, data: { responses: dmResponses } };
       }
@@ -965,8 +987,16 @@ async function detectTradingOpportunities(
   });
 
   for (const market of activeMarkets) {
-    const yesShares = Number(market.yesShares || 0);
-    const noShares = Number(market.noShares || 0);
+    const yesShares = requireContextNumber(
+      market.yesShares,
+      'market yesShares',
+      0
+    );
+    const noShares = requireContextNumber(
+      market.noShares,
+      'market noShares',
+      0
+    );
     const totalShares = yesShares + noShares;
 
     if (totalShares === 0) continue;

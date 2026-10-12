@@ -53,7 +53,7 @@ describe('SSEManager token recovery', () => {
         addEventListener: () => {},
         removeEventListener: () => {},
         location: {
-          origin: 'https://babylon.test',
+          origin: 'https://feed.test',
         },
       },
     });
@@ -173,5 +173,75 @@ describe('SSEManager token recovery', () => {
     ).toBe('token-1');
 
     unsubscribe();
+  });
+
+  describe('pending token ownership', () => {
+    const deferredTokenFetch = () => {
+      const resolvers: Array<(r: Response) => void> = [];
+      const fetchMock = mock(
+        () =>
+          new Promise<Response>((resolve) => {
+            resolvers.push(resolve);
+          })
+      );
+      globalThis.fetch = fetchMock as unknown as typeof fetch;
+      const resolveNext = () =>
+        resolvers.shift()?.(
+          new Response(
+            JSON.stringify({ token: 'tok', expiresAt: Date.now() + 60_000 }),
+            { status: 200, headers: { 'Content-Type': 'application/json' } }
+          )
+        );
+      return { fetchMock, resolveNext };
+    };
+
+    it('does not open a stream when unsubscribed while the token is pending', async () => {
+      const { resolveNext } = deferredTokenFetch();
+      const manager = SSEManager.getInstance();
+      manager.setAuthProvider(async () => 'access');
+      manager.setAuthenticated(true);
+
+      const unsubscribe = manager.subscribe('markets', () => {});
+      await waitForAsyncWork();
+      unsubscribe();
+      resolveNext();
+      await waitForAsyncWork();
+
+      expect(MockEventSource.instances).toHaveLength(0);
+    });
+
+    it('does not open a stream after destroy while the token is pending', async () => {
+      const { resolveNext } = deferredTokenFetch();
+      const manager = SSEManager.getInstance();
+      manager.setAuthProvider(async () => 'access');
+      manager.setAuthenticated(true);
+
+      manager.subscribe('markets', () => {});
+      await waitForAsyncWork();
+      manager.destroy();
+      resolveNext();
+      await waitForAsyncWork();
+
+      expect(MockEventSource.instances).toHaveLength(0);
+    });
+
+    it('a manual reconnect during a pending attempt starts a fresh one', async () => {
+      const { fetchMock, resolveNext } = deferredTokenFetch();
+      const manager = SSEManager.getInstance();
+      manager.setAuthProvider(async () => 'access');
+      manager.setAuthenticated(true);
+
+      manager.subscribe('markets', () => {});
+      await waitForAsyncWork();
+      manager.reconnect();
+      await waitForAsyncWork();
+      resolveNext();
+      resolveNext();
+      await waitForAsyncWork();
+
+      expect(fetchMock.mock.calls.length).toBeGreaterThanOrEqual(1);
+      // Only the latest attempt opens a stream.
+      expect(MockEventSource.instances).toHaveLength(1);
+    });
   });
 });

@@ -1,43 +1,110 @@
 /**
- * Sync migrations script to populate __drizzle_migrations table.
+ * Sync migrations script to populate the __drizzle_migrations table.
  *
- * This script is needed when the database schema was applied via db:push or
- * manual SQL, but the migrations tracking table wasn't updated. It reads
- * the _journal.json file and inserts records for all migrations, marking
- * them as already applied.
+ * Needed when the database schema was applied via db:push or manual SQL but
+ * the migrations tracking table wasn't updated. Records every journal entry as
+ * applied, using the same hash Drizzle's migrator computes (SHA-256 of the
+ * migration SQL) and the journal timestamp as created_at.
  *
  * Usage: DATABASE_URL="..." bun run packages/db/scripts/sync-migrations.ts
  *
  * Options:
- *   --dry-run    Show what would be inserted without making changes
+ *   --dry-run    Report what would be inserted without creating or writing anything
  */
 
-import { readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { readMigrationFiles } from 'drizzle-orm/migrator';
 import postgres from 'postgres';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
+const DEFAULT_MIGRATIONS_FOLDER = join(__dirname, '../drizzle/migrations');
 
-interface JournalEntry {
-  idx: number;
-  version: string;
-  when: number;
-  tag: string;
-  breakpoints: boolean;
+export interface SyncMigrationsOptions {
+  dryRun: boolean;
+  migrationsFolder?: string;
+  /** Schema holding __drizzle_migrations (Drizzle default: "drizzle"). */
+  migrationsSchema?: string;
 }
 
-interface Journal {
-  version: string;
-  dialect: string;
-  entries: JournalEntry[];
+export interface SyncMigrationsResult {
+  tracked: number;
+  inserted: Array<{ hash: string; createdAt: number }>;
 }
 
-async function main() {
+function quoteIdent(identifier: string): string {
+  return `"${identifier.replace(/"/g, '""')}"`;
+}
+
+/**
+ * Insert missing migration records. A journal entry counts as tracked when a
+ * row has its hash OR its timestamp (older versions of this script wrote the
+ * tag instead of the hash, and Drizzle's migrator decides by created_at).
+ *
+ * In dry-run mode nothing is created or written.
+ */
+export async function syncMigrations(
+  sql: postgres.Sql,
+  options: SyncMigrationsOptions
+): Promise<SyncMigrationsResult> {
+  const migrations = readMigrationFiles({
+    migrationsFolder: options.migrationsFolder ?? DEFAULT_MIGRATIONS_FOLDER,
+  });
+  const schema = options.migrationsSchema ?? 'drizzle';
+  const table = `${quoteIdent(schema)}.${quoteIdent('__drizzle_migrations')}`;
+
+  const [{ exists } = { exists: false }] = await sql<{ exists: boolean }[]>`
+    SELECT to_regclass(${`${quoteIdent(schema)}.__drizzle_migrations`}) IS NOT NULL AS exists
+  `;
+
+  const existingRows = exists
+    ? await sql<{ hash: string; created_at: string }[]>`
+        SELECT hash, created_at FROM ${sql.unsafe(table)}
+      `
+    : [];
+  const existingHashes = new Set(existingRows.map((row) => row.hash));
+  const existingTimestamps = new Set(
+    existingRows.map((row) => Number(row.created_at))
+  );
+
+  const missing = migrations.filter(
+    (migration) =>
+      !existingHashes.has(migration.hash) &&
+      !existingTimestamps.has(migration.folderMillis)
+  );
+  const inserted = missing.map((migration) => ({
+    hash: migration.hash,
+    createdAt: migration.folderMillis,
+  }));
+
+  if (options.dryRun || inserted.length === 0) {
+    return { tracked: migrations.length - missing.length, inserted };
+  }
+
+  await sql.begin(async (tx) => {
+    await tx.unsafe(`CREATE SCHEMA IF NOT EXISTS ${quoteIdent(schema)}`);
+    await tx.unsafe(`
+      CREATE TABLE IF NOT EXISTS ${table} (
+        id SERIAL PRIMARY KEY,
+        hash TEXT NOT NULL,
+        created_at BIGINT
+      )
+    `);
+    for (const row of inserted) {
+      await tx.unsafe(
+        `INSERT INTO ${table} (hash, created_at) VALUES ($1, $2)`,
+        [row.hash, row.createdAt]
+      );
+    }
+  });
+
+  return { tracked: migrations.length - missing.length, inserted };
+}
+
+async function main(): Promise<void> {
   const databaseUrl = process.env.DATABASE_URL;
   if (!databaseUrl) {
-    console.error('DATABASE_URL is required');
-    process.exit(1);
+    throw new Error('DATABASE_URL is required');
   }
 
   const dryRun = process.argv.includes('--dry-run');
@@ -45,86 +112,26 @@ async function main() {
     console.log('DRY RUN MODE - No changes will be made\n');
   }
 
-  // Read the journal file
-  const journalPath = join(
-    __dirname,
-    '../drizzle/migrations/meta/_journal.json'
-  );
-  const journalContent = readFileSync(journalPath, 'utf-8');
-  const journal: Journal = JSON.parse(journalContent);
-
-  console.log(`Found ${journal.entries.length} migrations in journal:\n`);
-  for (const entry of journal.entries) {
-    console.log(`  [${entry.idx}] ${entry.tag}`);
-  }
-  console.log('');
-
   const sql = postgres(databaseUrl);
-
   try {
-    // Ensure the drizzle schema and migrations table exist
-    await sql`CREATE SCHEMA IF NOT EXISTS drizzle`;
-    await sql`
-      CREATE TABLE IF NOT EXISTS drizzle.__drizzle_migrations (
-        id SERIAL PRIMARY KEY,
-        hash TEXT NOT NULL,
-        created_at BIGINT NOT NULL
-      )
-    `;
-
-    // Check existing migrations
-    const existing = await sql`
-      SELECT hash FROM drizzle.__drizzle_migrations
-    `;
-    const existingHashes = new Set(existing.map((r) => r.hash));
-
-    console.log(`Found ${existingHashes.size} migrations already tracked\n`);
-
-    // Insert missing migrations
-    let inserted = 0;
-    let skipped = 0;
-
-    for (const entry of journal.entries) {
-      // Drizzle uses the tag as the hash
-      const hash = entry.tag;
-
-      if (existingHashes.has(hash)) {
-        console.log(`  SKIP: ${entry.tag} (already tracked)`);
-        skipped++;
-        continue;
-      }
-
-      if (dryRun) {
-        console.log(`  WOULD INSERT: ${entry.tag} (created_at: ${entry.when})`);
-      } else {
-        await sql`
-          INSERT INTO drizzle.__drizzle_migrations (hash, created_at)
-          VALUES (${hash}, ${entry.when})
-        `;
-        console.log(`  INSERTED: ${entry.tag}`);
-      }
-      inserted++;
+    const result = await syncMigrations(sql, { dryRun });
+    console.log(`Already tracked: ${result.tracked}`);
+    for (const row of result.inserted) {
+      console.log(
+        `  ${dryRun ? 'WOULD INSERT' : 'INSERTED'}: ${row.hash} (created_at: ${row.createdAt})`
+      );
     }
-
-    console.log('');
-    console.log(`Summary:`);
-    console.log(`  Skipped (already tracked): ${skipped}`);
-    console.log(`  ${dryRun ? 'Would insert' : 'Inserted'}: ${inserted}`);
-
-    if (!dryRun && inserted > 0) {
-      console.log('\n✓ Migrations table synced successfully!');
-      console.log('  You can now run: bun run db:migrate');
-    } else if (dryRun && inserted > 0) {
-      console.log('\nRun without --dry-run to apply changes.');
-    } else {
-      console.log('\n✓ Migrations table is already up to date!');
-    }
+    console.log(
+      `${dryRun ? 'Would insert' : 'Inserted'}: ${result.inserted.length}`
+    );
   } finally {
     await sql.end();
   }
 }
 
-main().catch((error) => {
-  console.error('Error:', error);
-  process.exit(1);
-});
+if (import.meta.main) {
+  main().catch((error: Error) => {
+    console.error('Error:', error);
+    process.exitCode = 1;
+  });
+}

@@ -1,11 +1,12 @@
 /**
  * Internal Cron Scheduler
  *
- * Triggers additional cron jobs from within game-tick since Vercel Cron
- * only runs on production deployments. This allows staging to run all crons.
+ * Triggers additional cron jobs from within game-tick for local/self-hosted
+ * runs that have no external scheduler. Cloudflare deployments use the
+ * dedicated cron Worker (workers/cron) and never enable this.
  */
 
-import { logger } from '@babylon/shared';
+import { getBaseUrl, logger } from '@feed/shared';
 
 interface CronSchedule {
   path: string;
@@ -18,7 +19,7 @@ interface CronSchedule {
 /**
  * Additional crons to trigger from game-tick.
  * Excludes game-tick (already running), agent-tick, reputation-sync, realtime-drain
- * (already showing in Vercel dashboard)
+ * (driven by the local cron simulator or their own callers).
  */
 const ADDITIONAL_CRONS: CronSchedule[] = [
   {
@@ -150,9 +151,7 @@ export async function triggerScheduledCrons(): Promise<{
   const skipped: string[] = [];
 
   // Get base URL for internal API calls
-  const baseUrl = process.env.VERCEL_URL
-    ? `https://${process.env.VERCEL_URL}`
-    : 'http://localhost:3000';
+  const baseUrl = getBaseUrl();
 
   const cronSecret = process.env.CRON_SECRET;
   if (!cronSecret) {
@@ -185,7 +184,7 @@ export async function triggerScheduledCrons(): Promise<{
         method: 'GET',
         headers: {
           Authorization: `Bearer ${cronSecret}`,
-          'User-Agent': 'vercel-cron/1.0 (internal-scheduler)',
+          'User-Agent': 'feed-internal-cron-scheduler/1.0',
         },
         // Don't wait too long for each cron
         signal: AbortSignal.timeout(30000),
@@ -233,15 +232,20 @@ export async function triggerScheduledCrons(): Promise<{
 
 /**
  * Check if internal cron scheduling is enabled.
- * Only enable on non-production or when explicitly enabled.
+ * Only enabled outside production builds or when explicitly enabled.
  */
 export function isInternalCronSchedulerEnabled(): boolean {
+  // Cloudflare has a dedicated scheduler; never duplicate its jobs in game-tick.
+  if (
+    process.env.DEPLOYMENT_PLATFORM === 'cloudflare' ||
+    process.env.ENABLE_INTERNAL_CRON_SCHEDULER === 'false'
+  )
+    return false;
+
   // Always enable if explicitly set
   if (process.env.ENABLE_INTERNAL_CRON_SCHEDULER === 'true') {
     return true;
   }
 
-  // Enable on staging/preview (not production)
-  const isProduction = process.env.VERCEL_ENV === 'production';
-  return !isProduction;
+  return process.env.NODE_ENV !== 'production';
 }

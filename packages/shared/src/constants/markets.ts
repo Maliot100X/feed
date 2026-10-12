@@ -181,10 +181,10 @@ export function calculateRawPriceFromHoldings(
 }
 
 /**
- * Exact swap output and price impact using Uniswap v2 math.
+ * Constant-product fills for signed quote-denominated position changes.
  *
  * Buy (add quote, get base):  baseOut = B × dx / (Q + dx)
- * Sell (add base, get quote): quoteOut = Q × dy / (B + dy)
+ * Sell (remove exact quote): baseIn = k / (Q - quoteOut) - B
  *
  * avgFillPrice = input / output  (always worse than spot = slippage)
  */
@@ -199,6 +199,20 @@ export function calculateTradeImpact(
   slippage: number;
   baseAmount: number;
 } {
+  if (
+    ![
+      initialPrice,
+      netHoldingsBefore,
+      tradeSize,
+      config.INITIAL_BASE_RESERVE,
+    ].every(Number.isFinite) ||
+    initialPrice <= 0 ||
+    config.INITIAL_BASE_RESERVE <= 0
+  ) {
+    throw new Error(
+      'AMM price, holdings, trade size and reserve depth must be finite; price and depth must be positive'
+    );
+  }
   const {
     baseReserve,
     quoteReserve,
@@ -218,15 +232,16 @@ export function calculateTradeImpact(
     return { avgFillPrice, newSpotPrice, slippage, baseAmount: baseOut };
   }
 
-  // SELL: trader adds base tokens to pool, receives quote (USD)
-  const absTradeSize = Math.abs(tradeSize);
-  const baseIn = spotBefore > 0 ? absTradeSize / spotBefore : 0;
-  const newBase = baseReserve + baseIn;
-  const newQuote = k / newBase;
-  const quoteOut = quoteReserve - newQuote;
-  const avgFillPrice = baseIn > 0 ? quoteOut / baseIn : spotBefore;
+  // tradeSize and netHoldings are both signed quote (USD), so a sell
+  // removes that exact quote amount. Converting USD to base at spot before
+  // applying slippage double-counted the conversion and broke round trips.
+  const quoteOut = -tradeSize;
+  const newQuote = quoteReserve - quoteOut;
+  if (newQuote <= 0) throw new Error('Trade exceeds available quote reserves');
+  const newBase = k / newQuote;
+  const baseIn = newBase - baseReserve;
+  const avgFillPrice = quoteOut / baseIn;
   const newSpotPrice = newQuote / newBase;
-  const slippage =
-    spotBefore > 0 ? Math.abs(spotBefore - avgFillPrice) / spotBefore : 0;
+  const slippage = Math.abs(spotBefore - avgFillPrice) / spotBefore;
   return { avgFillPrice, newSpotPrice, slippage, baseAmount: -baseIn };
 }

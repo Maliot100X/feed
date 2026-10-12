@@ -7,10 +7,12 @@ from pathlib import Path
 
 import pytest
 
-SCRIPT_PATH = Path(__file__).resolve().parent.parent / "scripts" / "manage_scam_defense_release.py"
-
-if not SCRIPT_PATH.exists():
-    pytest.skip(f"script not found: {SCRIPT_PATH.name}", allow_module_level=True)
+SCRIPT_PATH = (
+    Path(__file__).resolve().parent.parent
+    / "scripts"
+    / "releases"
+    / "manage_scam_defense_release.py"
+)
 
 
 def write_json(path: Path, payload: object) -> None:

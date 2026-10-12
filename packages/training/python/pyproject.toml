@@ -1,9 +1,9 @@
 [project]
-name = "babylon-training"
+name = "feed-training"
 version = "0.2.0"
-description = "RL Training pipeline for Babylon agents using Atropos - Continuous MMO Edition"
+description = "RL Training pipeline for Feed agents using Atropos - Continuous MMO Edition"
 authors = [
-    {name = "Babylon Team"}
+    {name = "Feed Team"}
 ]
 requires-python = ">=3.10"
 dependencies = [
@@ -38,11 +38,6 @@ dev = [
     "ruff>=0.1.0",
     "pip-audit>=2.8.0",
 ]
-
-[project.scripts]
-train-mmo = "scripts.train_mmo:main"
-check-windows = "scripts.check_windows:main"
-run-migrations = "scripts.run_migrations:main"
 
 [tool.pytest.ini_options]
 pythonpath = ["."]

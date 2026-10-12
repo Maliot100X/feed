@@ -1,11 +1,11 @@
 'use client';
 
-import { cn } from '@babylon/shared';
+import { cn } from '@feed/shared';
 import { Shield, ShieldCheck } from 'lucide-react';
 import { Tooltip } from '@/components/ui/tooltip';
 
 interface OnChainBadgeProps {
-  isRegistered: boolean;
+  /** Registered NFT token ID; 0 is a valid token ID. */
   nftTokenId?: number | null;
   size?: 'sm' | 'md' | 'lg';
   showLabel?: boolean;
@@ -13,7 +13,6 @@ interface OnChainBadgeProps {
 }
 
 export function OnChainBadge({
-  isRegistered,
   nftTokenId,
   size = 'md',
   showLabel = false,
@@ -25,7 +24,7 @@ export function OnChainBadge({
     lg: 'w-6 h-6',
   };
 
-  if (isRegistered && nftTokenId) {
+  if (nftTokenId !== null && nftTokenId !== undefined) {
     return (
       <Tooltip
         content={

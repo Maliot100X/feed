@@ -227,6 +227,7 @@
  */
 
 import {
+  addPrivateReadHeaders,
   addPublicReadHeaders,
   authenticate,
   broadcastToChannel,
@@ -245,8 +246,8 @@ import {
   rateLimitError,
   successResponse,
   withErrorHandling,
-} from '@babylon/api';
-import type { Post } from '@babylon/db';
+} from '@feed/api';
+import type { Post } from '@feed/db';
 import {
   and,
   comments,
@@ -267,15 +268,20 @@ import {
   sql,
   userActorFollows,
   users,
-} from '@babylon/db';
+} from '@feed/db';
 import {
   type GeneratedTag,
   generateTagsFromPost,
   handlePlayerMention,
   StaticDataRegistry,
   storeTagsForPost,
-} from '@babylon/engine';
-import { generateSnowflakeId, logger, toISO } from '@babylon/shared';
+} from '@feed/engine';
+import {
+  CreatePostSchema,
+  generateSnowflakeId,
+  logger,
+  toISO,
+} from '@feed/shared';
 import type { NextRequest } from 'next/server';
 import { NextResponse } from 'next/server';
 import { trackServerEvent } from '@/lib/posthog/server';
@@ -391,6 +397,7 @@ async function fetchPostMetadataConsolidated(postIds: string[]): Promise<{
         COUNT(*) as count
       FROM "Comment" c
       INNER JOIN target_posts tp ON c."postId" = tp.post_id
+      WHERE c."deletedAt" IS NULL
       GROUP BY c."postId"
     ),
     -- Share counts - JOIN to target_posts
@@ -431,6 +438,7 @@ async function fetchPostMetadataConsolidated(postIds: string[]): Promise<{
         GROUP BY r."commentId"
       ) cl ON c.id = cl."commentId"
       WHERE c."parentCommentId" IS NULL
+        AND c."deletedAt" IS NULL
     ),
     -- Combined results
     post_metadata AS (
@@ -589,6 +597,12 @@ function toISOStringSafe(date: Date | string | null | undefined): string {
  * @param request - Next.js request with query parameters
  * @returns Posts feed response with pagination cursor
  */
+/** Only `content` is accepted from clients when creating a post. */
+const CreatePostBodySchema = CreatePostSchema.pick({ content: true });
+
+/** Upper bound (and default) for `limit` on GET /api/posts. */
+const MAX_POSTS_LIMIT = 100;
+
 export const GET = withErrorHandling(async (request: NextRequest) => {
   const {
     error,
@@ -597,7 +611,10 @@ export const GET = withErrorHandling(async (request: NextRequest) => {
   } = await publicRateLimit(request);
   if (error) return error;
   const { searchParams } = new URL(request.url);
-  const limit = Number.parseInt(searchParams.get('limit') || '100');
+  const parsedLimit = Number.parseInt(searchParams.get('limit') ?? '', 10);
+  const limit = Number.isInteger(parsedLimit)
+    ? Math.min(Math.max(parsedLimit, 1), MAX_POSTS_LIMIT)
+    : MAX_POSTS_LIMIT;
   const cursor = searchParams.get('cursor') || undefined; // Cursor-based pagination
   const actorId = searchParams.get('actorId') || undefined;
   const following = searchParams.get('following') === 'true';
@@ -636,13 +653,15 @@ export const GET = withErrorHandling(async (request: NextRequest) => {
 
     if (allFollowedIds.length === 0) {
       // User is not following anyone
-      return NextResponse.json({
+      const emptyRes = NextResponse.json({
         success: true,
         posts: [],
         total: 0,
         limit,
         source: 'following',
       });
+      emptyRes.headers.set('Cache-Control', 'private, no-store');
+      return emptyRes;
     }
 
     // Get moderation filters for this user
@@ -842,7 +861,9 @@ export const GET = withErrorHandling(async (request: NextRequest) => {
       limit,
       source: 'following',
     });
-    if (rateLimitInfo) addPublicReadHeaders(followingRes, rateLimitInfo);
+    // Personalized (follows + moderation): never cacheable by shared caches.
+    if (rateLimitInfo) addPrivateReadHeaders(followingRes, rateLimitInfo);
+    else followingRes.headers.set('Cache-Control', 'private, no-store');
     return followingRes;
   }
 
@@ -1323,7 +1344,11 @@ export const GET = withErrorHandling(async (request: NextRequest) => {
     hasMore: formattedPosts.length === limit,
   });
 
-  if (rateLimitInfo) {
+  if (authUser) {
+    // Moderation-filtered for this viewer: never cacheable by shared caches.
+    if (rateLimitInfo) addPrivateReadHeaders(response, rateLimitInfo);
+    else response.headers.set('Cache-Control', 'private, no-store');
+  } else if (rateLimitInfo) {
     addPublicReadHeaders(response, rateLimitInfo);
   } else {
     response.headers.set(
@@ -1350,8 +1375,9 @@ export const GET = withErrorHandling(async (request: NextRequest) => {
 export const POST = withErrorHandling(async (request: NextRequest) => {
   const authUser = await authenticate(request);
 
-  const body = (await request.json()) as { content: string };
-  const normalizedContent = body.content.trim();
+  const { content: normalizedContent } = CreatePostBodySchema.parse(
+    await request.json()
+  );
 
   const fallbackDisplayName = authUser.walletAddress
     ? `${authUser.walletAddress.slice(0, 6)}...${authUser.walletAddress.slice(-4)}`
@@ -1361,7 +1387,7 @@ export const POST = withErrorHandling(async (request: NextRequest) => {
     displayName: fallbackDisplayName,
   });
   const canonicalUserId = canonicalUser.id;
-  const rateLimitResponse = checkRateLimitAndDuplicates(
+  const rateLimitResponse = await checkRateLimitAndDuplicates(
     canonicalUserId,
     normalizedContent,
     RATE_LIMIT_CONFIGS.CREATE_POST,
@@ -1544,7 +1570,15 @@ export const POST = withErrorHandling(async (request: NextRequest) => {
       );
     });
 
-  void checkProgress(authUser.userId, { type: 'post_created' });
+  void checkProgress(canonicalUserId, { type: 'post_created' }).catch(
+    (error: unknown) => {
+      logger.warn(
+        'Progress check after post creation failed',
+        { postId: post.id, error: String(error) },
+        'POST /api/posts'
+      );
+    }
+  );
 
   return successResponse({
     success: true,

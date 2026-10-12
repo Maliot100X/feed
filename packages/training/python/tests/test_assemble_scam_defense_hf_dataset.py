@@ -23,19 +23,13 @@ def load_script_module(module_name: str, script_path: Path):
     return module
 
 
-_first_script = (
-    Path(__file__).resolve().parent.parent / "scripts" / "assemble_scam_defense_hf_dataset.py"
-)
-if not _first_script.exists():
-    pytest.skip("script not found: assemble_scam_defense_hf_dataset.py", allow_module_level=True)
-
 assemble = load_script_module(
     "assemble_scam_defense_hf_dataset",
-    PYTHON_ROOT / "scripts" / "assemble_scam_defense_hf_dataset.py",
+    PYTHON_ROOT / "scripts" / "data-prep" / "assemble_scam_defense_hf_dataset.py",
 )
 validate = load_script_module(
     "validate_scam_defense_hf_dataset",
-    PYTHON_ROOT / "scripts" / "validate_scam_defense_hf_dataset.py",
+    PYTHON_ROOT / "scripts" / "tools" / "validate_scam_defense_hf_dataset.py",
 )
 
 
@@ -315,7 +309,7 @@ def test_split_key_prefers_scenario_id_for_external_rows():
     assert (
         assemble.split_key_for_row(
             {
-                "source_pool": "babylon-export",
+                "source_pool": "feed-export",
                 "source_kind": "external",
                 "group_id": "external::family::external",
                 "scenario_id": "external::family::42",
@@ -327,7 +321,7 @@ def test_split_key_prefers_scenario_id_for_external_rows():
     assert (
         assemble.split_key_for_row(
             {
-                "source_pool": "babylon-export",
+                "source_pool": "feed-export",
                 "source_kind": "catalog",
                 "group_id": "catalog::core-direct",
                 "scenario_id": "catalog::core-direct::1",
@@ -546,7 +540,7 @@ def test_assemble_scam_defense_hf_dataset_end_to_end(tmp_path: Path):
     assemble_proc = subprocess.run(
         [
             sys.executable,
-            str(PYTHON_ROOT / "scripts" / "assemble_scam_defense_hf_dataset.py"),
+            str(PYTHON_ROOT / "scripts" / "data-prep" / "assemble_scam_defense_hf_dataset.py"),
             "--export-corpus",
             str(export_corpus),
             "--base-dir",
@@ -588,7 +582,7 @@ def test_assemble_scam_defense_hf_dataset_end_to_end(tmp_path: Path):
     validate_proc = subprocess.run(
         [
             sys.executable,
-            str(PYTHON_ROOT / "scripts" / "validate_scam_defense_hf_dataset.py"),
+            str(PYTHON_ROOT / "scripts" / "tools" / "validate_scam_defense_hf_dataset.py"),
             "--dataset-dir",
             str(output_dir),
             "--output",

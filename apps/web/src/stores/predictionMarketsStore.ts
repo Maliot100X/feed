@@ -23,7 +23,7 @@ import { create } from 'zustand';
 import { useShallow } from 'zustand/react/shallow';
 import type { PredictionMarket } from '@/types/markets';
 import { MARKETS_CONFIG } from '@/types/markets';
-import { apiUrl } from '@/utils/api-url';
+import { apiFetch } from '@/utils/api-fetch';
 
 // Re-export for backwards compatibility
 export type { PredictionMarket } from '@/types/markets';
@@ -34,10 +34,19 @@ interface PredictionMarketsState {
   loading: boolean;
   error: string | null;
   lastFetchedAt: number | null;
+  /**
+   * Viewer the cached markets were fetched for ('' = anonymous). Responses
+   * include that viewer's private positions, so they are never reused for a
+   * different viewer.
+   */
+  viewerKey: string | null;
 
   // Internal state for request deduplication
   fetchPromise: Promise<void> | null;
+  fetchSeq: number;
   pollingInterval: ReturnType<typeof setInterval> | null;
+  pollingViewerKey: string | null;
+  pollingGeneration: number;
   subscriberCount: number;
 
   // Actions
@@ -48,49 +57,63 @@ interface PredictionMarketsState {
 // Use centralized cache TTL
 const CACHE_TTL = MARKETS_CONFIG.CACHE_TTL_MS;
 
+const toViewerKey = (userId?: string) => userId ?? '';
+
 export const usePredictionMarketsStore = create<PredictionMarketsState>(
   (set, get) => ({
     markets: [],
     loading: false,
     error: null,
     lastFetchedAt: null,
+    viewerKey: null,
     fetchPromise: null,
+    fetchSeq: 0,
     pollingInterval: null,
+    pollingViewerKey: null,
+    pollingGeneration: 0,
     subscriberCount: 0,
 
     fetchMarkets: async (force = false, userId?: string) => {
       const state = get();
+      const viewerKey = toViewerKey(userId);
 
-      // Return existing promise if already fetching (deduplication)
-      if (state.fetchPromise) {
+      // Deduplicate concurrent requests for the same viewer only
+      if (state.fetchPromise && state.viewerKey === viewerKey) {
         return state.fetchPromise;
       }
 
-      // Return cached data if fresh and not forced
+      // Return cached data if fresh, for the same viewer, and not forced
+      // (an empty market list is a valid cached result).
       if (
         !force &&
+        state.viewerKey === viewerKey &&
         state.lastFetchedAt &&
-        Date.now() - state.lastFetchedAt < CACHE_TTL &&
-        state.markets.length > 0
+        Date.now() - state.lastFetchedAt < CACHE_TTL
       ) {
         return;
       }
 
-      // Create and store the fetch promise
+      const seq = state.fetchSeq + 1;
+      const isCurrent = () => get().fetchSeq === seq;
+      const switchingViewer = state.viewerKey !== viewerKey;
+
       const fetchPromise = (async () => {
-        // Only show loading on initial fetch (not background refreshes)
-        if (state.markets.length === 0) {
+        if (switchingViewer) {
+          // Never show another viewer's positions while loading.
+          set({ markets: [], lastFetchedAt: null });
+        }
+        if (switchingViewer || get().markets.length === 0) {
           set({ loading: true });
         }
-        set({ error: null });
+        set({ error: null, viewerKey });
 
         try {
+          // Authenticated: the API only includes positions for the matching
+          // authenticated viewer.
           const url = userId
-            ? apiUrl(
-                `/api/markets/predictions?userId=${encodeURIComponent(userId)}`
-              )
-            : apiUrl('/api/markets/predictions');
-          const response = await fetch(url);
+            ? `/api/markets/predictions?userId=${encodeURIComponent(userId)}`
+            : '/api/markets/predictions';
+          const response = await apiFetch(url, { auth: Boolean(userId) });
           if (!response.ok) {
             throw new Error(
               `Failed to fetch prediction markets: ${response.status}`
@@ -98,6 +121,7 @@ export const usePredictionMarketsStore = create<PredictionMarketsState>(
           }
 
           const data = await response.json();
+          if (!isCurrent()) return;
           if (data.questions && Array.isArray(data.questions)) {
             set({
               markets: data.questions,
@@ -106,50 +130,65 @@ export const usePredictionMarketsStore = create<PredictionMarketsState>(
             });
           }
         } catch (err) {
+          if (!isCurrent()) return;
           const errorMessage =
             err instanceof Error
               ? err.message
               : 'Failed to fetch prediction markets';
           set({ error: errorMessage });
         } finally {
-          set({ loading: false, fetchPromise: null });
+          if (isCurrent()) set({ loading: false, fetchPromise: null });
         }
       })();
 
-      set({ fetchPromise });
+      set({ fetchPromise, fetchSeq: seq });
       return fetchPromise;
     },
 
-    // Combined subscribe/unsubscribe that handles polling lifecycle
+    // Polling belongs to one viewer; subscribing for a different viewer
+    // restarts it, and unsubscribes from an earlier generation are no-ops.
     subscribe: (intervalMs: number, userId?: string) => {
       const state = get();
-      const newCount = state.subscriberCount + 1;
-      set({ subscriberCount: newCount });
+      const viewerKey = toViewerKey(userId);
 
-      // Start polling on first subscriber
-      if (newCount === 1) {
-        // Initial fetch
-        get().fetchMarkets(false, userId);
-
-        // Set up interval
+      let generation = state.pollingGeneration;
+      if (
+        state.pollingInterval === null ||
+        state.pollingViewerKey !== viewerKey
+      ) {
+        if (state.pollingInterval) clearInterval(state.pollingInterval);
+        generation = state.pollingGeneration + 1;
         const interval = setInterval(() => {
-          get().fetchMarkets(true, userId);
+          void get().fetchMarkets(true, userId);
         }, intervalMs);
-
-        set({ pollingInterval: interval });
+        set({
+          pollingInterval: interval,
+          pollingViewerKey: viewerKey,
+          pollingGeneration: generation,
+          subscriberCount: 1,
+        });
+        void get().fetchMarkets(false, userId);
+      } else {
+        set({ subscriberCount: state.subscriberCount + 1 });
       }
 
-      // Return unsubscribe function
+      let active = true;
       return () => {
-        const currentState = get();
-        const updatedCount = currentState.subscriberCount - 1;
-        set({ subscriberCount: updatedCount });
-
-        // Stop polling when last subscriber leaves
-        if (updatedCount === 0 && currentState.pollingInterval) {
-          clearInterval(currentState.pollingInterval);
-          set({ pollingInterval: null });
+        if (!active) return;
+        active = false;
+        const current = get();
+        if (current.pollingGeneration !== generation) return;
+        const remaining = current.subscriberCount - 1;
+        if (remaining > 0) {
+          set({ subscriberCount: remaining });
+          return;
         }
+        if (current.pollingInterval) clearInterval(current.pollingInterval);
+        set({
+          subscriberCount: 0,
+          pollingInterval: null,
+          pollingViewerKey: null,
+        });
       };
     },
   })
@@ -199,15 +238,13 @@ export function usePredictionMarketsPolling(
 ) {
   const subscribe = usePredictionMarketsStore((state) => state.subscribe);
 
-  // Store params in refs so they don't cause re-subscriptions
+  // Interval is read once; the viewer is tracked so login/logout and
+  // account switches re-subscribe for the right user.
   const intervalRef = useRef(intervalMs);
-  const userIdRef = useRef(userId);
 
   useEffect(() => {
-    // Subscribe returns the unsubscribe function
-    const unsubscribe = subscribe(intervalRef.current, userIdRef.current);
-    return unsubscribe;
-  }, [subscribe]);
+    return subscribe(intervalRef.current, userId);
+  }, [subscribe, userId]);
 }
 
 /**

@@ -1,11 +1,10 @@
 'use client';
 
-import { cn } from '@babylon/shared';
+import { cn } from '@feed/shared';
 import { AlertCircle, Bot, Check, RefreshCw, Zap } from 'lucide-react';
 import { useCallback, useEffect, useState } from 'react';
 import { toast } from 'sonner';
-import { getAuthToken } from '@/lib/auth';
-import { apiUrl } from '@/utils/api-url';
+import { apiFetch } from '@/utils/api-fetch';
 
 /**
  * AI model info structure.
@@ -21,11 +20,12 @@ interface ModelInfo {
  */
 interface AIModelsData {
   providers: {
+    surplus: boolean;
     groq: boolean;
     claude: boolean;
     openai: boolean;
   };
-  activeProvider: 'groq' | 'claude' | 'openai';
+  activeProvider: 'surplus' | 'groq' | 'claude' | 'openai';
   recommendedModels: ModelInfo[];
 }
 
@@ -53,28 +53,20 @@ export function AIModelsTab() {
   );
 
   const fetchData = useCallback(async () => {
-    const token = getAuthToken();
-    if (!token) {
-      toast.error('Not authenticated');
-      setLoading(false);
-      return;
-    }
-
-    const response = await fetch(apiUrl('/api/admin/ai-models'), {
-      headers: {
-        Authorization: `Bearer ${token}`,
-      },
-    });
-
-    if (!response.ok) {
+    setLoading(true);
+    try {
+      const response = await apiFetch('/api/admin/ai-models');
+      if (!response.ok) {
+        toast.error('Failed to load AI models');
+        return;
+      }
+      const result = await response.json();
+      setData(result.data);
+    } catch {
       toast.error('Failed to load AI models');
+    } finally {
       setLoading(false);
-      return;
     }
-
-    const result = await response.json();
-    setData(result.data);
-    setLoading(false);
   }, []);
 
   useEffect(() => {
@@ -82,31 +74,35 @@ export function AIModelsTab() {
   }, [fetchData]);
 
   const handleTest = async () => {
+    if (testing) return;
     setTesting(true);
     setTestResult(null);
-    const token = getAuthToken();
-    if (!token) {
-      toast.error('Not authenticated');
+    try {
+      const response = await apiFetch('/api/admin/ai-models/test', {
+        method: 'POST',
+      });
+      const result = (await response.json().catch(() => null)) as {
+        data?: Record<string, unknown>;
+        error?: string;
+        details?: unknown;
+      } | null;
+
+      if (response.ok && result?.data) {
+        setTestResult(result.data);
+      } else {
+        // A failure must always render as failed, even without an error body.
+        const message =
+          result?.error || `Test failed (HTTP ${response.status})`;
+        toast.error(message);
+        setTestResult({ error: message, details: result?.details ?? null });
+      }
+    } catch (error) {
+      const message = `Test request failed: ${String(error)}`;
+      toast.error(message);
+      setTestResult({ error: message, details: null });
+    } finally {
       setTesting(false);
-      return;
     }
-
-    const response = await fetch(apiUrl('/api/admin/ai-models/test'), {
-      method: 'POST',
-      headers: {
-        Authorization: `Bearer ${token}`,
-      },
-    });
-
-    const result = await response.json();
-
-    if (response.ok) {
-      setTestResult(result.data);
-    } else {
-      toast.error(result.error || 'Test failed');
-      setTestResult({ error: result.error, details: result.details });
-    }
-    setTesting(false);
   };
 
   const getProviderIcon = (provider: string) => {
@@ -124,6 +120,8 @@ export function AIModelsTab() {
 
   const getProviderName = (provider: string) => {
     switch (provider) {
+      case 'surplus':
+        return 'Surplus Intelligence';
       case 'groq':
         return 'Groq';
       case 'claude':

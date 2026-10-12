@@ -30,12 +30,12 @@
  */
 'use client';
 
-import { cn } from '@babylon/shared';
+import { cn } from '@feed/shared';
 import { Loader2, Send } from 'lucide-react';
 import { useState } from 'react';
 import { toast } from 'sonner';
-import { getAuthToken } from '@/lib/auth';
-import { apiUrl } from '@/utils/api-url';
+import { readApiErrorMessage } from '@/utils/api-error';
+import { apiFetch } from '@/utils/api-fetch';
 import { ScoreSlider } from './ScoreSlider';
 import { StarRatingInput } from './StarRating';
 
@@ -79,47 +79,39 @@ export function FeedbackForm({
     }
 
     setSubmitting(true);
+    try {
+      const response = await apiFetch('/api/feedback/submit', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          toUserId,
+          score,
+          comment: comment.trim() || null,
+          category,
+          interactionType,
+          metadata: {
+            gameId: gameId || undefined,
+            tradeId: tradeId || undefined,
+          },
+        }),
+      });
 
-    const token = getAuthToken();
-    const headers: HeadersInit = {
-      'Content-Type': 'application/json',
-    };
-    if (token) {
-      headers['Authorization'] = `Bearer ${token}`;
-    }
+      if (!response.ok) {
+        toast.error(
+          await readApiErrorMessage(response, 'Failed to submit feedback')
+        );
+        return;
+      }
 
-    const response = await fetch(apiUrl('/api/feedback/submit'), {
-      method: 'POST',
-      headers,
-      body: JSON.stringify({
-        toUserId,
-        score,
-        comment: comment.trim() || null,
-        category,
-        interactionType,
-        metadata: {
-          gameId: gameId || undefined,
-          tradeId: tradeId || undefined,
-        },
-      }),
-    });
-
-    if (!response.ok) {
-      const error = await response.json();
+      // Reset form
+      setScore(70);
+      setComment('');
+      onSuccess?.();
+    } catch {
+      toast.error('Network error. Please try again.');
+    } finally {
       setSubmitting(false);
-      throw new Error(error.error || 'Failed to submit feedback');
     }
-
-    await response.json();
-
-    // Reset form
-    setScore(70);
-    setComment('');
-
-    if (onSuccess) {
-      onSuccess();
-    }
-    setSubmitting(false);
   };
 
   return (

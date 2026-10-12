@@ -1,12 +1,12 @@
 /**
- * Babylon API Package
+ * Feed API Package
  *
  * Provides API middleware and utilities for authentication, authorization,
  * and common API patterns.
  */
 
 // Re-export auth types from shared
-export type { AuthenticatedUser } from '@babylon/shared';
+export type { AuthenticatedUser } from '@feed/shared';
 // Logger
 export {
   extractErrorMessage,
@@ -14,7 +14,7 @@ export {
   Logger,
   type LogLevel,
   logger,
-} from '@babylon/shared';
+} from '@feed/shared';
 // Admin Audit Logging
 export {
   type AdminAuditContext,
@@ -56,7 +56,6 @@ export {
   authenticate,
   authenticateUser,
   authenticateWithDbUser,
-  getPrivyClient,
   isAuthenticationError,
   optionalAuth,
   optionalAuthFromHeaders,
@@ -108,7 +107,6 @@ export {
 } from './env';
 // Error Handler (Next.js specific)
 export {
-  asyncHandler,
   type ErrorHandlerOptions,
   errorHandler,
   errorResponse,
@@ -122,10 +120,10 @@ export {
   ApiError,
   AuthenticationError as AuthError,
   AuthorizationError,
-  BabylonError,
   BadRequestError,
   BusinessLogicError,
   ConflictError,
+  FeedAppError,
   ForbiddenError,
   InternalServerError,
   isAuthenticationError as isAuthError,
@@ -159,21 +157,13 @@ export {
 } from './linear';
 // Monitoring
 export { cronMetrics, recordCronExecution } from './monitoring/cron-metrics';
-export * from './monitoring/monitored-cache';
-export * from './monitoring/monitored-storage';
-// Performance monitoring (moved from @babylon/shared)
+// Performance monitoring (moved from @feed/shared)
 export { performanceMonitor } from './monitoring/performance-monitor';
 // Profile utilities
 export {
-  type BackendSignedUpdateParams,
-  type BackendSignedUpdateResult,
   checkProfileUpdateRateLimit,
   getProfileUpdateHistory,
-  isBackendSigningEnabled,
   logProfileUpdate,
-  type ProfileMetadata,
-  updateProfileBackendSigned,
-  verifyBackendSignedUpdate,
 } from './profile';
 // Query Parameter Utilities
 export {
@@ -185,12 +175,12 @@ export {
 } from './query-params';
 // Rate Limiting
 export {
+  addPrivateReadHeaders,
   addPublicReadHeaders,
   addRateLimitHeaders,
   applyDuplicateDetection,
   applyRateLimit,
   checkDuplicate,
-  checkRateLimit,
   checkRateLimitAndDuplicates,
   checkRateLimitAsync,
   cleanupDuplicates,
@@ -227,11 +217,9 @@ export { drainOutboxBatch, enqueueOutbox } from './realtime/outbox';
 export {
   closeRedis,
   ensureRedisReady,
-  getRedis,
   getRedisClient,
   isRedisAvailable,
   type RedisInstance,
-  redis,
   type StreamMessage,
   safePoll,
   safePublish,
@@ -240,21 +228,6 @@ export {
 } from './redis';
 // Services
 export * from './services';
-export {
-  type AuthedPrivyUserContext,
-  getAuthedUserContextFromPrivyToken,
-  getAuthedUserContextFromPrivyTokenBundle,
-} from './services/privy/authed-user';
-export {
-  extractPrivyApiDiagnostics,
-  type PrivyApiDiagnostics,
-  redactJwtLikeTokens,
-} from './services/privy/error-diagnostics';
-// Privy (embedded wallet server-side helpers - kept for NFT mint service)
-export {
-  type PrivyUserWalletsLite,
-  pickEmbeddedEvmWallet,
-} from './services/privy/user-wallets';
 // SSE Event Broadcasting
 export {
   type AgentActivityEvent,
@@ -270,7 +243,7 @@ export {
   type PostActivityData,
   type TradeActivityData,
 } from './sse/event-broadcaster';
-// Storage utilities (moved from @babylon/shared)
+// Storage utilities (moved from @feed/shared)
 export {
   getStorageClient,
   type UploadOptions,
@@ -299,7 +272,7 @@ export {
   budgetTokens,
   // Cached user API key validation
   clearApiKeyCache,
-  // Token counter utilities (moved from @babylon/shared)
+  // Token counter utilities (moved from @feed/shared)
   countTokens,
   countTokensSync,
   // Deployment environment detection

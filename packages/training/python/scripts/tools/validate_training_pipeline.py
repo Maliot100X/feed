@@ -30,7 +30,7 @@ import torch.nn.functional as F
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
 SCRIPT_DIR = Path(__file__).resolve().parent
-PYTHON_ROOT = SCRIPT_DIR.parent
+PYTHON_ROOT = SCRIPT_DIR.parents[1]
 sys.path.insert(0, str(PYTHON_ROOT))
 
 from src.training.deterministic_eval import (

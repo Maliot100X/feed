@@ -11,7 +11,7 @@
  */
 
 import { afterAll, beforeEach, describe, expect, it } from 'bun:test';
-import { getOrCreateReferralCode, PointsService } from '@babylon/api';
+import { getOrCreateReferralCode, PointsService } from '@feed/api';
 import {
   and,
   count,
@@ -22,8 +22,8 @@ import {
   pointsTransactions,
   referrals,
   users,
-} from '@babylon/db';
-import { generateSnowflakeId, POINTS } from '@babylon/shared';
+} from '@feed/db';
+import { generateSnowflakeId, POINTS } from '@feed/shared';
 
 // Test user IDs that we'll clean up
 const testUserIds: string[] = [];
@@ -188,14 +188,13 @@ describe('Referral Points Integration Tests', () => {
       const sameIpHash = 'test-ip-hash-12345';
       const now = new Date();
 
-      // Create referrer without unique identifiers (no privyId, wallet, farcaster, twitter)
+      // Create referrer without unique identifiers (no privyId, wallet, twitter)
       // This simulates a scenario where we can't distinguish users by identity
       const { userId: referrerId } = await createTestUser({
         registrationIpHash: sameIpHash,
         createdAt: now,
         privyId: null, // Remove unique identifier to test self-referral detection
         walletAddress: null,
-        farcasterFid: null,
         twitterId: null,
       });
 
@@ -207,7 +206,6 @@ describe('Referral Points Integration Tests', () => {
         createdAt: fiveMinutesLater,
         privyId: null, // Remove unique identifier to test self-referral detection
         walletAddress: null,
-        farcasterFid: null,
         twitterId: null,
       });
 
@@ -342,6 +340,73 @@ describe('Referral Points Integration Tests', () => {
     });
   });
 
+  describe('Concurrency and idempotency', () => {
+    it('pays a referral signup once across retries and concurrent requests', async () => {
+      const { userId: referrerId } = await createTestUser({
+        registrationIpHash: 'idem-referrer',
+      });
+      const { userId: referredUserId } = await createTestUser({
+        referredBy: referrerId,
+        registrationIpHash: 'idem-referred',
+      });
+
+      const results = await Promise.all(
+        Array.from({ length: 4 }, () =>
+          PointsService.awardReferralSignup(referrerId, referredUserId)
+        )
+      );
+      expect(results.filter((r) => r.reputationAwarded > 0)).toHaveLength(1);
+
+      const retry = await PointsService.awardReferralSignup(
+        referrerId,
+        referredUserId
+      );
+      expect(retry.alreadyAwarded).toBe(true);
+
+      const [referrer] = await db
+        .select({
+          reputationPoints: users.reputationPoints,
+          referralCount: users.referralCount,
+        })
+        .from(users)
+        .where(eq(users.id, referrerId));
+      expect(referrer).toEqual({
+        reputationPoints: 1000 + POINTS.REFERRAL_SIGNUP,
+        referralCount: 1,
+      });
+    });
+
+    it('applies concurrent distinct rewards without losing updates', async () => {
+      const { userId } = await createTestUser();
+      await Promise.all([
+        PointsService.awardReputation(userId, 5, 'admin_award'),
+        PointsService.awardReputation(userId, 7, 'admin_award'),
+        PointsService.awardReputation(userId, 11, 'admin_award'),
+      ]);
+      const [user] = await db
+        .select({ reputationPoints: users.reputationPoints })
+        .from(users)
+        .where(eq(users.id, userId));
+      expect(user?.reputationPoints).toBe(1023);
+    });
+
+    it('treats private group/channel creation as one-time rewards', async () => {
+      const { userId } = await createTestUser();
+      const first = await PointsService.awardReputation(
+        userId,
+        50,
+        'private_group_create'
+      );
+      const second = await PointsService.awardReputation(
+        userId,
+        50,
+        'private_group_create'
+      );
+      expect(first.reputationAwarded).toBe(50);
+      expect(second.alreadyAwarded).toBe(true);
+    });
+  });
+
   describe('Referral Qualification', () => {
     it('should qualify referral when referred user links social account', async () => {
       // Create referrer
@@ -350,7 +415,6 @@ describe('Referral Points Integration Tests', () => {
       // Create referred user
       const { userId: referredUserId } = await createTestUser({
         referredBy: referrerId,
-        hasFarcaster: false,
         hasTwitter: false,
         walletAddress: null,
       });
@@ -368,10 +432,10 @@ describe('Referral Points Integration Tests', () => {
       });
       testReferralIds.push(referralId);
 
-      // Simulate user linking Farcaster
+      // Simulate user linking Twitter
       await db
         .update(users)
-        .set({ hasFarcaster: true, farcasterFid: '12345' })
+        .set({ hasTwitter: true, twitterId: '12345' })
         .where(eq(users.id, referredUserId));
 
       // Get referrer's points before qualification
@@ -413,13 +477,23 @@ describe('Referral Points Integration Tests', () => {
       );
     });
 
+    it('does not qualify a referral without a supported social account', async () => {
+      const { userId: referrerId } = await createTestUser();
+      const { userId } = await createTestUser({
+        referredBy: referrerId,
+        hasTwitter: false,
+        walletAddress: null,
+      });
+      expect(await PointsService.checkAndQualifyReferral(userId)).toBeNull();
+    });
+
     it('should not qualify referral twice', async () => {
       // Create referrer and referred user with linked social
       const { userId: referrerId } = await createTestUser();
       const { userId: referredUserId } = await createTestUser({
         referredBy: referrerId,
-        hasFarcaster: true,
-        farcasterFid: '12345',
+        hasTwitter: true,
+        twitterId: '12345',
       });
 
       // Create already-qualified referral record

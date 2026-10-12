@@ -66,7 +66,7 @@ const mockInsert = mock(() => ({ values: mockValues }));
 const mockDb = { insert: mockInsert };
 
 // Mock modules BEFORE importing the service
-mock.module('@babylon/db', () => ({
+mock.module('@feed/db', () => ({
   db: mockDb,
   // Drizzle operators
   aliasedTable: (table: unknown) => table,
@@ -108,7 +108,6 @@ mock.module('@babylon/db', () => ({
   balanceTransactions: {},
   follows: {},
   generationLocks: {},
-  nftOwnership: {},
   positions: {},
   referrals: {},
   users: { id: 'id' },
@@ -128,16 +127,15 @@ mock.module('@babylon/db', () => ({
     revokedAt: 'revokedAt',
   },
   whitelistConfig: {},
-  nftSnapshot: { userId: 'userId' },
 }));
 
-mock.module('@babylon/engine', () => ({
+mock.module('@feed/engine', () => ({
   UserAlphaGroupAssignmentService: {
     assignDefaultGroups: mockAssignDefaultGroups,
   },
 }));
 
-mock.module('@babylon/shared', () => ({
+mock.module('@feed/shared', () => ({
   logger: {
     info: mockLoggerInfo,
     warn: mock(),
@@ -284,32 +282,29 @@ describe('addToWhitelist → group assignment', () => {
       return Promise.resolve([{ id: capturedNanoid }]);
     });
 
-    // Simulate slow side-effects (500ms each)
-    mockAssignDefaultGroups.mockImplementation(
-      () =>
-        new Promise((resolve) =>
-          setTimeout(
-            () =>
-              resolve({
-                success: true,
-                groupsAssigned: 3,
-                assignments: [],
-                errors: [],
-              }),
-            500
-          )
-        )
+    // Side effect stays pending until released: addToWhitelist must resolve
+    // without waiting for it (no wall-clock assertion).
+    let release: () => void = () => {};
+    const pending = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    mockAssignDefaultGroups.mockImplementation(() =>
+      pending.then(() => ({
+        success: true,
+        groupsAssigned: 3,
+        assignments: [],
+        errors: [],
+      }))
     );
 
-    const startTime = Date.now();
     const result = await addToWhitelist({
       userId: 'user-slow',
       source: 'admin_manual',
     });
-    const elapsed = Date.now() - startTime;
 
-    // addToWhitelist should return immediately (fire-and-forget for both)
     expect(result.alreadyExists).toBe(false);
-    expect(elapsed).toBeLessThan(200);
+    expect(mockAssignDefaultGroups).toHaveBeenCalledTimes(1);
+    release();
+    await pending;
   });
 });

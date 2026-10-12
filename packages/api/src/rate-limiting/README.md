@@ -2,7 +2,7 @@
 
 ## Quick Start
 
-This directory contains the rate limiting and duplicate detection system for the Babylon platform.
+This directory contains the rate limiting and duplicate detection system for the Feed platform.
 
 ## Features
 
@@ -21,7 +21,7 @@ This directory contains the rate limiting and duplicate detection system for the
 
 - **Abuse**: Public GET endpoints (feeds, markets, profiles) can be hammered by bots or scrapers without an account. Tiered limits cap anonymous traffic per IP while giving identified users (and API keys) higher quotas.
 - **Cost & stability**: Unbounded public reads increase DB and CDN cost and can degrade service for everyone. Rate limits keep usage predictable and allow caching (see `Cache-Control` below).
-- **Fairness**: Authenticated users and API keys get higher limits (60/min read, 20/min firehose) because they are accountable; anonymous IPs get lower limits (20/min read, 5/min firehose) with a strict fallback when IP is unknown (10/min read, 2/min firehose).
+- **Fairness**: Authenticated users and API keys get higher limits (180/min read, 20/min firehose) because they are accountable; anonymous IPs get lower limits (60/min read, 5/min firehose) with a strict fallback when IP is unknown (30/min read, 2/min firehose). Values come from `RATE_LIMIT_CONFIGS.PUBLIC_READ*` / `PUBLIC_FIREHOSE*`.
 
 ### How it works
 
@@ -33,14 +33,14 @@ This directory contains the rate limiting and duplicate detection system for the
 
 | Caller type              | Read endpoints | Firehose (SSE tokens/connections) |
 |--------------------------|----------------|-----------------------------------|
-| Public (no key, by IP)   | 20             | 5                                 |
-| Authenticated / API key | 60             | 20                                |
-| Anonymous (IP unknown)  | 10 (shared)    | 2 (shared)                        |
+| Public (no key, by IP)   | 60             | 5                                 |
+| Authenticated / API key | 180            | 20                                |
+| Anonymous (IP unknown)  | 30 (shared)    | 2 (shared)                        |
 
 ### Usage in a GET handler
 
 ```typescript
-import { addPublicReadHeaders, publicRateLimit, successResponse } from '@babylon/api';
+import { addPublicReadHeaders, publicRateLimit, successResponse } from '@feed/api';
 
 export async function GET(request: NextRequest) {
   const { error, user, rateLimitInfo } = await publicRateLimit(request);
@@ -74,7 +74,7 @@ import {
   checkRateLimitAndDuplicates,
   RATE_LIMIT_CONFIGS,
   DUPLICATE_DETECTION_CONFIGS 
-} from '@babylon/api';
+} from '@feed/api';
 ```
 
 ### Apply Rate Limiting Only
@@ -83,7 +83,7 @@ import {
 export async function POST(request: NextRequest) {
   const user = await authenticate(request);
   
-  const rateLimitError = checkRateLimitAndDuplicates(
+  const rateLimitError = await checkRateLimitAndDuplicates(
     user.userId,
     null,  // No content = no duplicate detection
     RATE_LIMIT_CONFIGS.LIKE_POST
@@ -104,7 +104,7 @@ export async function POST(request: NextRequest) {
   const user = await authenticate(request);
   const { content } = await request.json();
   
-  const errorResponse = checkRateLimitAndDuplicates(
+  const errorResponse = await checkRateLimitAndDuplicates(
     user.userId,
     content,  // Content provided = duplicate detection enabled
     RATE_LIMIT_CONFIGS.CREATE_POST,

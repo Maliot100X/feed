@@ -1,7 +1,7 @@
 'use client';
 
-import type { InteractionBarProps } from '@babylon/shared';
-import { cn } from '@babylon/shared';
+import type { InteractionBarProps } from '@feed/shared';
+import { cn } from '@feed/shared';
 import { MessageCircle } from 'lucide-react';
 import { useEffect, useState } from 'react';
 import { FeedCommentSection } from '@/components/feed/FeedCommentSection';
@@ -50,7 +50,6 @@ export function InteractionBar({
   postData,
 }: InteractionBarProps) {
   const [showComments, setShowComments] = useState(false);
-  const { postInteractions } = useInteractionStore();
   const { authenticated, login, user } = useAuth();
   const hasInitialInteractions = initialInteractions !== undefined;
 
@@ -68,8 +67,14 @@ export function InteractionBar({
       ? postData.originalPostId
       : postId;
 
-  // Get interaction data from store (synced via polling) or fall back to initial values
-  const storeData = postInteractions.get(interactionPostId);
+  // Subscribe to this post's entry only (not the whole store), so other
+  // posts' interactions do not re-render every card.
+  const storeData = useInteractionStore((state) =>
+    state.postInteractions.get(interactionPostId)
+  );
+  const syncPostInteraction = useInteractionStore(
+    (state) => state.syncPostInteraction
+  );
   const initialLikeCount = initialInteractions?.likeCount ?? 0;
   const initialCommentCount = initialInteractions?.commentCount ?? 0;
   const initialShareCount = initialInteractions?.shareCount ?? 0;
@@ -81,45 +86,18 @@ export function InteractionBar({
   const isLiked = storeData?.isLiked ?? initialIsLiked;
   const isShared = storeData?.isShared ?? initialIsShared;
 
-  // Sync store with API data while preserving optimistic updates
-  // - Always update counts from API (source of truth for totals)
-  // - Preserve isLiked/isShared from store if user has interacted (optimistic state)
-  // - Don't update during loading (optimistic update in progress)
+  // Server data is authoritative (counts and the viewer's isLiked/isShared),
+  // except while this post has a mutation in flight.
   useEffect(() => {
     if (!hasInitialInteractions) return;
-
-    const store = useInteractionStore.getState();
-    const currentStoreData = store.postInteractions.get(interactionPostId);
-    const isLoading = store.loadingStates.get(interactionPostId);
-
-    // Don't overwrite if there's an in-progress optimistic update
-    if (isLoading) return;
-
-    const newLikeCount = initialLikeCount;
-    const newCommentCount = initialCommentCount;
-    const newShareCount = initialShareCount;
-
-    // Check if counts have changed to prevent unnecessary updates
-    const countsChanged =
-      !currentStoreData ||
-      currentStoreData.likeCount !== newLikeCount ||
-      currentStoreData.commentCount !== newCommentCount ||
-      currentStoreData.shareCount !== newShareCount;
-
-    if (countsChanged) {
-      const updatedInteractions = new Map(store.postInteractions);
-      updatedInteractions.set(interactionPostId, {
-        postId: interactionPostId,
-        // Always use fresh counts from API
-        likeCount: newLikeCount,
-        commentCount: newCommentCount,
-        shareCount: newShareCount,
-        // Preserve user's interaction state from store, fallback to API
-        isLiked: currentStoreData?.isLiked ?? initialIsLiked,
-        isShared: currentStoreData?.isShared ?? initialIsShared,
-      });
-      useInteractionStore.setState({ postInteractions: updatedInteractions });
-    }
+    syncPostInteraction({
+      postId: interactionPostId,
+      likeCount: initialLikeCount,
+      commentCount: initialCommentCount,
+      shareCount: initialShareCount,
+      isLiked: initialIsLiked,
+      isShared: initialIsShared,
+    });
   }, [
     hasInitialInteractions,
     initialCommentCount,
@@ -128,6 +106,7 @@ export function InteractionBar({
     initialLikeCount,
     initialShareCount,
     interactionPostId,
+    syncPostInteraction,
   ]);
 
   const handleCommentClick = () => {

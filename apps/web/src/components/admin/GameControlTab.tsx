@@ -1,6 +1,6 @@
 'use client';
 
-import { cn } from '@babylon/shared';
+import { cn } from '@feed/shared';
 import {
   Activity,
   Clock,
@@ -15,9 +15,9 @@ import {
   Users,
   Zap,
 } from 'lucide-react';
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { Skeleton } from '@/components/shared/Skeleton';
-import { apiUrl } from '@/utils/api-url';
+import { apiFetch } from '@/utils/api-fetch';
 import { WorldFactsSection } from './WorldFactsSection';
 
 /**
@@ -125,21 +125,34 @@ interface GameStats {
 export function GameControlTab() {
   const [stats, setStats] = useState<GameStats | null>(null);
   const [loading, setLoading] = useState(true);
+  /** Failure of the latest stats fetch (keeps showing the last snapshot). */
   const [error, setError] = useState<string | null>(null);
+  /** Failure of the last start/pause; polling never clears it. */
+  const [actionError, setActionError] = useState<string | null>(null);
   const [actionLoading, setActionLoading] = useState(false);
   const [autoRefresh, setAutoRefresh] = useState(true);
+  // Only the latest stats request may commit, so an older poll cannot
+  // overwrite the state fetched right after a control action.
+  const statsSeqRef = useRef(0);
 
   const fetchStats = useCallback(async () => {
-    const response = await fetch(apiUrl('/api/admin/game-stats'));
-    if (!response.ok) {
-      setLoading(false);
-      setError('Failed to load stats');
-      return;
+    const seq = ++statsSeqRef.current;
+    try {
+      const response = await apiFetch('/api/admin/game-stats');
+      if (seq !== statsSeqRef.current) return;
+      if (!response.ok) {
+        setError(`Failed to load stats (${response.status})`);
+        return;
+      }
+      const data = await response.json();
+      if (seq !== statsSeqRef.current) return;
+      setStats(data);
+      setError(null);
+    } catch {
+      if (seq === statsSeqRef.current) setError('Failed to load stats');
+    } finally {
+      if (seq === statsSeqRef.current) setLoading(false);
     }
-    const data = await response.json();
-    setStats(data);
-    setError(null);
-    setLoading(false);
   }, []);
 
   useEffect(() => {
@@ -155,28 +168,34 @@ export function GameControlTab() {
 
   const handleGameControl = async (action: 'start' | 'pause') => {
     setActionLoading(true);
-    const response = await fetch(apiUrl('/api/game/control'), {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ action }),
-    });
-
-    if (!response.ok) {
-      setActionLoading(false);
-      setError(`Failed to ${action} game`);
+    setActionError(null);
+    try {
+      const response = await apiFetch('/api/game/control', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action }),
+      });
+      if (!response.ok) {
+        setActionError(`Failed to ${action} game`);
+        return;
+      }
+    } catch {
+      setActionError(`Failed to ${action} game (network error)`);
       return;
+    } finally {
+      setActionLoading(false);
     }
-
-    // Refresh stats immediately
+    // The control action committed; a failed refresh only affects stats.
     await fetchStats();
-    setActionLoading(false);
   };
 
   const formatUptime = (minutes: number) => {
     if (minutes < 1) return '< 1 min';
-    if (minutes < 60) return `${Math.round(minutes)} min`;
-    const hours = Math.floor(minutes / 60);
-    const mins = Math.round(minutes % 60);
+    // Round once up front so 119.6 min shows as 2h 0m, not 1h 60m.
+    const totalMinutes = Math.round(minutes);
+    if (totalMinutes < 60) return `${totalMinutes} min`;
+    const hours = Math.floor(totalMinutes / 60);
+    const mins = totalMinutes % 60;
     if (hours < 24) return `${hours}h ${mins}m`;
     const days = Math.floor(hours / 24);
     const remainingHours = hours % 24;
@@ -254,10 +273,19 @@ export function GameControlTab() {
     );
   }
 
-  if (error || !stats) {
+  if (!stats) {
     return (
       <div className="p-8 text-center text-red-500">
         {error || 'Failed to load game statistics'}
+        <div>
+          <button
+            type="button"
+            onClick={() => void fetchStats()}
+            className="mt-4 rounded-lg bg-muted px-4 py-2 text-foreground text-sm"
+          >
+            Retry
+          </button>
+        </div>
       </div>
     );
   }
@@ -266,6 +294,14 @@ export function GameControlTab() {
 
   return (
     <div className="space-y-6">
+      {actionError || error ? (
+        <div
+          role="alert"
+          className="rounded-lg border border-red-500/30 bg-red-500/10 p-3 text-red-500 text-sm"
+        >
+          {actionError ?? `${error} — showing the last loaded statistics.`}
+        </div>
+      ) : null}
       {/* Game Control Header */}
       <div className="rounded-lg border border-border bg-gradient-to-br from-card to-accent/20 p-6">
         <div className="mb-4 flex items-center justify-between">
@@ -277,6 +313,9 @@ export function GameControlTab() {
           </div>
           <div className="flex items-center gap-2">
             <button
+              type="button"
+              aria-pressed={autoRefresh}
+              aria-label="Auto-refresh statistics"
               onClick={() => setAutoRefresh(!autoRefresh)}
               className={cn(
                 'rounded-lg px-3 py-2 text-sm transition-colors',

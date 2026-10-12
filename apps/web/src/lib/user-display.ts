@@ -7,9 +7,19 @@ export interface UserDisplayFields {
   displayName?: string | null;
   username?: string | null;
   email?: string | null;
-  farcasterUsername?: string | null;
   twitterUsername?: string | null;
   walletAddress?: string | null;
+}
+
+/** First candidate that is non-empty after trimming (blank values are skipped). */
+function firstNonBlank(
+  candidates: ReadonlyArray<string | null | undefined>
+): string | null {
+  for (const candidate of candidates) {
+    const trimmed = candidate?.trim();
+    if (trimmed) return trimmed;
+  }
+  return null;
 }
 
 /**
@@ -22,15 +32,15 @@ export function getUserDisplayName(
   fallback = 'User'
 ): string {
   if (!user) return fallback;
-  const name =
-    user.displayName ??
-    user.username ??
-    user.email ??
-    user.farcasterUsername ??
-    user.twitterUsername ??
-    user.walletAddress ??
-    '';
-  return name.toString().trim() || fallback;
+  return (
+    firstNonBlank([
+      user.displayName,
+      user.username,
+      user.email,
+      user.twitterUsername,
+      user.walletAddress,
+    ]) ?? fallback
+  );
 }
 
 /**
@@ -39,21 +49,14 @@ export function getUserDisplayName(
  */
 export function getUserHandle(
   user:
-    | Pick<
-        UserDisplayFields,
-        'username' | 'farcasterUsername' | 'twitterUsername' | 'walletAddress'
-      >
+    | Pick<UserDisplayFields, 'username' | 'twitterUsername' | 'walletAddress'>
     | null
     | undefined,
   fallback = ''
 ): string {
   if (!user) return fallback;
-  const handle =
-    user.username ??
-    user.farcasterUsername ??
-    user.twitterUsername ??
-    user.walletAddress ??
-    '';
-  const s = handle.toString().trim();
-  return s || fallback;
+  return (
+    firstNonBlank([user.username, user.twitterUsername, user.walletAddress]) ??
+    fallback
+  );
 }

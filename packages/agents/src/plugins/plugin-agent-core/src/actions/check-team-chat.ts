@@ -4,8 +4,6 @@
  * Useful when agents want to see what other agents have said
  */
 
-import { db, desc, eq, messages, users } from '@babylon/db';
-import { COORDINATOR_INFO, COORDINATOR_SENDER_ID } from '@babylon/shared';
 import type {
   Action,
   ActionResult,
@@ -14,6 +12,8 @@ import type {
   Memory,
   State,
 } from '@elizaos/core';
+import { db, desc, eq, messages, users } from '@feed/db';
+import { COORDINATOR_INFO, COORDINATOR_SENDER_ID } from '@feed/shared';
 import { logger } from '../../../../shared/logger';
 
 export const checkTeamChatAction: Action = {

@@ -1,5 +1,4 @@
-const API_BASE =
-  process.env.NEXT_PUBLIC_API_URL || 'https://play.babylon.market';
+import { WEB_ORIGIN } from './web-origin';
 
 export default function imageLoader({
   src,
@@ -13,5 +12,5 @@ export default function imageLoader({
     return src;
   }
   // Local static assets — serve from the web app's deployment
-  return `${API_BASE}${src}`;
+  return `${WEB_ORIGIN}${src}`;
 }

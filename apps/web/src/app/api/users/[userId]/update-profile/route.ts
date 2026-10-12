@@ -43,8 +43,6 @@
  *                 type: string
  *               showTwitterPublic:
  *                 type: boolean
- *               showFarcasterPublic:
- *                 type: boolean
  *               showWalletPublic:
  *                 type: boolean
  *     responses:
@@ -96,9 +94,9 @@ import {
   requireUserByIdentifier,
   successResponse,
   withErrorHandling,
-} from '@babylon/api';
-import { and, db, eq, ne, sql, users } from '@babylon/db';
-import { logger, UpdateUserSchema, UserIdParamSchema } from '@babylon/shared';
+} from '@feed/api';
+import { and, db, eq, ne, sql, users } from '@feed/db';
+import { logger, UpdateUserSchema, UserIdParamSchema } from '@feed/shared';
 import type { NextRequest } from 'next/server';
 import { trackServerEvent } from '@/lib/posthog/server';
 
@@ -152,7 +150,6 @@ export const POST = withErrorHandling(
       profileImageUrl,
       coverImageUrl,
       showTwitterPublic,
-      showFarcasterPublic,
       showWalletPublic,
     } = parsedBody;
 
@@ -244,7 +241,6 @@ export const POST = withErrorHandling(
         coverImageUrl: normalizedCoverImageUrl || null,
       }),
       ...(showTwitterPublic !== undefined && { showTwitterPublic }),
-      ...(showFarcasterPublic !== undefined && { showFarcasterPublic }),
       ...(showWalletPublic !== undefined && { showWalletPublic }),
       ...(isUsernameChanging && { usernameChangedAt: new Date() }),
       ...referralCodeUpdate,

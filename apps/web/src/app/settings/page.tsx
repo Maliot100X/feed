@@ -2,7 +2,7 @@
 
 export const dynamic = 'force-dynamic';
 
-import { cn, logger } from '@babylon/shared';
+import { cn, logger } from '@feed/shared';
 import {
   AlertCircle,
   Bell,
@@ -110,11 +110,9 @@ export default function SettingsPage() {
   }>({ file: null, preview: null });
   const [socialVisibility, setSocialVisibility] = useState<{
     twitter: boolean;
-    farcaster: boolean;
     wallet: boolean;
   }>({
     twitter: user?.showTwitterPublic ?? true,
-    farcaster: user?.showFarcasterPublic ?? true,
     wallet: user?.showWalletPublic ?? true,
   });
   const [emailNotificationPreferences, setEmailNotificationPreferences] =
@@ -203,7 +201,6 @@ export default function SettingsPage() {
     setBio(user?.bio ?? '');
     setSocialVisibility({
       twitter: user?.showTwitterPublic ?? true,
-      farcaster: user?.showFarcasterPublic ?? true,
       wallet: user?.showWalletPublic ?? true,
     });
     setEmailNotificationPreferences({
@@ -218,7 +215,6 @@ export default function SettingsPage() {
     user?.username,
     user?.bio,
     user?.showTwitterPublic,
-    user?.showFarcasterPublic,
     user?.showWalletPublic,
     user?.emailNotificationsEnabled,
     user?.emailNotificationsRealtime,
@@ -252,7 +248,7 @@ export default function SettingsPage() {
   };
 
   const updateSocialVisibility = async (
-    platform: 'twitter' | 'farcaster' | 'wallet',
+    platform: 'twitter' | 'wallet',
     visible: boolean
   ) => {
     if (!user?.id) return;
@@ -274,7 +270,7 @@ export default function SettingsPage() {
     );
 
     const payload = (await response.json().catch(() => ({}))) as {
-      visibility?: { twitter?: boolean; farcaster?: boolean; wallet?: boolean };
+      visibility?: { twitter?: boolean; wallet?: boolean };
       error?: { message?: string };
     };
 
@@ -287,15 +283,12 @@ export default function SettingsPage() {
 
     setSocialVisibility({
       twitter: payload.visibility.twitter ?? socialVisibility.twitter,
-      farcaster: payload.visibility.farcaster ?? socialVisibility.farcaster,
       wallet: payload.visibility.wallet ?? socialVisibility.wallet,
     });
 
     setUser({
       ...user,
       showTwitterPublic: payload.visibility.twitter ?? user.showTwitterPublic,
-      showFarcasterPublic:
-        payload.visibility.farcaster ?? user.showFarcasterPublic,
       showWalletPublic: payload.visibility.wallet ?? user.showWalletPublic,
     });
   };
@@ -778,23 +771,6 @@ export default function SettingsPage() {
                             void updateSocialVisibility('twitter', checked)
                           }
                           disabled={!user?.hasTwitter}
-                        />
-                      </div>
-                      <div className="flex items-center justify-between gap-3">
-                        <div className="min-w-0">
-                          <div className="font-medium text-sm">Farcaster</div>
-                          <div className="truncate text-muted-foreground text-xs">
-                            {user?.hasFarcaster && user?.farcasterUsername
-                              ? `@${user.farcasterUsername}`
-                              : 'Not linked'}
-                          </div>
-                        </div>
-                        <Switch
-                          checked={socialVisibility.farcaster}
-                          onCheckedChange={(checked) =>
-                            void updateSocialVisibility('farcaster', checked)
-                          }
-                          disabled={!user?.hasFarcaster}
                         />
                       </div>
                     </div>

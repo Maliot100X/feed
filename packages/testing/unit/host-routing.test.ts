@@ -1,30 +1,23 @@
 import { describe, expect, it } from 'bun:test';
-
 import {
   getLegacyCanonicalOrigin,
   isLegacyCanonicalHostname,
 } from '../../../apps/web/src/lib/host-routing';
 
-describe('host-routing (legacy redirects)', () => {
-  it('identifies legacy babylon.social hosts', () => {
-    expect(isLegacyCanonicalHostname('babylon.social')).toBe(true);
-    expect(isLegacyCanonicalHostname('www.babylon.social')).toBe(true);
-    expect(isLegacyCanonicalHostname('babylon.market')).toBe(false);
+describe('host-routing (canonical redirects)', () => {
+  it('identifies only the www alias for redirecting', () => {
+    expect(isLegacyCanonicalHostname('www.feed.fun')).toBe(true);
+    expect(isLegacyCanonicalHostname(' WWW.FEED.FUN ')).toBe(true);
+    expect(isLegacyCanonicalHostname('feed.fun')).toBe(false);
   });
-
-  it('maps legacy babylon.social hosts to babylon.market', () => {
-    expect(getLegacyCanonicalOrigin('babylon.social', 'https:')).toBe(
-      'https://babylon.market'
-    );
-    expect(getLegacyCanonicalOrigin('www.babylon.social', 'https:')).toBe(
-      'https://babylon.market'
+  it('maps the www alias to feed.fun', () => {
+    expect(getLegacyCanonicalOrigin('www.feed.fun', 'https:')).toBe(
+      'https://feed.fun'
     );
   });
-
-  it('returns null for non-legacy hosts', () => {
-    expect(getLegacyCanonicalOrigin('babylon.market', 'https:')).toBeNull();
-    expect(
-      getLegacyCanonicalOrigin('staging.babylon.market', 'https:')
-    ).toBeNull();
+  it('never redirects the canonical host to itself', () => {
+    expect(getLegacyCanonicalOrigin('feed.fun', 'https:')).toBeNull();
+    expect(getLegacyCanonicalOrigin('staging.feed.fun', 'https:')).toBeNull();
+    expect(getLegacyCanonicalOrigin('localhost', 'http:')).toBeNull();
   });
 });

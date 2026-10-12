@@ -5,7 +5,7 @@
  * @access Cron (CRON_SECRET required)
  *
  * @description
- * Runs daily at 00:00 UTC (via Vercel Cron) and permanently whitelists any
+ * Runs daily at 00:00 UTC (via the Cloudflare cron Worker) and permanently whitelists any
  * users in the current leaderboard Top N (category: all) who have never been
  * seen before.
  *
@@ -20,13 +20,12 @@ import {
   successResponse,
   verifyCronAuth,
   withErrorHandling,
-} from '@babylon/api';
-import { autoWhitelistCurrentTopN } from '@babylon/api/services/whitelist-service';
-import { logger } from '@babylon/shared';
+} from '@feed/api';
+import { autoWhitelistCurrentTopN } from '@feed/api/services/whitelist-service';
+import { logger } from '@feed/shared';
 import type { NextRequest } from 'next/server';
 import { NextResponse } from 'next/server';
 
-export const maxDuration = 60;
 export const dynamic = 'force-dynamic';
 
 export const POST = withErrorHandling(async (request: NextRequest) => {
@@ -46,14 +45,9 @@ export const POST = withErrorHandling(async (request: NextRequest) => {
   });
 });
 
-// Vercel Cron uses GET; forward to POST after auth verification.
+// The Cloudflare cron Worker uses GET; forward to POST after auth verification.
 export const GET = withErrorHandling(async (request: NextRequest) => {
-  if (
-    !verifyCronAuth(request, {
-      jobName: 'WhitelistTopNCron',
-      allowVercelCronUserAgent: true,
-    })
-  ) {
+  if (!verifyCronAuth(request, { jobName: 'WhitelistTopNCron' })) {
     logger.warn(
       'Unauthorized GET request to cron endpoint',
       undefined,

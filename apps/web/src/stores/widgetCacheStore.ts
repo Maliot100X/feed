@@ -3,18 +3,17 @@
  * when navigating between pages
  */
 
-import type { A2AReputationResponse } from '@babylon/agents/client';
-import type { PortfolioBreakdownSnapshot } from '@babylon/engine/client';
+import type { A2AReputationResponse } from '@feed/agents/client';
+import type { PortfolioBreakdownSnapshot } from '@feed/engine/client';
 import type {
   ArticleItem,
   PerpPositionFromAPI,
   PredictionPosition,
-  UserProfileStats,
-} from '@babylon/shared';
+} from '@feed/shared';
 import { create } from 'zustand';
 
 // Re-export ArticleItem for consumers that import from this file
-export type { ArticleItem } from '@babylon/shared';
+export type { ArticleItem } from '@feed/shared';
 
 /**
  * Trending item structure for trending panel (supports grouped trends).
@@ -87,18 +86,11 @@ export interface UpcomingEvent {
   relatedOrganizationId?: string;
 }
 
-export interface BabylonStats {
+export interface FeedStats {
   activePlayers: number;
   aiAgents: number;
   totalHoots: number;
   pointsInCirculation: string;
-}
-
-interface ProfileWidgetData {
-  portfolio: PortfolioBreakdownSnapshot | null;
-  predictions: PredictionPosition[];
-  perps: PerpPositionFromAPI[];
-  stats: UserProfileStats | null;
 }
 
 export interface PositionsPreviewData {
@@ -116,9 +108,8 @@ interface WidgetCacheState {
   latestNews: CacheEntry<ArticleItem[]> | null;
   upcomingEvents: CacheEntry<UpcomingEvent[]> | null;
   trending: CacheEntry<TrendingItem[]> | null;
-  stats: CacheEntry<BabylonStats> | null;
+  stats: CacheEntry<FeedStats> | null;
   markets: CacheEntry<MarketsWidgetData> | null;
-  profileWidget: Map<string, CacheEntry<ProfileWidgetData>>; // Keyed by userId
   reputationWidget: Map<string, CacheEntry<A2AReputationResponse>>; // Keyed by userId
   positionsPreview: Map<string, CacheEntry<PositionsPreviewData>>; // Keyed by userId
   portfolioWidget: Map<string, CacheEntry<PortfolioBreakdownSnapshot>>; // Keyed by userId
@@ -131,9 +122,8 @@ interface WidgetCacheState {
   setLatestNews: (data: ArticleItem[]) => void;
   setUpcomingEvents: (data: UpcomingEvent[]) => void;
   setTrending: (data: TrendingItem[]) => void;
-  setStats: (data: BabylonStats) => void;
+  setStats: (data: FeedStats) => void;
   setMarkets: (data: MarketsWidgetData) => void;
-  setProfileWidget: (userId: string, data: ProfileWidgetData) => void;
   setReputationWidget: (userId: string, data: A2AReputationResponse) => void;
   setPositionsPreview: (userId: string, data: PositionsPreviewData) => void;
   setPortfolioWidget: (
@@ -146,9 +136,8 @@ interface WidgetCacheState {
   getLatestNews: () => ArticleItem[] | null;
   getUpcomingEvents: () => UpcomingEvent[] | null;
   getTrending: () => TrendingItem[] | null;
-  getStats: () => BabylonStats | null;
+  getStats: () => FeedStats | null;
   getMarkets: () => MarketsWidgetData | null;
-  getProfileWidget: (userId: string) => ProfileWidgetData | null;
   getReputationWidget: (userId: string) => A2AReputationResponse | null;
   getPositionsPreview: (userId: string) => PositionsPreviewData | null;
   getPortfolioWidget: (userId: string) => PortfolioBreakdownSnapshot | null;
@@ -163,7 +152,6 @@ interface WidgetCacheState {
   clearTrending: () => void;
   clearStats: () => void;
   clearMarkets: () => void;
-  clearProfileWidget: (userId: string) => void;
   clearReputationWidget: (userId: string) => void;
   clearPositionsPreview: (userId: string) => void;
   clearPortfolioWidget: (userId: string) => void;
@@ -179,7 +167,6 @@ export const useWidgetCacheStore = create<WidgetCacheState>((set, get) => ({
   trending: null,
   stats: null,
   markets: null,
-  profileWidget: new Map(),
   reputationWidget: new Map(),
   positionsPreview: new Map(),
   portfolioWidget: new Map(),
@@ -227,7 +214,7 @@ export const useWidgetCacheStore = create<WidgetCacheState>((set, get) => ({
     });
   },
 
-  setStats: (data: BabylonStats) => {
+  setStats: (data: FeedStats) => {
     set({
       stats: {
         data,
@@ -243,15 +230,6 @@ export const useWidgetCacheStore = create<WidgetCacheState>((set, get) => ({
         timestamp: Date.now(),
       },
     });
-  },
-
-  setProfileWidget: (userId: string, data: ProfileWidgetData) => {
-    const profileWidget = new Map(get().profileWidget);
-    profileWidget.set(userId, {
-      data,
-      timestamp: Date.now(),
-    });
-    set({ profileWidget });
   },
 
   setReputationWidget: (userId: string, data: A2AReputationResponse) => {
@@ -311,12 +289,6 @@ export const useWidgetCacheStore = create<WidgetCacheState>((set, get) => ({
     return entry && get().isFresh(entry) ? entry.data : null;
   },
 
-  getProfileWidget: (userId: string) => {
-    const profileWidget = get().profileWidget;
-    const entry = profileWidget.get(userId);
-    return entry && get().isFresh(entry) ? entry.data : null;
-  },
-
   getReputationWidget: (userId: string) => {
     const reputationWidget = get().reputationWidget;
     const entry = reputationWidget.get(userId);
@@ -341,11 +313,6 @@ export const useWidgetCacheStore = create<WidgetCacheState>((set, get) => ({
   clearTrending: () => set({ trending: null }),
   clearStats: () => set({ stats: null }),
   clearMarkets: () => set({ markets: null }),
-  clearProfileWidget: (userId: string) => {
-    const profileWidget = new Map(get().profileWidget);
-    profileWidget.delete(userId);
-    set({ profileWidget });
-  },
   clearReputationWidget: (userId: string) => {
     const reputationWidget = new Map(get().reputationWidget);
     reputationWidget.delete(userId);
@@ -369,7 +336,6 @@ export const useWidgetCacheStore = create<WidgetCacheState>((set, get) => ({
       trending: null,
       stats: null,
       markets: null,
-      profileWidget: new Map(),
       reputationWidget: new Map(),
       positionsPreview: new Map(),
       portfolioWidget: new Map(),

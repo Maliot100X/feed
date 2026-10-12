@@ -20,7 +20,27 @@ const mockGetCacheOrFetch = mock(
   }
 );
 
-mock.module('@babylon/api', () => ({
+const mockExcludedAuthorIds = mock(async () => new Set<string>());
+
+mock.module('../_lib/viewer-moderation', () => ({
+  loadViewerExcludedAuthorIds: mockExcludedAuthorIds,
+  filterStoriesForViewer: (
+    stories: Array<{ posts: Array<{ authorId: string }> }>,
+    excluded: Set<string>
+  ) =>
+    stories.filter((story) =>
+      story.posts.every((post) => !excluded.has(post.authorId))
+    ),
+}));
+
+mock.module('@feed/api', () => ({
+  addPrivateReadHeaders: (
+    response: Response,
+    rateLimitInfo: { limit: number }
+  ) => {
+    response.headers.set('Cache-Control', 'private, no-store');
+    response.headers.set('X-RateLimit-Limit', String(rateLimitInfo.limit));
+  },
   addPublicReadHeaders: (
     response: Response,
     rateLimitInfo: { limit: number }
@@ -55,7 +75,7 @@ function encodeCursor(score: number, storyKey: string): string {
 const makeRequest = (params: Record<string, string> = {}): NextRequest => {
   const searchParams = new URLSearchParams(params);
   return {
-    url: 'https://babylon.market/api/feed/stories',
+    url: 'https://feed.fun/api/feed/stories',
     headers: { get: () => null },
     nextUrl: { searchParams },
   } as unknown as NextRequest;

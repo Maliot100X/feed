@@ -8,7 +8,7 @@ import {
   getProfileUrl,
   type LeaderboardMetric,
   type LeaderboardScope,
-} from '@babylon/shared';
+} from '@feed/shared';
 import {
   Bot,
   ChevronLeft,
@@ -366,11 +366,7 @@ export default function LeaderboardPage() {
                 AI
               </span>
             ) : (
-              <OnChainBadge
-                isRegistered={Boolean(player.nftTokenId)}
-                nftTokenId={player.nftTokenId ?? null}
-                size="sm"
-              />
+              <OnChainBadge nftTokenId={player.nftTokenId ?? null} size="sm" />
             )}
             {(isCurrentUser || isPinned) && (
               <span className="shrink-0 rounded bg-foreground px-2 py-0.5 font-semibold text-background text-xs">

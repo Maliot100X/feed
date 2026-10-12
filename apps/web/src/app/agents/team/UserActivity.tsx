@@ -1,12 +1,12 @@
 'use client';
 
 import {
-  BABYLON_POINTS_SYMBOL,
   cn,
+  FEED_POINTS_SYMBOL,
   formatCompactCurrency,
   getTimeAgo,
   logger,
-} from '@babylon/shared';
+} from '@feed/shared';
 import { Activity } from 'lucide-react';
 import { memo, useCallback, useEffect, useState } from 'react';
 import { useAuth } from '@/hooks/useAuth';
@@ -87,7 +87,6 @@ function getReasonLabel(reason: string): string {
     referral_signup: 'Referral bonus',
     referral_qualified: 'Qualified referral bonus',
     profile_completion: 'Profile completion bonus',
-    farcaster_link: 'Linked Farcaster',
     twitter_link: 'Linked Twitter',
     discord_link: 'Linked Discord',
     wallet_connect: 'Connected wallet',
@@ -261,7 +260,7 @@ function renderActivityContent(activity: UserActivityItem, expanded: boolean) {
           <span className="text-muted-foreground">{typeLabel}</span>
           <span className="text-muted-foreground/60">•</span>
           <span className="font-mono text-foreground">
-            {BABYLON_POINTS_SYMBOL}
+            {FEED_POINTS_SYMBOL}
             {amount.toLocaleString()}
           </span>
         </div>

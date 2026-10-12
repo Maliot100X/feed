@@ -1,7 +1,6 @@
 'use client';
 
 import type { StewardSession } from '@stwd/sdk';
-import { StewardAuth } from '@stwd/sdk';
 import {
   createContext,
   useCallback,
@@ -10,32 +9,23 @@ import {
   useRef,
   useState,
 } from 'react';
+import { getBrowserDevAuthSession } from '@/lib/auth/dev-auth';
+import { FeedStewardAuth } from '@/lib/auth/feed-steward-auth';
+import { createSessionCookieSync } from '@/lib/auth/session-cookie-sync';
+import { getStewardApiUrl, STEWARD_TENANT_ID } from '@/lib/auth/steward-config';
 
 // ── Singleton StewardAuth instance ───────────────────────────────────────────
 
-let _stewardAuthInstance: StewardAuth | null = null;
+let _stewardAuthInstance: FeedStewardAuth | null = null;
 
-function getOrCreateStewardAuth(): StewardAuth {
+function getOrCreateStewardAuth(): FeedStewardAuth {
   if (_stewardAuthInstance) return _stewardAuthInstance;
-  const baseUrl =
-    process.env.NEXT_PUBLIC_STEWARD_API_URL ??
-    (typeof window !== 'undefined' && window.location.hostname !== 'localhost'
-      ? 'https://auth.elizacloud.ai'
-      : 'http://localhost:3200');
-  _stewardAuthInstance = new StewardAuth({
+  const baseUrl = getStewardApiUrl();
+  _stewardAuthInstance = new FeedStewardAuth({
     baseUrl,
+    tenantId: STEWARD_TENANT_ID,
     // Persist session across page reloads
     storage: typeof localStorage !== 'undefined' ? localStorage : undefined,
-    onSessionChange: (session) => {
-      // TODO: Phase 3 — rename __privyAccessToken to __accessToken once all
-      // consumers have migrated off the legacy Privy naming.
-      // Keep the window-level access token in sync for apiFetch
-      if (typeof window !== 'undefined') {
-        (
-          window as Window & { __privyAccessToken?: string | null }
-        ).__privyAccessToken = session?.token ?? null;
-      }
-    },
   });
   return _stewardAuthInstance;
 }
@@ -43,12 +33,17 @@ function getOrCreateStewardAuth(): StewardAuth {
 // ── Context ───────────────────────────────────────────────────────────────────
 
 interface StewardAuthContextValue {
-  stewardAuth: StewardAuth;
+  stewardAuth: FeedStewardAuth;
   session: StewardSession | null;
   isLoading: boolean;
   /** Call after a successful login to sync the httpOnly cookie and fetch the user profile. */
-  onLoginSuccess: (token: string, refreshToken?: string) => Promise<void>;
+  onLoginSuccess: (
+    token: string,
+    refreshToken?: string | null
+  ) => Promise<void>;
 }
+
+const syncSessionCookie = createSessionCookieSync();
 
 const StewardAuthContext = createContext<StewardAuthContextValue | null>(null);
 
@@ -70,43 +65,104 @@ export function StewardAuthProvider({
   children: React.ReactNode;
 }) {
   const stewardAuth = useRef(getOrCreateStewardAuth()).current;
-  const [session, setSession] = useState<StewardSession | null>(() =>
-    stewardAuth.getSession()
-  );
-  const [isLoading, setIsLoading] = useState(false);
+  const [session, setSession] = useState<StewardSession | null>(null);
+  const [isLoading, setIsLoading] = useState(true);
 
   useEffect(() => {
-    // Subscribe to session changes from the SDK
-    const unsubscribe = stewardAuth.onSessionChange((s) => {
-      setSession(s);
+    let active = true;
+    const synchronize = async (next: StewardSession | null) => {
+      if (!next) {
+        if (active) {
+          setSession(null);
+          setIsLoading(false);
+        }
+        await syncSessionCookie(null).catch(() => undefined);
+        return;
+      }
+      try {
+        await syncSessionCookie(
+          next.token,
+          stewardAuth.getRefreshToken(),
+          () =>
+            !stewardAuth.isLoginPending &&
+            stewardAuth.getSession()?.token === next.token
+        );
+        if (
+          active &&
+          !stewardAuth.isLoginPending &&
+          stewardAuth.getSession()?.token === next.token
+        ) {
+          setSession(next);
+        }
+      } catch {
+        if (
+          active &&
+          !stewardAuth.isLoginPending &&
+          stewardAuth.getSession()?.token === next.token
+        ) {
+          stewardAuth.signOut();
+          setSession(null);
+        }
+      } finally {
+        if (active) setIsLoading(false);
+      }
+    };
+    const unsubscribe = stewardAuth.onSessionChange((next) => {
+      void synchronize(next);
     });
-    return unsubscribe;
+    const checkRefresh = () => {
+      if (!active || document.visibilityState === 'hidden') return;
+      const current = stewardAuth.getSession();
+      if (!current) setSession(null);
+      if (!stewardAuth.getRefreshToken()) return;
+      if (!current || stewardAuth.isNearExpiry()) {
+        void stewardAuth.refreshSession();
+      }
+    };
+    const timer = window.setInterval(checkRefresh, 30_000);
+    window.addEventListener('focus', checkRefresh);
+    document.addEventListener('visibilitychange', checkRefresh);
+    checkRefresh();
+    const restored = stewardAuth.getSession();
+    if (restored) void synchronize(restored);
+    else setIsLoading(false);
+    return () => {
+      active = false;
+      window.clearInterval(timer);
+      window.removeEventListener('focus', checkRefresh);
+      document.removeEventListener('visibilitychange', checkRefresh);
+      unsubscribe();
+    };
+  }, [stewardAuth]);
+
+  // The provider (not each useAuth consumer) owns the window-level token
+  // adapters used by apiFetch, so unmounting one consumer cannot clear them
+  // for the rest of the app.
+  useEffect(() => {
+    window.__privyAccessToken = session?.token ?? null;
+  }, [session]);
+
+  useEffect(() => {
+    window.__privyGetAccessToken = async () => {
+      const devSession = getBrowserDevAuthSession();
+      if (devSession) return devSession.accessToken;
+      return stewardAuth.getToken() ?? null;
+    };
+    return () => {
+      window.__privyGetAccessToken = undefined;
+    };
   }, [stewardAuth]);
 
   const onLoginSuccess = useCallback(
-    async (token: string, refreshToken?: string) => {
+    async (token: string, refreshToken?: string | null) => {
       setIsLoading(true);
       try {
-        // For OAuth / Farcaster / Telegram callbacks we receive the JWT externally.
-        // The SDK's private storage key is 'steward_session_token' in localStorage.
-        // Writing there and then calling getSession() syncs the SDK without
-        // needing access to private members.
-        if (typeof localStorage !== 'undefined') {
-          localStorage.setItem('steward_session_token', token);
-          if (refreshToken) {
-            localStorage.setItem('steward_refresh_token', refreshToken);
-          }
-        }
-        // Immediately update React session state so useAuth sees the new session
-        setSession(stewardAuth.getSession());
-
-        // Sync the token to the server-side httpOnly cookie
-        await fetch('/api/auth/session', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          credentials: 'include',
-          body: JSON.stringify({ token, refreshToken }),
-        });
+        const next = await stewardAuth.completeLogin(
+          token,
+          refreshToken,
+          syncSessionCookie
+        );
+        if (stewardAuth.getSession()?.token === next?.token) setSession(next);
       } finally {
         setIsLoading(false);
       }

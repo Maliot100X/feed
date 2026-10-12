@@ -32,7 +32,8 @@
 import { VolumeX, X } from 'lucide-react';
 import { useState, useTransition } from 'react';
 import { toast } from 'sonner';
-import { apiUrl } from '@/utils/api-url';
+import { readApiErrorMessage } from '@/utils/api-error';
+import { apiFetch } from '@/utils/api-fetch';
 
 interface MuteUserModalProps {
   isOpen: boolean;
@@ -56,18 +57,26 @@ export function MuteUserModal({
 
   const handleMute = () => {
     startMuting(async () => {
-      const response = await fetch(apiUrl(`/api/users/${targetUserId}/mute`), {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          action: 'mute',
-          reason: reason || undefined,
-        }),
-      });
+      let response: Response;
+      try {
+        response = await apiFetch(
+          `/api/users/${encodeURIComponent(targetUserId)}/mute`,
+          {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              action: 'mute',
+              reason: reason.trim() || undefined,
+            }),
+          }
+        );
+      } catch {
+        toast.error('Network error. Please try again.');
+        return;
+      }
 
       if (!response.ok) {
-        const error = await response.json();
-        toast.error(error.message || 'Failed to mute user');
+        toast.error(await readApiErrorMessage(response, 'Failed to mute user'));
         return;
       }
 

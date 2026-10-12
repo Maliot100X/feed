@@ -1,60 +1,103 @@
 'use client';
 
-import { useRouter } from 'next/navigation';
-import { useEffect, useRef } from 'react';
+import { useParams } from 'next/navigation';
+import { useEffect, useRef, useState } from 'react';
 import { useStewardAuthContext } from '@/components/providers/StewardAuthProvider';
+import { safeReturnTo } from '@/lib/auth/safe-return-to';
+import { stewardCallbackParams } from '@/lib/auth/steward-exchange';
 
 /**
  * OAuth callback page for Steward OAuth providers (Google, Discord, Twitter/X).
  *
- * Steward redirects here after a successful OAuth flow with:
- *   ?token=<jwt>&refresh_token=<rt>   (on success)
- *   ?error=<message>                  (on failure)
+ * Steward redirects with #code=<one-time-code>&state=<state>, or an error.
+ * The SDK verifies state and exchanges the code with its stored PKCE verifier.
  *
  * Security: Immediately sanitizes the URL via replaceState() to prevent
- * the JWT from appearing in browser history, referrer headers, or server logs.
+ * the one-time code from remaining in browser history.
  */
 export default function OAuthCallbackPage() {
-  const { onLoginSuccess } = useStewardAuthContext();
-  const router = useRouter();
+  const { stewardAuth, onLoginSuccess } = useStewardAuthContext();
+  const { provider } = useParams<{ provider: string }>();
+  const [error, setError] = useState<string | null>(null);
+  const [state, setState] = useState<string | null>(null);
   const processed = useRef(false);
 
   useEffect(() => {
     if (processed.current) return;
     processed.current = true;
 
-    const params = new URLSearchParams(window.location.search);
-    const token = params.get('token');
-    const refreshToken = params.get('refresh_token') ?? undefined;
-    const error = params.get('error');
+    const url = new URL(window.location.href);
+    const params = url.searchParams;
+    const callback = stewardCallbackParams(url);
+    const errorParam = callback.error;
+    const stateParam = callback.state;
+    const destination = safeReturnTo(params.get('returnTo'));
 
     // Sanitize URL immediately — remove sensitive query params from history
     window.history.replaceState(null, '', window.location.pathname);
 
-    if (error) {
-      router.replace(`/?auth_error=${encodeURIComponent(error)}`);
+    if (window.opener) {
+      window.opener.postMessage(
+        { type: 'steward-oauth-callback', ...callback },
+        window.location.origin
+      );
+      window.close();
       return;
     }
 
-    if (!token) {
-      router.replace('/?auth_error=missing_token');
+    if (stateParam) {
+      setState(stateParam);
+    }
+
+    if (errorParam) {
+      setError(errorParam);
       return;
     }
 
-    onLoginSuccess(token, refreshToken)
+    if (!callback.code || !callback.state) {
+      setError('Missing sign-in code or state. Please start sign-in again.');
+      return;
+    }
+
+    stewardAuth
+      .handleOAuthCallback(provider, callback)
+      .then((result) => {
+        if ('mfaRequired' in result) {
+          throw new Error(
+            'Additional verification is required. Restart sign-in from the login dialog.'
+          );
+        }
+        return onLoginSuccess(result.token, result.refreshToken);
+      })
       .then(() => {
-        router.replace('/');
+        window.location.assign(destination);
       })
       .catch((err: Error) => {
-        router.replace(`/?auth_error=${encodeURIComponent(err.message)}`);
+        setError(err.message);
       });
-  }, [onLoginSuccess, router]);
+  }, [stewardAuth, onLoginSuccess, provider]);
 
   return (
     <div className="flex min-h-dvh items-center justify-center">
       <div className="text-center">
-        <div className="mx-auto mb-4 h-8 w-8 animate-spin rounded-full border-4 border-primary border-t-transparent" />
-        <p className="text-muted-foreground text-sm">Completing sign-in…</p>
+        {error ? (
+          <>
+            <p className="font-semibold text-destructive">Sign-in failed</p>
+            <p className="mt-2 max-w-sm text-muted-foreground text-sm">
+              {error}
+            </p>
+            {state ? (
+              <p className="mt-2 max-w-sm text-muted-foreground text-xs">
+                State: {state}
+              </p>
+            ) : null}
+          </>
+        ) : (
+          <>
+            <div className="mx-auto mb-4 h-8 w-8 animate-spin rounded-full border-4 border-primary border-t-transparent" />
+            <p className="text-muted-foreground text-sm">Completing sign-in…</p>
+          </>
+        )}
       </div>
     </div>
   );

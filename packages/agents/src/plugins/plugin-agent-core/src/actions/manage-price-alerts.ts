@@ -10,8 +10,6 @@
  * every autonomous tick (~3 minutes) by PriceAlertService.
  */
 
-import { db, eq, userAgentConfigs } from '@babylon/db';
-import type { PriceAlert } from '@babylon/db/schema';
 import type {
   Action,
   ActionResult,
@@ -20,6 +18,8 @@ import type {
   Memory,
   State,
 } from '@elizaos/core';
+import { db, eq, userAgentConfigs } from '@feed/db';
+import type { PriceAlert } from '@feed/db/schema';
 import { logger } from '../../../../shared/logger';
 import { generateSnowflakeId } from '../../../../shared/snowflake';
 

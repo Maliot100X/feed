@@ -1,5 +1,5 @@
-import type { JsonValue } from '@babylon/shared';
 import { type UUID } from '@elizaos/core';
+import type { JsonValue } from '@feed/shared';
 import type { Experience } from '../types';
 import { ExperienceType } from '../types';
 

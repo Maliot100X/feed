@@ -5,6 +5,7 @@
  * other modules can import `db`/`Database` without importing `src/index.ts`.
  */
 
+import { requestResource } from '@feed/shared/server/request-scope';
 import { sql } from 'drizzle-orm';
 import type { PostgresJsDatabase } from 'drizzle-orm/postgres-js';
 import { drizzle } from 'drizzle-orm/postgres-js';
@@ -22,6 +23,7 @@ import {
 } from './json-storage';
 import { logger } from './logger';
 import * as schema from './schema';
+import { postgresTlsMode } from './tls';
 
 // ============================================================================
 // Types
@@ -36,7 +38,7 @@ export type Transaction = Parameters<Parameters<Database['transaction']>[0]>[0];
 
 // Global state for database connections (serverless-safe)
 // Using a type assertion here is safe because we're extending globalThis
-const globalForDb = globalThis as typeof globalThis & {
+type ConnectionState = {
   postgresClient: ReturnType<typeof postgres> | undefined;
   drizzleDb: Database | undefined;
   db: DrizzleClient | undefined;
@@ -47,6 +49,39 @@ const globalForDb = globalThis as typeof globalThis & {
   primaryDbVersion: number | undefined;
   readReplicaDbVersion: number | undefined;
 };
+
+const sharedConnectionState = globalThis as typeof globalThis & ConnectionState;
+function connectionState(): ConnectionState {
+  const scoped = requestResource<ConnectionState>(
+    'database',
+    () => ({
+      postgresClient: undefined,
+      drizzleDb: undefined,
+      db: undefined,
+      readReplicaClient: undefined,
+      readReplicaDrizzle: undefined,
+      readReplicaDb: undefined,
+      primaryDbVersion: 0,
+      readReplicaDbVersion: 0,
+    }),
+    async (state) => {
+      await Promise.all([
+        state.postgresClient?.end({ timeout: 5 }),
+        state.readReplicaClient?.end({ timeout: 5 }),
+      ]);
+    }
+  );
+  return scoped ?? sharedConnectionState;
+}
+
+const globalForDb = new Proxy(sharedConnectionState, {
+  get(_target, property) {
+    return Reflect.get(connectionState(), property);
+  },
+  set(_target, property, value) {
+    return Reflect.set(connectionState(), property, value);
+  },
+});
 
 if (globalForDb.primaryDbVersion === undefined) {
   globalForDb.primaryDbVersion = 0;
@@ -73,15 +108,25 @@ function isTestEnvironment(): boolean {
 /** Hard cap so misconfiguration cannot exhaust Postgres max_connections */
 const DATABASE_POOL_MAX_CAP = 500;
 
-function parsePositiveIntEnv(key: string): number | undefined {
+/**
+ * Strictly parse a positive integer env var (digits only; "60s" or "1e3"
+ * are rejected rather than partially parsed).
+ */
+export function parsePositiveIntEnv(key: string): number | undefined {
   const raw = process.env[key];
   if (raw === undefined || raw === '') return undefined;
-  const n = Number.parseInt(raw, 10);
-  if (!Number.isFinite(n) || n <= 0) {
+  const n = /^\d+$/.test(raw.trim()) ? Number(raw.trim()) : Number.NaN;
+  if (!Number.isSafeInteger(n) || n <= 0) {
     logger.warn(`Invalid ${key} value: "${raw}", using default`);
     return undefined;
   }
-  return Math.min(n, DATABASE_POOL_MAX_CAP);
+  return n;
+}
+
+/** Pool sizes are additionally capped; timeouts are not. */
+function parsePoolSizeEnv(key: string): number | undefined {
+  const n = parsePositiveIntEnv(key);
+  return n === undefined ? undefined : Math.min(n, DATABASE_POOL_MAX_CAP);
 }
 
 // ============================================================================
@@ -89,7 +134,7 @@ function parsePositiveIntEnv(key: string): number | undefined {
 // ============================================================================
 
 function getConnectionUrl(): string {
-  return process.env.DATABASE_URL || 'postgresql://localhost:5432/babylon';
+  return process.env.DATABASE_URL || 'postgresql://localhost:5432/feed';
 }
 
 function getReadReplicaUrl(): string | undefined {
@@ -112,46 +157,22 @@ function getPostgresClientConfig(
   const isTest = isTestEnvironment();
   const isProd = process.env.NODE_ENV === 'production';
 
-  // Determine if this is a local database connection
-  const isLocalhost = url.includes('localhost') || url.includes('127.0.0.1');
-
-  // Check if SSL is already specified in the URL (sslmode=require or ssl=true)
-  const hasExplicitSSL =
-    url.includes('sslmode=require') || url.includes('ssl=true');
-
-  // Check for cloud database providers that require SSL (Neon, Supabase, etc.)
-  const isCloudProvider =
-    url.includes('neon.tech') ||
-    url.includes('supabase.co') ||
-    url.includes('pooler.supabase') ||
-    url.includes('db.bit.io') ||
-    url.includes('.postgres.database.azure.com') ||
-    url.includes('.rds.amazonaws.com');
-
-  // SSL is required for:
-  // - URL explicitly specifies sslmode=require
-  // - Production with non-localhost connections
-  // - Any cloud database provider (even in development)
-  const sslMode: 'require' | false =
-    hasExplicitSSL || (!isLocalhost && (isProd || isCloudProvider))
-      ? 'require'
-      : false;
+  const sslMode = postgresTlsMode(
+    url,
+    isProd,
+    process.env.DEPLOYMENT_PLATFORM === 'cloudflare'
+  );
 
   // Node serves many concurrent requests in one process; without a bounded pool we'd get
-  // one connection per in-flight query and exhaust Neon/Postgres limits. Pool caps connections
-  // and queues work. Defaults stay small so (instances × pool max) stays within Neon caps.
-  const isPooler =
-    url.includes('pooler') ||
-    url.includes('pgbouncer') ||
-    url.includes('?pgbouncer=true') ||
-    url.includes('?pgbouncer=1') ||
-    url.includes('-pooler.') ||
-    url.includes('pooler.supabase') ||
-    url.includes('transaction-pooler');
+  // one connection per in-flight query and exhaust Postgres max_connections. Pool caps
+  // connections and queues work. Defaults stay small so (instances × pool max) stays within
+  // the server's limits (Railway Postgres, or PgBouncer in front of it).
+  // Generic pooler detection: hostnames/params containing "pooler" or "pgbouncer".
+  const isPooler = url.includes('pooler') || url.includes('pgbouncer');
 
   const envKey =
     role === 'primary' ? 'DATABASE_POOL_MAX' : 'DATABASE_READ_REPLICA_POOL_MAX';
-  const envMax = parsePositiveIntEnv(envKey);
+  const envMax = parsePoolSizeEnv(envKey);
 
   // Pool size lookup table for clarity (avoids nested ternaries)
   const POOL_DEFAULTS = {
@@ -178,7 +199,7 @@ function getPostgresClientConfig(
   const applicationName =
     role === 'replica' && process.env.DATABASE_READ_REPLICA_APPLICATION_NAME
       ? process.env.DATABASE_READ_REPLICA_APPLICATION_NAME
-      : (process.env.DATABASE_APPLICATION_NAME ?? 'babylon');
+      : (process.env.DATABASE_APPLICATION_NAME ?? 'feed');
 
   const applyGuardrails =
     !isTest &&
@@ -205,9 +226,6 @@ function getPostgresClientConfig(
 
   logger.debug(`[Drizzle] Creating ${role} postgres client`, {
     isProd,
-    isLocalhost,
-    isCloudProvider,
-    hasExplicitSSL,
     sslMode,
     isPooler,
     poolMax,
@@ -231,6 +249,12 @@ function getPostgresClientConfig(
 // ============================================================================
 
 function createPostgresClient(): ReturnType<typeof postgres> {
+  if (
+    process.env.DEPLOYMENT_PLATFORM === 'cloudflare' &&
+    !requestResource('database-request-check', () => ({}))
+  ) {
+    throw new Error('Cloudflare database access requires a request scope');
+  }
   const url = getConnectionUrl();
   return postgres(url, getPostgresClientConfig(url, 'primary'));
 }
@@ -242,7 +266,7 @@ function getPostgresClient(): ReturnType<typeof postgres> | null {
 
   if (!globalForDb.postgresClient) {
     const url = getConnectionUrl();
-    if (!url || url === 'postgresql://localhost:5432/babylon') {
+    if (!url || url === 'postgresql://localhost:5432/feed') {
       if (isTestEnvironment()) {
         throw new Error('DATABASE_URL is required in test environment');
       }
@@ -481,7 +505,7 @@ async function withRetryInternal<T>(
         errorMsg.includes('econnrefused') ||
         errorMsg.includes('econnreset') ||
         errorMsg.includes('etimedout') ||
-        // SSL connection errors common with Neon's pooler (excludes certificate validation errors)
+        // SSL connection errors common with connection poolers (excludes certificate validation errors)
         (errorMsg.includes('ssl') &&
           (errorMsg.includes('connection') ||
             errorMsg.includes('handshake') ||
@@ -540,7 +564,7 @@ export async function initializeJsonMode(
  * Useful for testing.
  */
 export async function initializeMemoryMode(): Promise<void> {
-  await initJsonStorage('/tmp/babylon-memory', { autoSave: false });
+  await initJsonStorage('/tmp/feed-memory', { autoSave: false });
   currentStorageMode = 'memory';
   jsonClient = createJsonClient();
   logger.info('[DB] Initialized memory storage mode');
@@ -1013,7 +1037,13 @@ function createReplicaDbProxy(): DrizzleClient {
  * await db.post.create({ data: { ... } });
  * ```
  */
-export const db: DrizzleClient = createModeAwareDbProxy();
+const sharedDbProxy = createModeAwareDbProxy();
+export const db: DrizzleClient = new Proxy(sharedDbProxy, {
+  get(target, property, receiver) {
+    const scoped = requestResource('database-proxy', createModeAwareDbProxy);
+    return Reflect.get(scoped ?? target, property, receiver);
+  },
+});
 
 /**
  * Explicit read-only client that always routes to read replica.

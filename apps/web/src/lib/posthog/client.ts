@@ -9,7 +9,7 @@
  * filtered independently within a single PostHog project.
  */
 
-import { logger } from '@babylon/shared';
+import { logger } from '@feed/shared';
 import posthog from 'posthog-js';
 
 export type PostHogClient = typeof posthog;
@@ -19,13 +19,13 @@ let initialized = false;
 /**
  * Detect the client-side deployment environment.
  *
- * Uses NEXT_PUBLIC_VERCEL_ENV (injected by Vercel at build time) to distinguish
- * production, staging (preview), and development.
+ * Uses NEXT_PUBLIC_DEPLOYMENT_ENV (set by the Cloudflare build) to distinguish
+ * production, staging, and development.
  */
 function getClientEnvironment(): 'production' | 'staging' | 'development' {
-  const vercelEnv = process.env.NEXT_PUBLIC_VERCEL_ENV;
-  if (vercelEnv === 'production') return 'production';
-  if (vercelEnv === 'preview') return 'staging';
+  if (process.env.NEXT_PUBLIC_DEPLOYMENT_ENV === 'staging') return 'staging';
+  if (process.env.NEXT_PUBLIC_DEPLOYMENT_ENV === 'production')
+    return 'production';
   if (process.env.NODE_ENV === 'production') return 'production';
   return 'development';
 }
@@ -84,9 +84,8 @@ export function initPostHog(): PostHogClient | null {
         // Register environment as a super property so it's attached to every event
         ph.register({
           environment,
-          app_version: process.env.NEXT_PUBLIC_VERCEL_GIT_COMMIT_SHA || 'dev',
-          deployment_url:
-            process.env.NEXT_PUBLIC_VERCEL_URL || 'localhost:3000',
+          app_version: process.env.NEXT_PUBLIC_COMMIT_SHA || 'dev',
+          deployment_url: process.env.NEXT_PUBLIC_APP_URL || 'localhost:3000',
         });
 
         if (process.env.NODE_ENV === 'development') {

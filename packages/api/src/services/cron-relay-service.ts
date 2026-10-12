@@ -1,4 +1,4 @@
-import { logger } from '@babylon/shared';
+import { logger } from '@feed/shared';
 import type { NextRequest } from 'next/server';
 
 interface RelayResult {
@@ -18,12 +18,15 @@ export async function relayCronToStaging(
   request: NextRequest | { url: string; headers: Headers },
   routeName: string
 ): Promise<RelayResult> {
-  if (process.env.REDIRECT_CRON_STAGING !== 'true') {
+  if (
+    process.env.DEPLOYMENT_PLATFORM === 'cloudflare' ||
+    process.env.REDIRECT_CRON_STAGING !== 'true'
+  ) {
     return { forwarded: false };
   }
 
   const stagingBaseUrl =
-    process.env.CRON_STAGING_URL || 'https://staging.babylon.market';
+    process.env.CRON_STAGING_URL || 'https://staging.feed.fun';
   const stagingHost = stagingBaseUrl.replace(/^https?:\/\//, '');
   // Access headers safely - handle both NextRequest and plain Headers objects
   const headers = request.headers as

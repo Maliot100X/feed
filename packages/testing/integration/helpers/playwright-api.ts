@@ -11,6 +11,34 @@ import { type APIRequestContext, request } from '@playwright/test';
 import { existsSync, readFileSync } from 'fs';
 import path from 'path';
 
+interface SavedTokens {
+  TEST_USER_ID: string;
+  TEST_ACCESS_TOKEN: string;
+}
+
+function parseSavedTokens(raw: string): SavedTokens {
+  const data: { TEST_USER_ID?: unknown; TEST_ACCESS_TOKEN?: unknown } =
+    JSON.parse(raw);
+  if (
+    typeof data.TEST_USER_ID !== 'string' ||
+    !data.TEST_USER_ID ||
+    typeof data.TEST_ACCESS_TOKEN !== 'string' ||
+    !data.TEST_ACCESS_TOKEN
+  ) {
+    throw new Error(`Invalid token file ${tokenFile}`);
+  }
+  return {
+    TEST_USER_ID: data.TEST_USER_ID,
+    TEST_ACCESS_TOKEN: data.TEST_ACCESS_TOKEN,
+  };
+}
+
+function parseMeUserId(body: { user?: { id?: unknown } }): string | null {
+  return typeof body.user?.id === 'string' && body.user.id
+    ? body.user.id
+    : null;
+}
+
 const authFile = path.join(__dirname, '../../../.playwright/auth.json');
 const tokenFile = path.join(__dirname, '../../../.playwright/test-tokens.json');
 const rawBaseURL =
@@ -69,43 +97,35 @@ export async function initPlaywrightAPI(): Promise<{
     );
   }
 
-  let tokens: { TEST_USER_ID?: string; TEST_ACCESS_TOKEN?: string } | null =
-    null;
-  if (existsSync(tokenFile)) {
-    try {
-      tokens = JSON.parse(readFileSync(tokenFile, 'utf-8'));
-    } catch (error) {
-      console.warn(`⚠️  Could not read token file: ${error}`);
-    }
-  }
+  // Browser localStorage tokens in storageState are not sent as HTTP
+  // credentials, so the bearer token saved by auth setup is attached
+  // explicitly.
+  const tokens = existsSync(tokenFile)
+    ? parseSavedTokens(readFileSync(tokenFile, 'utf-8'))
+    : null;
 
-  apiRequest = await request.newContext({
+  const context = await request.newContext({
     storageState: authFile,
-    baseURL: baseURL,
+    baseURL,
+    extraHTTPHeaders: tokens
+      ? { Authorization: `Bearer ${tokens.TEST_ACCESS_TOKEN}` }
+      : undefined,
   });
 
-  try {
-    const response = await apiRequest.get(`${baseURL}/api/users/me`);
-    if (response.ok()) {
-      const userData = await response.json();
-      testUserId = userData.user?.id || tokens?.TEST_USER_ID || null;
-    } else {
-      testUserId = tokens?.TEST_USER_ID || null;
-    }
-  } catch (error) {
-    console.warn(`⚠️  Could not fetch user ID from API: ${error}`);
-    testUserId = tokens?.TEST_USER_ID || null;
-  }
-
-  if (!testUserId) {
+  // Readiness requires the API to confirm the identity; a saved user id is
+  // never substituted for a failed authentication.
+  const response = await context.get(`${baseURL}/api/users/me`);
+  const userId = response.ok() ? parseMeUserId(await response.json()) : null;
+  if (!userId || (tokens && tokens.TEST_USER_ID !== userId)) {
+    await context.dispose();
     throw new Error(
-      'Could not determine test user ID. Please ensure:\n' +
-        '1. Playwright auth setup has been run\n' +
-        '2. User is authenticated\n' +
-        '3. Token file exists at .playwright/test-tokens.json'
+      `Playwright API authentication failed (GET /api/users/me -> ${response.status()}). ` +
+        'Re-run: bunx playwright test --project=setup-integration-auth'
     );
   }
 
+  apiRequest = context;
+  testUserId = userId;
   return { apiRequest, testUserId };
 }
 

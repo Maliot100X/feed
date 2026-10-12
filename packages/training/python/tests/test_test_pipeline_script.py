@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import subprocess
+import sys
 import threading
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
@@ -11,7 +12,8 @@ import pytest
 
 
 def _venv_python() -> Path:
-    return Path(__file__).resolve().parents[1] / ".venv" / "bin" / "python"
+    # Run the smoke subprocess with the interpreter executing the test suite.
+    return Path(sys.executable)
 
 
 def _script_path() -> Path:
@@ -55,9 +57,9 @@ def _write_throughput_report(path: Path, gpu: str) -> None:
 
 
 def test_preflight_script_passes_with_real_local_checks(tmp_path: Path) -> None:
+    # The full preflight dry-runs the Tinker backend, so it needs the training extras.
+    pytest.importorskip("tinker", reason="full preflight requires the tinker SDK")
     venv_python = _venv_python()
-    if not venv_python.exists():
-        pytest.skip("training venv is not available for real smoke execution")
 
     export_dir = tmp_path / "export"
     _write_local_export(export_dir)
@@ -128,8 +130,6 @@ def test_preflight_script_passes_with_real_local_checks(tmp_path: Path) -> None:
 
 def test_preflight_script_rejects_invalid_throughput_report(tmp_path: Path) -> None:
     venv_python = _venv_python()
-    if not venv_python.exists():
-        pytest.skip("training venv is not available for real smoke execution")
 
     bad_report = tmp_path / "bad-throughput.json"
     bad_report.write_text(json.dumps({"gpu": "h100"}) + "\n", encoding="utf-8")

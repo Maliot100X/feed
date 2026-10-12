@@ -20,7 +20,56 @@ jobs:
   validate-scam-defense-python:
     name: Validate Scam Defense Python Pipeline
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 30
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+          cache-dependency-path: 'packages/training/python/requirements-ci.txt'
+
+      - name: Install Python dependencies
+        working-directory: packages/training/python
+        run: |
+          pip install --upgrade pip
+          pip install -r requirements-ci.txt
+          # CPU-only ML stack pinned to requirements-prod.lock.txt so torch-backed
+          # unit tests run instead of failing collection.
+          pip install torch==2.11.0 --index-url https://download.pytorch.org/whl/cpu
+          pip install transformers==5.3.0 peft==0.18.1 accelerate==1.13.0 kondo-gate
+          pip install -e . --no-deps
+
+      - name: Run Python training unit tests
+        working-directory: packages/training/python
+        # Every unit test module must collect and pass; integration/e2e suites need
+        # live services and run separately.
+        run: pytest -q tests --ignore=tests/integration --ignore=tests/e2e
+
+  python-integration:
+    name: Python Training Integration Tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    services:
+      # Disposable database matching the default URL in
+      # tests/integration/conftest.py, which creates the trajectories schema.
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: feed_test
+          POSTGRES_PASSWORD: test_password
+          POSTGRES_DB: feed_test
+        options: >-
+          --health-cmd "pg_isready -U feed_test -d feed_test"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+        ports:
+          - 5434:5432
 
     steps:
       - uses: actions/checkout@v4
@@ -39,30 +88,33 @@ jobs:
           pip install -r requirements-ci.txt
           pip install -e . --no-deps
 
-      - name: Run scam-defense pipeline tests
+      - name: Run integration tests (JSON + DB mode)
         working-directory: packages/training/python
-        run: |
-          rc=0
-          pytest -q \
-            tests/test_assemble_scam_defense_hf_dataset.py \
-            tests/test_retained_security_source_materialization.py \
-            tests/test_deduplicate_training_data.py \
-            tests/test_build_scam_defense_release.py \
-            tests/test_manage_scam_defense_release.py \
-            tests/test_check_scam_defense_release_health.py \
-            tests/test_check_rlvr_pipeline_health.py \
-            tests/test_manage_rlvr_release.py \
-            tests/test_verify_prompt_injection_dataset_coverage.py \
-            || rc=$?
-          # Exit code 5 = no tests collected (all skipped). Treat as success.
-          if [ "$rc" -eq 5 ]; then echo "All tests skipped (scripts not yet present) - OK"; exit 0; fi
-          exit $rc
+        run: pytest -q tests/integration
+        env:
+          DATABASE_URL: postgresql://feed_test:test_password@localhost:5434/feed_test
 
-      - name: Audit pinned Python dependencies
+  audit-python-dependencies:
+    name: Audit pinned Python dependencies (advisory)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    # Advisory until requirements-prod.lock.txt is upgraded and revalidated on the
+    # GPU stack; failures stay visible on the run but do not block merges.
+    continue-on-error: true
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+          cache-dependency-path: 'packages/training/python/requirements-ci.txt'
+
+      - name: Install pip-audit
+        run: pip install pip-audit
+
+      - name: Audit requirements-prod.lock.txt
         working-directory: packages/training/python
-        run: |
-          if [ -f scripts/audit_prod_dependencies.py ]; then
-            python scripts/audit_prod_dependencies.py
-          else
-            echo "audit_prod_dependencies.py not yet present - skipping"
-          fi
+        run: python scripts/analysis/audit_prod_dependencies.py

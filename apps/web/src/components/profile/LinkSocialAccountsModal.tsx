@@ -1,11 +1,10 @@
 'use client';
 
-import { cn, logger } from '@babylon/shared';
+import { cn } from '@feed/shared';
 import { Check, ExternalLink, Mail, Shield, X as XIcon } from 'lucide-react';
 import { useEffect, useState } from 'react';
 import { toast } from 'sonner';
 import { useTelegramMiniApp } from '@/components/providers/TelegramMiniAppProvider';
-import { useAuth } from '@/hooks/useAuth';
 import { getAuthToken } from '@/lib/auth';
 import { useAuthStore } from '@/stores/authStore';
 import { apiUrl } from '@/utils/api-url';
@@ -13,14 +12,13 @@ import { apiUrl } from '@/utils/api-url';
 /**
  * Link social accounts modal component for connecting social accounts.
  *
- * Provides a modal interface for linking email, Twitter, and Farcaster
+ * Provides a modal interface for linking email, Twitter
  * accounts. Handles account-link callbacks and updates user profile with
  * linked account information. Awards reputation points for social linking.
  *
  * Features:
- * - Email linking via Privy
+ * - Shows the account email (verified only when the server says so)
  * - Twitter OAuth linking
- * - Farcaster OAuth linking
  * - OAuth callback handling
  * - Points/reputation awards
  * - Loading states
@@ -48,35 +46,15 @@ export function LinkSocialAccountsModal({
   onClose,
 }: LinkSocialAccountsModalProps) {
   const { user, setUser } = useAuthStore();
-  const { refresh: _refresh } = useAuth();
   const { isMiniApp, linkAccount: linkTelegramSeamless } = useTelegramMiniApp();
   const [linking, setLinking] = useState<string | null>(null);
   const [confirmUnlinkTwitter, setConfirmUnlinkTwitter] = useState(false);
   const [unlinkingTwitter, setUnlinkingTwitter] = useState(false);
 
-  // Phase 2: Email comes from Babylon user record (set by Steward at login)
-  const privyEmail = user?.email ?? null;
-
-  // Phase 2: Social linking flows are handled via OAuth/SIWF redirects
-  // These stubs maintain API compatibility while Steward linking is implemented
-  const linkEmail = () => {
-    logger.info(
-      'Email linking via Steward — not yet implemented in UI',
-      {},
-      'LinkSocialAccountsModal'
-    );
-    toast.info(
-      'Email linking coming soon. Please sign in with your email directly.'
-    );
-  };
-  const linkFarcaster = () => {
-    logger.info(
-      'Farcaster linking via SIWF — not yet implemented in UI',
-      {},
-      'LinkSocialAccountsModal'
-    );
-    toast.info('Farcaster linking coming soon.');
-  };
+  // Email comes from the Feed user record (set by Steward at login). Only
+  // show it as verified when the server says so.
+  const accountEmail = user?.email ?? null;
+  const isEmailVerified = Boolean(accountEmail && user?.emailVerified);
 
   useEffect(() => {
     if (isOpen) return;
@@ -86,12 +64,6 @@ export function LinkSocialAccountsModal({
   }, [isOpen]);
 
   if (!isOpen) return null;
-
-  const handleEmailLink = () => {
-    if (!user?.id) return;
-    setLinking('email');
-    linkEmail();
-  };
 
   const handleTwitterOAuth = async () => {
     if (!user?.id) return;
@@ -144,12 +116,6 @@ export function LinkSocialAccountsModal({
     }
   };
 
-  const handleFarcasterAuth = () => {
-    if (!user?.id) return;
-    setLinking('farcaster');
-    linkFarcaster();
-  };
-
   const handleTelegramLink = () => {
     if (!user?.id) return;
     setLinking('telegram');
@@ -165,7 +131,7 @@ export function LinkSocialAccountsModal({
     } else {
       // Phase 2: Telegram linking outside mini-app — not yet implemented
       setLinking(null);
-      toast.info('Open Babylon in Telegram to link your Telegram account.');
+      toast.info('Open Feed in Telegram to link your Telegram account.');
     }
   };
 
@@ -199,47 +165,40 @@ export function LinkSocialAccountsModal({
             <div className="flex items-center gap-2">
               <Mail className="h-5 w-5" />
               <h3 className="font-semibold">Email</h3>
-              {privyEmail && (
-                <span className="ml-auto flex items-center gap-1 text-green-500 text-sm">
-                  <Check className="h-4 w-4" />
-                  Verified
+              {accountEmail && (
+                <span
+                  className={cn(
+                    'ml-auto flex items-center gap-1 text-sm',
+                    isEmailVerified ? 'text-green-500' : 'text-muted-foreground'
+                  )}
+                >
+                  {isEmailVerified && <Check className="h-4 w-4" />}
+                  {isEmailVerified ? 'Verified' : 'Unverified'}
                 </span>
               )}
             </div>
 
-            {privyEmail ? (
-              <div className="flex items-center gap-2 rounded-lg border border-green-500/20 bg-green-500/10 p-3">
-                <Check className="h-4 w-4 text-green-500" />
-                <span className="font-medium text-sm">{privyEmail}</span>
+            {accountEmail ? (
+              <div
+                className={cn(
+                  'flex items-center gap-2 rounded-lg border p-3',
+                  isEmailVerified
+                    ? 'border-green-500/20 bg-green-500/10'
+                    : 'border-border bg-muted/30'
+                )}
+              >
+                {isEmailVerified && (
+                  <Check className="h-4 w-4 text-green-500" />
+                )}
+                <span className="font-medium text-sm">{accountEmail}</span>
               </div>
             ) : (
-              <div className="space-y-2">
-                <div className="flex items-start gap-2 rounded-lg border border-blue-500/20 bg-blue-500/10 p-3">
-                  <Shield className="mt-0.5 h-4 w-4 shrink-0 text-blue-500" />
-                  <p className="text-muted-foreground text-xs">
-                    Link a verified email in Privy to enable notification emails
-                    and account recovery.
-                  </p>
-                </div>
-                <button
-                  onClick={handleEmailLink}
-                  disabled={linking === 'email'}
-                  className={cn(
-                    'w-full rounded-lg px-4 py-2 font-semibold transition-colors',
-                    'bg-[#0066FF] text-primary-foreground hover:bg-[#2952d9]',
-                    'disabled:cursor-not-allowed disabled:opacity-50',
-                    'flex items-center justify-center gap-2'
-                  )}
-                >
-                  {linking === 'email' ? (
-                    <span>Opening Privy...</span>
-                  ) : (
-                    <>
-                      <Mail className="h-4 w-4" />
-                      <span>Link my email to Privy</span>
-                    </>
-                  )}
-                </button>
+              <div className="flex items-start gap-2 rounded-lg border border-blue-500/20 bg-blue-500/10 p-3">
+                <Shield className="mt-0.5 h-4 w-4 shrink-0 text-blue-500" />
+                <p className="text-muted-foreground text-xs">
+                  Sign in with your email to attach it to your account and
+                  enable notification emails.
+                </p>
               </div>
             )}
           </div>
@@ -293,7 +252,7 @@ export function LinkSocialAccountsModal({
                 {confirmUnlinkTwitter && (
                   <div className="rounded-lg border border-red-500/20 bg-red-500/5 p-3">
                     <p className="text-muted-foreground text-xs">
-                      This disconnects your X account from Babylon. You can
+                      This disconnects your X account from Feed. You can
                       reconnect a different X account afterwards.
                     </p>
                     <div className="mt-3 flex items-center justify-end gap-2">
@@ -355,76 +314,6 @@ export function LinkSocialAccountsModal({
             )}
           </div>
 
-          {/* Farcaster */}
-          <div className="space-y-3">
-            <div className="flex items-center gap-2">
-              <svg
-                className="h-5 w-5"
-                viewBox="0 0 1000 1000"
-                fill="currentColor"
-              >
-                <path d="M257.778 155.556H742.222V844.444H671.111V528.889H670.414C662.554 441.677 589.258 373.333 500 373.333C410.742 373.333 337.446 441.677 329.586 528.889H328.889V844.444H257.778V155.556Z" />
-                <path d="M128.889 253.333L157.778 351.111H182.222V844.444H128.889V253.333Z" />
-                <path d="M871.111 253.333L842.222 351.111H817.778V844.444H871.111V253.333Z" />
-              </svg>
-              <h3 className="font-semibold">Farcaster</h3>
-              {user?.hasFarcaster && (
-                <span className="ml-auto flex items-center gap-1 text-green-500 text-sm">
-                  <Check className="h-4 w-4" />
-                  Verified
-                </span>
-              )}
-            </div>
-
-            {user?.hasFarcaster ? (
-              <div className="flex items-center gap-2 rounded-lg border border-green-500/20 bg-green-500/10 p-3">
-                <Check className="h-4 w-4 text-green-500" />
-                <span className="font-medium text-sm">
-                  @{user.farcasterUsername}
-                </span>
-                <a
-                  href={`https://farcaster.xyz/${user.farcasterUsername}`}
-                  target="_blank"
-                  rel="noopener noreferrer"
-                  className="ml-auto text-primary hover:text-primary/80"
-                >
-                  <ExternalLink className="h-4 w-4" />
-                </a>
-              </div>
-            ) : (
-              <div className="space-y-2">
-                <div className="flex items-start gap-2 rounded-lg border border-purple-500/20 bg-purple-500/10 p-3">
-                  <Shield className="mt-0.5 h-4 w-4 shrink-0 text-purple-500" />
-                  <p className="text-muted-foreground text-xs">
-                    Sign in with Farcaster to verify your account. A popup will
-                    open for authentication.
-                  </p>
-                </div>
-                <button
-                  onClick={handleFarcasterAuth}
-                  disabled={linking === 'farcaster'}
-                  className={cn(
-                    'w-full rounded-lg px-4 py-2 font-semibold transition-colors',
-                    'bg-[#8A63D2] text-white hover:bg-[#7952c4]',
-                    'disabled:cursor-not-allowed disabled:opacity-50',
-                    'flex items-center justify-center gap-2'
-                  )}
-                >
-                  {linking === 'farcaster' ? (
-                    <>
-                      <span>Connecting...</span>
-                    </>
-                  ) : (
-                    <>
-                      <Shield className="h-4 w-4" />
-                      <span>Sign in with Farcaster</span>
-                    </>
-                  )}
-                </button>
-              </div>
-            )}
-          </div>
-
           {/* Telegram */}
           <div className="space-y-3">
             <div className="flex items-center gap-2">
@@ -466,7 +355,7 @@ export function LinkSocialAccountsModal({
                   <p className="text-muted-foreground text-xs">
                     {isMiniApp
                       ? 'Link your Telegram account to earn points and unlock rewards.'
-                      : 'Open Babylon in Telegram to seamlessly link your account, or connect via Privy.'}
+                      : 'Open Feed in Telegram to seamlessly link your account.'}
                   </p>
                 </div>
                 <button

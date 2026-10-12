@@ -1,4 +1,4 @@
-import { createNotification, sendNotificationEmail } from '@babylon/api';
+import { createNotification, sendNotificationEmail } from '@feed/api';
 import {
   and,
   db,
@@ -11,7 +11,7 @@ import {
   or,
   positions,
   users,
-} from '@babylon/db';
+} from '@feed/db';
 import {
   isValidDeliveryChannel,
   isValidDigestFrequency,
@@ -20,7 +20,7 @@ import {
   type NotificationDigestFrequency,
   type NotificationDigestSettings,
   type PerformanceDigestNotificationData,
-} from '@babylon/shared';
+} from '@feed/shared';
 import { groupResolvedMarketOutcomes } from './market-resolution-notifications';
 
 interface DigestCandidateUser {
@@ -189,17 +189,23 @@ export async function buildDigestForUser(params: {
     (entry) => entry.points < 0
   ).length;
 
-  const topAgent = groupedOutcomes
-    .filter((entry) => entry.agentName)
-    .reduce<Map<string, number>>((acc, entry) => {
-      const agentName = entry.agentName!;
-      acc.set(agentName, Number((acc.get(agentName) ?? 0) + entry.points));
-      return acc;
-    }, new Map());
+  // Aggregate per agent ID (display names are not unique).
+  const topAgent = new Map<string, { name: string; points: number }>();
+  for (const entry of groupedOutcomes) {
+    if (!entry.agentName) continue;
+    const current = topAgent.get(entry.holderId);
+    topAgent.set(entry.holderId, {
+      name: entry.agentName,
+      points: Number(((current?.points ?? 0) + entry.points).toFixed(2)),
+    });
+  }
 
-  const topPerformingAgent = Array.from(topAgent.entries()).sort(
-    (left, right) => right[1] - left[1]
+  const topAgentEntry = Array.from(topAgent.values()).sort(
+    (left, right) => right.points - left.points
   )[0];
+  const topPerformingAgent = topAgentEntry
+    ? ([topAgentEntry.name, topAgentEntry.points] as const)
+    : undefined;
 
   const summary = [
     `${formatSignedPoints(netPointsChange)} points net`,

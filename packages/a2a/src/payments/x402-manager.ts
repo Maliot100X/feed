@@ -10,12 +10,11 @@ import {
   logger,
   type PaymentVerificationParams,
   type PaymentVerificationResult,
-} from '@babylon/shared';
+} from '@feed/shared';
 import {
   formatEther,
   hexlify,
   JsonRpcProvider,
-  type Provider,
   parseEther,
   randomBytes,
 } from 'ethers';
@@ -30,6 +29,21 @@ export interface X402Config {
   /** Max time for each JSON-RPC read (getTransaction / receipt). Prevents hung providers on serverless. */
   rpcReadTimeoutMs?: number;
   redis?: RedisClient; // Optional Redis client for persistence
+  /** Chain reader; defaults to a JsonRpcProvider for rpcUrl. */
+  provider?: ChainReader;
+}
+
+/**
+ * The chain reads payment verification needs (satisfied by ethers providers).
+ */
+export interface ChainReader {
+  getTransaction(
+    hash: string
+  ): Promise<{ from: string; to: string | null; value: bigint } | null>;
+  getTransactionReceipt(
+    hash: string
+  ): Promise<{ status: number | null; blockNumber: number } | null>;
+  getBlock(blockNumber: number): Promise<{ timestamp: number } | null>;
 }
 
 /**
@@ -38,6 +52,8 @@ export interface X402Config {
 export interface RedisClient {
   get(key: string): Promise<string | null>;
   set(key: string, value: string, options?: { ex?: number }): Promise<void>;
+  /** SET key value NX EX ttl. Returns true when the key was set. */
+  setIfAbsent(key: string, value: string, ttlSeconds: number): Promise<boolean>;
   del(key: string): Promise<void>;
   keys(pattern: string): Promise<string[]>;
 }
@@ -46,19 +62,31 @@ interface PendingPayment {
   request: PaymentRequest;
   createdAt: number;
   verified: boolean;
+  /** Transaction that satisfied this request (set once verified). */
+  verifiedTxHash?: string;
 }
 
 const PendingPaymentSchema = z.object({
   request: PaymentRequestSchema,
   createdAt: z.number(),
   verified: z.boolean(),
+  verifiedTxHash: z.string().optional(),
 });
 
 const REDIS_PREFIX = 'x402:payment:';
+/** Transaction hash -> requestId claims. Kept well beyond request expiry. */
+const TX_CLAIM_PREFIX = 'x402:tx:';
+const TX_CLAIM_TTL_SECONDS = 90 * 24 * 60 * 60;
+/** Allowed clock skew between request creation and the paying block. */
+const BLOCK_TIME_SKEW_SECONDS = 120;
+/** Process-local tx claims used when no Redis client is configured. */
+const localTxClaims = new Map<string, string>();
 
 export class X402Manager {
-  private provider: Provider;
-  private config: Required<Omit<X402Config, 'redis' | 'rpcReadTimeoutMs'>> & {
+  private provider: ChainReader;
+  private config: Required<
+    Omit<X402Config, 'redis' | 'rpcReadTimeoutMs' | 'provider'>
+  > & {
     redis?: RedisClient;
     rpcReadTimeoutMs: number;
   };
@@ -68,7 +96,7 @@ export class X402Manager {
   private inMemoryStore: Map<string, PendingPayment> = new Map();
 
   constructor(config: X402Config) {
-    this.provider = new JsonRpcProvider(config.rpcUrl);
+    this.provider = config.provider ?? new JsonRpcProvider(config.rpcUrl);
     this.config = {
       rpcUrl: config.rpcUrl,
       minPaymentAmount: config.minPaymentAmount || this.DEFAULT_MIN_PAYMENT,
@@ -273,7 +301,17 @@ export class X402Manager {
     }
 
     if (pending.verified) {
-      return { verified: true };
+      // A verified request stays bound to the transaction that satisfied it.
+      if (
+        pending.verifiedTxHash &&
+        pending.verifiedTxHash === verificationData.txHash.toLowerCase()
+      ) {
+        return { verified: true };
+      }
+      return {
+        verified: false,
+        error: 'Payment request was verified with a different transaction',
+      };
     }
 
     if (Date.now() > pending.request.expiresAt) {
@@ -329,47 +367,28 @@ export class X402Manager {
 
     const errors: string[] = [];
 
-    // For smart wallets (account abstraction), the tx.from might be the paymaster or smart wallet
-    // We need to be more lenient with sender validation
-    const fromMatch =
-      tx.from.toLowerCase() === pending.request.from.toLowerCase();
-
-    // Check if this might be a smart wallet transaction (has different from address)
-    const isSmartWallet = !fromMatch;
-
-    if (!fromMatch) {
-      logger.warn(
-        `[X402Manager] Sender mismatch: expected ${pending.request.from}, got ${tx.from}, treating as smart wallet`
+    // Sender must be the wallet the request was issued for. Smart-wallet /
+    // relayed transactions are not accepted: tx.from would be a bundler or
+    // paymaster, and accepting any sender would let anyone claim someone
+    // else's transfer to the same recipient.
+    if (tx.from.toLowerCase() !== pending.request.from.toLowerCase()) {
+      errors.push(
+        `Sender mismatch: expected ${pending.request.from}, got ${tx.from}`
       );
-      // For production, you may want to implement more sophisticated verification:
-      // - Check transaction trace for internal calls to the sender's smart wallet
-      // - Verify the smart wallet contract code/factory
     }
 
-    // Recipient validation - should be strict
-    const recipientMatch =
-      tx.to?.toLowerCase() === pending.request.to.toLowerCase();
-
-    if (!recipientMatch) {
-      // For smart wallets, tx.to could be an entrypoint. A robust solution would involve:
-      // 1. Decoding the transaction data to find the ultimate recipient.
-      // 2. Tracing the transaction to see internal calls.
-      // For now, we will reject if there is a direct mismatch, to be safe.
+    if (tx.to?.toLowerCase() !== pending.request.to.toLowerCase()) {
       errors.push(
         `Recipient mismatch: expected ${pending.request.to}, got ${tx.to}`
       );
     }
 
-    // Verify amount (with some tolerance for gas and fees)
+    // tx.value is the transferred amount (gas is paid separately), so the
+    // full requested amount is required.
     const requestedAmount = BigInt(pending.request.amount);
-    const paidAmount = tx.value;
-
-    // Allow for 1% tolerance for gas fees in smart wallet transactions
-    const minAcceptableAmount = (requestedAmount * 99n) / 100n;
-
-    if (paidAmount < minAcceptableAmount) {
+    if (tx.value < requestedAmount) {
       errors.push(
-        `Insufficient payment: expected at least ${minAcceptableAmount}, got ${paidAmount}`
+        `Insufficient payment: expected at least ${requestedAmount}, got ${tx.value}`
       );
     }
 
@@ -377,19 +396,85 @@ export class X402Manager {
       return { verified: false, error: errors.join('; ') };
     }
 
-    // Mark as verified
+    // The paying transaction must not predate the request.
+    const block = await this.withRpcTimeout(
+      'getBlock',
+      this.provider.getBlock(txReceipt.blockNumber)
+    );
+    if (!block) {
+      return { verified: false, error: 'Transaction block not found' };
+    }
+    const requestCreatedSeconds = Math.floor(pending.createdAt / 1000);
+    if (block.timestamp < requestCreatedSeconds - BLOCK_TIME_SKEW_SECONDS) {
+      return {
+        verified: false,
+        error: 'Transaction predates the payment request',
+      };
+    }
+
+    // Atomically bind this transaction to this request so it cannot satisfy
+    // any other request (including concurrent verifications).
+    const claimed = await this.claimTransaction(
+      verificationData.txHash,
+      verificationData.requestId
+    );
+    if (!claimed) {
+      return {
+        verified: false,
+        error: 'Transaction has already been used for another payment',
+      };
+    }
+
     pending.verified = true;
+    pending.verifiedTxHash = verificationData.txHash.toLowerCase();
     await this.updatePayment(verificationData.requestId, pending);
 
     logger.info(
       `[X402Manager] Payment verified successfully: ${verificationData.txHash}`,
-      {
-        requestId: verificationData.requestId,
-        isSmartWallet,
-      }
+      { requestId: verificationData.requestId }
     );
 
     return { verified: true };
+  }
+
+  /**
+   * Claim txHash for requestId. Succeeds if unclaimed or already claimed by
+   * the same request (idempotent retry).
+   */
+  private async claimTransaction(
+    txHash: string,
+    requestId: string
+  ): Promise<boolean> {
+    const key = `${TX_CLAIM_PREFIX}${txHash.toLowerCase()}`;
+    if (this.config.redis) {
+      if (
+        await this.config.redis.setIfAbsent(
+          key,
+          requestId,
+          TX_CLAIM_TTL_SECONDS
+        )
+      ) {
+        return true;
+      }
+      return (await this.config.redis.get(key)) === requestId;
+    }
+    const existing = localTxClaims.get(key);
+    if (existing === undefined) {
+      localTxClaims.set(key, requestId);
+      return true;
+    }
+    return existing === requestId;
+  }
+
+  /**
+   * Check that a transaction exists on chain and succeeded.
+   */
+  async isTransactionSuccessful(txHash: string): Promise<boolean> {
+    const receipt = await this.withRpcTimeout(
+      'getTransactionReceipt',
+      this.provider.getTransactionReceipt(txHash)
+    );
+    return receipt !== null && receipt.status === 1;
   }
 
   /**

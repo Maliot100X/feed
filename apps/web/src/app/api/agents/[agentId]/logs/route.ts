@@ -104,9 +104,9 @@
  * @see {@link /src/app/agents/[agentId]/page.tsx} Logs UI
  */
 
-import { agentService } from '@babylon/agents';
-import { authenticateUser, withErrorHandling } from '@babylon/api';
-import { toISO } from '@babylon/shared';
+import { agentService } from '@feed/agents';
+import { authenticateUser, withErrorHandling } from '@feed/api';
+import { toISO } from '@feed/shared';
 import type { NextRequest } from 'next/server';
 import { NextResponse } from 'next/server';
 

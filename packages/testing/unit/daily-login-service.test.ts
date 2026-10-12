@@ -1,9 +1,7 @@
 /**
  * Daily Login Service - Comprehensive Unit Tests
  *
- * Tests core logic without pulling in @babylon/api (which has heavy deps).
- * These functions MUST match the implementations in daily-login-service.ts.
- * Any changes to service logic should be reflected here.
+ * Exercises the exported pure helpers of daily-login-service.ts directly.
  *
  * Covers:
  * - Boundary conditions at exact timing thresholds
@@ -13,7 +11,13 @@
  */
 
 import { describe, expect, test } from 'bun:test';
-import { DAILY_LOGIN, POINTS } from '@babylon/shared';
+import { DAILY_LOGIN, POINTS } from '@feed/shared';
+import {
+  getDailyReward,
+  getMilestoneBonus,
+  getNextMilestone,
+  getClaimStatus as serviceGetClaimStatus,
+} from '../../api/src/services/daily-login-service';
 
 // ─── Test Helpers ────────────────────────────────────────────────────────────
 
@@ -39,89 +43,12 @@ const DAILY_REWARDS = [
   POINTS.DAILY_LOGIN_DAY_7,
 ] as const;
 
-/**
- * Pure function implementations matching daily-login-service.ts
- * Keep these in sync with the service!
- */
-function getDailyReward(streakDay: number): number {
-  // Math.floor ensures floats like 1.9 are handled predictably (treated as day 1)
-  const idx = Math.floor(Math.max(0, streakDay - 1)) % DAILY_LOGIN.CYCLE_LENGTH;
-  return DAILY_REWARDS[idx] ?? DAILY_REWARDS[0];
-}
-
-function getMilestoneBonus(streak: number): number {
-  return MILESTONES.find((m) => m.days === streak)?.bonus ?? 0;
-}
-
-function getNextMilestone(streak: number): {
-  nextMilestone: number;
-  daysUntilMilestone: number;
-} {
-  // Clamp to 0 to handle negative input defensively (matching service)
-  const safeStreak = Math.max(0, streak);
-  const next = MILESTONES.find((m) => safeStreak < m.days);
-  return next
-    ? { nextMilestone: next.days, daysUntilMilestone: next.days - safeStreak }
-    : { nextMilestone: 0, daysUntilMilestone: 0 };
-}
-
-/**
- * getClaimStatus - with optional `now` parameter for deterministic testing
- * When `now` is not provided, uses Date.now() (matches production behavior)
- */
-function getClaimStatus(
-  lastClaimMs: number | null,
-  now: number = Date.now()
-): {
-  canClaim: boolean;
-  shouldResetStreak: boolean;
-  timeUntilClaim: number;
-  timeUntilReset: number;
-} {
-  if (lastClaimMs === null) {
-    return {
-      canClaim: true,
-      shouldResetStreak: false,
-      timeUntilClaim: 0,
-      timeUntilReset: 0,
-    };
-  }
-
-  // Clamp to 0 to handle clock skew (matching service)
-  const elapsed = Math.max(0, now - lastClaimMs);
-  const { MIN_CLAIM_INTERVAL_MS, GRACE_PERIOD_MS } = DAILY_LOGIN;
-
-  if (elapsed < MIN_CLAIM_INTERVAL_MS) {
-    return {
-      canClaim: false,
-      shouldResetStreak: false,
-      timeUntilClaim: MIN_CLAIM_INTERVAL_MS - elapsed,
-      timeUntilReset: GRACE_PERIOD_MS - elapsed,
-    };
-  }
-
-  if (elapsed < GRACE_PERIOD_MS) {
-    return {
-      canClaim: true,
-      shouldResetStreak: false,
-      timeUntilClaim: 0,
-      timeUntilReset: GRACE_PERIOD_MS - elapsed,
-    };
-  }
-
-  return {
-    canClaim: true,
-    shouldResetStreak: true,
-    timeUntilClaim: 0,
-    timeUntilReset: 0,
-  };
-}
-
-function formatTimeRemaining(ms: number): string {
-  if (ms <= 0) return 'Now';
-  const hours = Math.floor(ms / HOUR);
-  const minutes = Math.floor((ms % HOUR) / MINUTE);
-  return hours > 0 ? `${hours}h ${minutes}m` : `${minutes}m`;
+/** Adapter: these tests express the last claim as epoch milliseconds. */
+function getClaimStatus(lastClaimMs: number | null, now: number = Date.now()) {
+  return serviceGetClaimStatus(
+    lastClaimMs === null ? null : new Date(lastClaimMs),
+    now
+  );
 }
 
 // ─── Constants Tests ─────────────────────────────────────────────────────────
@@ -560,96 +487,6 @@ describe('Daily Login - Total Points Calculation', () => {
 });
 
 // ─── Streak State Transitions ────────────────────────────────────────────────
-
-describe('Daily Login - Streak State Transitions', () => {
-  test('streak increments on valid claim within grace', () => {
-    const currentStreak = 5;
-    const shouldReset = false;
-    const newStreak = shouldReset ? 1 : currentStreak + 1;
-    expect(newStreak).toBe(6);
-  });
-
-  test('streak resets to 1 on claim after grace expires', () => {
-    const currentStreak = 50;
-    const shouldReset = true;
-    const newStreak = shouldReset ? 1 : currentStreak + 1;
-    expect(newStreak).toBe(1);
-  });
-
-  test('longestStreak updates when current exceeds it', () => {
-    const cases = [
-      { current: 10, newStreak: 11, expected: 11 },
-      { current: 10, newStreak: 10, expected: 10 },
-      { current: 10, newStreak: 5, expected: 10 },
-      { current: 0, newStreak: 1, expected: 1 },
-    ];
-
-    for (const { current, newStreak, expected } of cases) {
-      expect(Math.max(current, newStreak)).toBe(expected);
-    }
-  });
-});
-
-// ─── formatTimeRemaining Tests ───────────────────────────────────────────────
-
-describe('Daily Login - formatTimeRemaining', () => {
-  describe('zero and negative values', () => {
-    test('0 returns "Now"', () => {
-      expect(formatTimeRemaining(0)).toBe('Now');
-    });
-
-    test('negative values return "Now"', () => {
-      expect(formatTimeRemaining(-1)).toBe('Now');
-      expect(formatTimeRemaining(-HOUR)).toBe('Now');
-      expect(formatTimeRemaining(-Number.MAX_SAFE_INTEGER)).toBe('Now');
-    });
-  });
-
-  describe('minutes only (< 1 hour)', () => {
-    test('1 minute', () => {
-      expect(formatTimeRemaining(MINUTE)).toBe('1m');
-    });
-
-    test('30 minutes', () => {
-      expect(formatTimeRemaining(30 * MINUTE)).toBe('30m');
-    });
-
-    test('59 minutes', () => {
-      expect(formatTimeRemaining(59 * MINUTE)).toBe('59m');
-    });
-
-    test('less than 1 minute rounds down to 0m', () => {
-      expect(formatTimeRemaining(30 * SECOND)).toBe('0m');
-    });
-  });
-
-  describe('hours and minutes', () => {
-    test('exactly 1 hour', () => {
-      expect(formatTimeRemaining(HOUR)).toBe('1h 0m');
-    });
-
-    test('1 hour 30 minutes', () => {
-      expect(formatTimeRemaining(HOUR + 30 * MINUTE)).toBe('1h 30m');
-    });
-
-    test('23 hours 59 minutes', () => {
-      expect(formatTimeRemaining(23 * HOUR + 59 * MINUTE)).toBe('23h 59m');
-    });
-
-    test('24 hours', () => {
-      expect(formatTimeRemaining(24 * HOUR)).toBe('24h 0m');
-    });
-  });
-
-  describe('edge cases', () => {
-    test('very large values format correctly', () => {
-      const oneWeek = 7 * 24 * HOUR;
-      expect(formatTimeRemaining(oneWeek)).toBe('168h 0m');
-    });
-  });
-});
-
-// ─── Invariant Tests ─────────────────────────────────────────────────────────
 
 describe('Daily Login - Invariants', () => {
   test('daily rewards are always positive', () => {

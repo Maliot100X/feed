@@ -27,14 +27,12 @@
  * const kind = resolveUserIdentifierKind('did:privy:abc123');
  * // Returns 'privyId'
  * ```
- *
- * Further detail: `packages/shared/src/utils/USER_IDENTIFIER.md`.
  */
 import { isValidSnowflakeId } from './snowflake';
 
 export function resolveUserIdentifierKind(
   identifier: string
-): 'id' | 'privyId' | 'stewardId' | 'username' {
+): 'id' | 'privyId' | 'username' {
   // Check 1: Primary key (fastest index) - UUID or snowflake
   // WHY check UUID first? UUIDs are the most common ID format and have the fastest index (PK)
   // WHY this regex? Matches standard UUID format (versions 1-8, plus variant bits [89ab])
@@ -62,14 +60,8 @@ export function resolveUserIdentifierKind(
     return 'privyId';
   }
 
-  // Check 2b: Unique index - Steward ID (UUID v4 that isn't a Babylon PK)
-  // Steward issues standard UUID v4 tokens: xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx
-  // The UUID regex above already returns 'id' for valid UUID-format IDs.
-  // Steward IDs are NOT stored as Babylon PKs — Babylon uses snowflake IDs.
-  // So if we reach here with a UUID-like string, re-check: it won't have been
-  // caught above since Babylon PKs are snowflakes, not UUIDs. No change needed.
-  // (UUID-format Steward IDs ARE caught by the uuidRegex above and return 'id',
-  // but auth-middleware looks up by stewardId explicitly, not via this function.)
+  // Steward IDs are never classified here: auth-middleware looks them up
+  // explicitly by stewardId. A UUID-shaped value is treated as a primary key.
 
   // Check 3: Functional index (slower) - Username (default)
   // WHY default to username? Conservative approach - if it doesn't match id or privyId patterns,

@@ -5,7 +5,6 @@
  * is authenticated. This sets up:
  * - Status bar theming
  * - Android back button handling
- * - Push notifications (when infrastructure is ready)
  * - App lifecycle listeners
  */
 
@@ -18,19 +17,28 @@ interface NativeInitOptions {
   navigate: (path: string) => void;
 }
 
-let initialized = false;
+let initialization: Promise<void> | null = null;
 
 /**
  * Initialize all native Capacitor features.
- * Safe to call multiple times — only runs once.
+ * Safe to call multiple times — runs once; a failed attempt can be retried.
  */
-export async function initNativeFeatures({
+export function initNativeFeatures(options: NativeInitOptions): Promise<void> {
+  if (!isNativePlatform()) return Promise.resolve();
+  if (!initialization) {
+    initialization = runNativeInit(options).catch((error: Error) => {
+      // Allow a later call to retry instead of suppressing init forever.
+      initialization = null;
+      throw error;
+    });
+  }
+  return initialization;
+}
+
+async function runNativeInit({
   theme,
   navigate,
 }: NativeInitOptions): Promise<void> {
-  if (!isNativePlatform() || initialized) return;
-  initialized = true;
-
   await setStatusBarStyle(theme);
   await initAppLifecycle({ navigate });
 

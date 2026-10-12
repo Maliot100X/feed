@@ -11,20 +11,23 @@ import { OverviewTab } from '@/components/rewards/v2/overview-tab';
 import { TabNavigation } from '@/components/rewards/v2/tab-navigation';
 import { PageContainer } from '@/components/shared/PageContainer';
 import { useAuth } from '@/hooks/useAuth';
+import { useLoginModal } from '@/hooks/useLoginModal';
 
 type Tab = 'overview' | 'achievements' | 'challenges';
 
 export default function RewardsPage() {
   const router = useRouter();
-  const { ready, authenticated, login, refresh } = useAuth();
+  const { ready, authenticated, refresh } = useAuth();
+  const { queueLoginModal } = useLoginModal();
 
   // Auth required — redirect to feed and show login
   useEffect(() => {
     if (!ready || authenticated) return;
-    router.push('/feed');
-    const timer = setTimeout(() => login(), 500);
-    return () => clearTimeout(timer);
-  }, [ready, authenticated, router, login]);
+    // Queue the login modal before leaving: a timer started here would be
+    // cancelled by this page's unmount and the modal would never open.
+    queueLoginModal();
+    router.replace('/feed');
+  }, [ready, authenticated, router, queueLoginModal]);
 
   const searchParams = useSearchParams();
 

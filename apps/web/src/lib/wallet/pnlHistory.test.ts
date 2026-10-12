@@ -85,6 +85,25 @@ describe('buildScopedPnlHistoryPoints', () => {
   });
 });
 
+describe('buildScopedPnlHistoryPoints downsampling', () => {
+  it('never returns more than maxPoints and ends on the latest point', () => {
+    const start = Date.UTC(2026, 0, 1);
+    const snapshots = Array.from({ length: 25 }, (_, i) => ({
+      userId: 'u1',
+      snapshotAt: new Date(start + i * 3_600_000),
+      currentPnL: i,
+    }));
+    const points = buildScopedPnlHistoryPoints({
+      now: new Date(start + 30 * 3_600_000),
+      scopeUserIds: ['u1'],
+      snapshots,
+      maxPoints: 10,
+    });
+    expect(points.length).toBeLessThanOrEqual(10);
+    expect(points.at(-1)?.value).toBe(24);
+  });
+});
+
 describe('getHourBoundary', () => {
   it('normalizes dates to the top of the UTC hour', () => {
     expect(

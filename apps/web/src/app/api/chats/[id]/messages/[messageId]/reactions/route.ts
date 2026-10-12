@@ -16,8 +16,7 @@ import {
   rateLimitError,
   successResponse,
   withErrorHandling,
-} from '@babylon/api';
-import { requireNftChatAccess } from '@babylon/api/services/nft-chat-gating-service';
+} from '@feed/api';
 import {
   and,
   asSystem,
@@ -28,12 +27,12 @@ import {
   eq,
   messageReactions,
   messages,
-} from '@babylon/db';
+} from '@feed/db';
 import {
   ALLOWED_REACTION_EMOJI_SET,
   ChatMessageReactionCreateSchema,
   generateSnowflakeId,
-} from '@babylon/shared';
+} from '@feed/shared';
 import type { NextRequest } from 'next/server';
 
 async function requireChatAccess(
@@ -64,8 +63,6 @@ async function requireChatAccess(
       'read'
     );
   }
-
-  await requireNftChatAccess(user, chatId);
 }
 
 async function requireMessageInChat(chatId: string, messageId: string) {

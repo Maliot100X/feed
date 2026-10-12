@@ -6,47 +6,17 @@
  * Provides high-level functions for broadcasting to channels and chat rooms.
  */
 
-import { logger, type MessageMetadata } from '@babylon/shared';
+import { logger, type MessageMetadata } from '@feed/shared';
 import { publishEvent, type RealtimeChannel } from '../realtime';
 import type { JsonValue } from '../types';
 
 export type Channel = RealtimeChannel;
-
-export interface SSEClient {
-  id: string;
-  userId: string;
-  channels: Set<Channel>;
-  controller: ReadableStreamDefaultController;
-  lastPing: number;
-}
 
 export interface BroadcastMessage {
   channel: Channel;
   type: string;
   data: Record<string, JsonValue>;
   timestamp: number;
-}
-
-class NoopBroadcaster {
-  getStats() {
-    return {
-      totalClients: 0,
-      clientsByChannel: {},
-      redisEnabled: true,
-    };
-  }
-  cleanup() {
-    // no-op
-  }
-}
-
-let broadcasterInstance: NoopBroadcaster | null = null;
-
-export function getEventBroadcaster(): NoopBroadcaster {
-  if (!broadcasterInstance) {
-    broadcasterInstance = new NoopBroadcaster();
-  }
-  return broadcasterInstance;
 }
 
 /**
@@ -175,20 +145,28 @@ export interface MessageActivityData {
   contentPreview: string;
 }
 
-/**
- * Unified agent activity event structure.
- */
-export interface AgentActivityEvent {
-  type: 'trade' | 'post' | 'comment' | 'message';
-  agentId: string;
-  agentName: string;
-  timestamp: number;
-  data:
-    | TradeActivityData
-    | PostActivityData
-    | CommentActivityData
-    | MessageActivityData;
+/** Activity type to payload mapping (discriminates `data` by `type`). */
+interface AgentActivityDataByType {
+  trade: TradeActivityData;
+  post: PostActivityData;
+  comment: CommentActivityData;
+  message: MessageActivityData;
 }
+
+export type AgentActivityType = keyof AgentActivityDataByType;
+
+/**
+ * Unified agent activity event structure; `data` matches `type`.
+ */
+export type AgentActivityEvent = {
+  [K in AgentActivityType]: {
+    type: K;
+    agentId: string;
+    agentName: string;
+    timestamp: number;
+    data: AgentActivityDataByType[K];
+  };
+}[AgentActivityType];
 
 /**
  * Broadcast an agent activity event to the agent's SSE channel.
@@ -201,13 +179,13 @@ export interface AgentActivityEvent {
  * @param activityType - Type of activity (trade, post, comment, message)
  * @param data - Activity-specific data
  */
-export async function broadcastAgentActivity(
+export async function broadcastAgentActivity<T extends AgentActivityType>(
   agentId: string,
   agentName: string,
-  activityType: AgentActivityEvent['type'],
-  data: AgentActivityEvent['data']
+  activityType: T,
+  data: AgentActivityDataByType[T]
 ): Promise<void> {
-  const activity: AgentActivityEvent = {
+  const activity = {
     type: activityType,
     agentId,
     agentName,

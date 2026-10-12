@@ -3,8 +3,8 @@ import type { CapacitorConfig } from '@capacitor/cli';
 const serverUrl = process.env.CAPACITOR_SERVER_URL;
 
 const config: CapacitorConfig = {
-  appId: 'market.babylon.app',
-  appName: 'Babylon',
+  appId: 'fun.feed.app',
+  appName: 'feed',
   webDir: 'out',
   server: {
     ...(serverUrl ? { url: serverUrl, cleartext: true } : {}),

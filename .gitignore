@@ -58,9 +58,6 @@ apps/*/.env.local
 .secrets
 .secrets.local
 
-# vercel
-.vercel
-
 # typescript
 *.tsbuildinfo
 next-env.d.ts
@@ -168,13 +165,22 @@ apps/mobile-poc/
 /dedup-review-queue.json
 tools/e2e/.chroma/
 tools/e2e/test-results/
+tools/dag-visualizer/test-results/
 apps/web/runs/dag-traces/
 runs/simulation-data/
 
-# Training diagnostic artifacts
+# Training diagnostic artifacts and local run output
 packages/training/python/*.json
-packages/training/python/*.logpackages/training/python/shared_model_checkpoints/
+packages/training/python/*.log
+packages/training/curriculum_state.json
+packages/training/python/pipeline-*-run/
+packages/training/python/continuous_rl_checkpoints/
 
 # Model checkpoints
 packages/training/python/shared_model_checkpoints/
 output/
+
+# Cloudflare build output and local credentials
+.open-next/
+.wrangler/
+.dev.vars*

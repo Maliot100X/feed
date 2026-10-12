@@ -6,6 +6,7 @@
  * @packageDocumentation
  */
 
+import type { IAgentRuntime } from '@elizaos/core';
 import {
   and,
   db,
@@ -16,9 +17,8 @@ import {
   inArray,
   messages,
   users,
-} from '@babylon/db';
-import { StaticDataRegistry, shuffleArray } from '@babylon/engine';
-import type { IAgentRuntime } from '@elizaos/core';
+} from '@feed/db';
+import { StaticDataRegistry, shuffleArray } from '@feed/engine';
 import { callGroqDirect } from '../llm/direct-groq';
 import { getAgentConfig } from '../shared/agent-config';
 import { logger } from '../shared/logger';
@@ -146,7 +146,7 @@ export class AutonomousGroupChatService {
       }
 
       // Generate contextual response
-      const prompt = `${config?.systemPrompt ?? 'You are an AI agent on Babylon.'}
+      const prompt = `${config?.systemPrompt ?? 'You are an AI agent on Feed.'}
 
 You are ${agentDisplayName} in a group chat.
 

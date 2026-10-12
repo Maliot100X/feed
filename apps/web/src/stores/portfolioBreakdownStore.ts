@@ -1,10 +1,8 @@
-import {
-  type PortfolioBreakdownSnapshot,
-  toNumber,
-} from '@babylon/engine/client';
+import { type PortfolioBreakdownSnapshot, toNumber } from '@feed/engine/client';
 import { useCallback, useEffect, useRef } from 'react';
 import { create } from 'zustand';
 import { useShallow } from 'zustand/react/shallow';
+import { apiFetch } from '@/utils/api-fetch';
 
 interface PortfolioBreakdownState {
   data: PortfolioBreakdownSnapshot | null;
@@ -13,7 +11,13 @@ interface PortfolioBreakdownState {
   lastFetchedAt: number | null;
   userId: string | null;
   fetchPromise: Promise<void> | null;
+  /** Identity of the latest fetch; only it may commit results. */
+  fetchSeq: number;
   pollingInterval: ReturnType<typeof setInterval> | null;
+  /** User the active polling interval belongs to. */
+  pollingUserId: string | null;
+  /** Bumped whenever polling is (re)started; stale unsubscribes are ignored. */
+  pollingGeneration: number;
   subscriberCount: number;
   fetchPortfolioBreakdown: (userId: string, force?: boolean) => Promise<void>;
   invalidate: () => void;
@@ -24,30 +28,15 @@ interface PortfolioBreakdownState {
 
 const CACHE_TTL = 5000;
 
-export function isAbortError(error: unknown): boolean {
-  if (error instanceof DOMException && error.name === 'AbortError') {
-    return true;
-  }
-  if (error instanceof Error && error.name === 'AbortError') {
-    return true;
-  }
-  return false;
-}
-
 export async function fetchPortfolioBreakdownSnapshot(
-  userId: string,
-  signal: AbortSignal
+  userId: string
 ): Promise<PortfolioBreakdownSnapshot> {
   let breakdownRes: Response;
   try {
-    breakdownRes = await fetch(
-      `/api/users/${encodeURIComponent(userId)}/portfolio-breakdown`,
-      { signal }
+    breakdownRes = await apiFetch(
+      `/api/users/${encodeURIComponent(userId)}/portfolio-breakdown`
     );
-  } catch (error) {
-    if (signal.aborted || isAbortError(error)) {
-      throw error;
-    }
+  } catch {
     throw new Error('Failed to fetch portfolio breakdown');
   }
 
@@ -58,10 +47,7 @@ export async function fetchPortfolioBreakdownSnapshot(
   let breakdownJson: Record<string, unknown>;
   try {
     breakdownJson = (await breakdownRes.json()) as Record<string, unknown>;
-  } catch (error) {
-    if (signal.aborted || isAbortError(error)) {
-      throw error;
-    }
+  } catch {
     throw new Error('Failed to parse portfolio breakdown');
   }
 
@@ -99,7 +85,10 @@ export const usePortfolioBreakdownStore = create<PortfolioBreakdownState>(
     lastFetchedAt: null,
     userId: null,
     fetchPromise: null,
+    fetchSeq: 0,
     pollingInterval: null,
+    pollingUserId: null,
+    pollingGeneration: 0,
     subscriberCount: 0,
 
     fetchPortfolioBreakdown: async (userId: string, force = false) => {
@@ -107,10 +96,6 @@ export const usePortfolioBreakdownStore = create<PortfolioBreakdownState>(
 
       if (state.fetchPromise && state.userId === userId) {
         return state.fetchPromise;
-      }
-
-      if (state.fetchPromise && state.userId !== userId) {
-        await state.fetchPromise;
       }
 
       const currentState = get();
@@ -126,6 +111,9 @@ export const usePortfolioBreakdownStore = create<PortfolioBreakdownState>(
       }
 
       const requestedUserId = userId;
+      const seq = currentState.fetchSeq + 1;
+      const isCurrent = () =>
+        get().fetchSeq === seq && get().userId === requestedUserId;
 
       const fetchPromise = (async () => {
         const isInitialLoad =
@@ -136,25 +124,17 @@ export const usePortfolioBreakdownStore = create<PortfolioBreakdownState>(
         }
         set({ error: null, userId: requestedUserId });
 
-        const abortController = new AbortController();
-
         try {
-          const nextData = await fetchPortfolioBreakdownSnapshot(
-            requestedUserId,
-            abortController.signal
-          );
-
-          if (get().userId !== requestedUserId) {
-            return;
-          }
-
+          const nextData =
+            await fetchPortfolioBreakdownSnapshot(requestedUserId);
+          if (!isCurrent()) return;
           set({
             data: nextData,
             lastFetchedAt: Date.now(),
             error: null,
           });
         } catch (error) {
-          if (get().userId === requestedUserId && !isAbortError(error)) {
+          if (isCurrent()) {
             set({
               error:
                 error instanceof Error
@@ -163,30 +143,29 @@ export const usePortfolioBreakdownStore = create<PortfolioBreakdownState>(
             });
           }
         } finally {
-          if (get().userId === requestedUserId) {
-            set({ loading: false, fetchPromise: null });
-          }
+          if (get().fetchSeq === seq) set({ fetchPromise: null });
+          if (isCurrent()) set({ loading: false });
         }
       })();
 
-      set({ fetchPromise });
+      set({ fetchPromise, fetchSeq: seq });
       return fetchPromise;
     },
 
     setUserId: (userId: string | null) => {
       const state = get();
       if (state.userId !== userId) {
-        if (state.pollingInterval) {
-          clearInterval(state.pollingInterval);
-        }
+        // Keep polling ownership intact: subscribe() restarts polling for
+        // the new user; here we only drop the previous user's data and any
+        // in-flight request.
         set({
           data: null,
           error: null,
+          loading: false,
           lastFetchedAt: null,
           userId,
           fetchPromise: null,
-          pollingInterval: null,
-          subscriberCount: 0,
+          fetchSeq: state.fetchSeq + 1,
         });
       }
     },
@@ -207,48 +186,58 @@ export const usePortfolioBreakdownStore = create<PortfolioBreakdownState>(
         lastFetchedAt: null,
         userId: null,
         fetchPromise: null,
+        fetchSeq: state.fetchSeq + 1,
         pollingInterval: null,
+        pollingUserId: null,
+        pollingGeneration: state.pollingGeneration + 1,
         subscriberCount: 0,
       });
     },
 
+    // Polling belongs to exactly one user; subscribing for a different user
+    // restarts it, and unsubscribes from an earlier generation are no-ops.
     subscribe: (userId: string, intervalMs: number) => {
       const state = get();
 
-      if (state.pollingInterval && state.userId !== userId) {
-        clearInterval(state.pollingInterval);
-        set({ pollingInterval: null, subscriberCount: 0, userId });
-      }
-
-      const newCount = state.subscriberCount + 1;
-      set({ subscriberCount: newCount, userId });
-
-      if (newCount === 1) {
-        get().fetchPortfolioBreakdown(userId);
-
+      let generation = state.pollingGeneration;
+      if (state.pollingInterval === null || state.pollingUserId !== userId) {
+        if (state.pollingInterval) clearInterval(state.pollingInterval);
+        generation = state.pollingGeneration + 1;
         const interval = setInterval(() => {
-          const currentState = get();
-          if (currentState.userId === userId) {
-            currentState.fetchPortfolioBreakdown(userId, true);
+          const current = get();
+          if (current.userId === userId) {
+            void current.fetchPortfolioBreakdown(userId, true);
           }
         }, intervalMs);
-
-        set({ pollingInterval: interval });
+        set({
+          pollingInterval: interval,
+          pollingUserId: userId,
+          pollingGeneration: generation,
+          subscriberCount: 1,
+          userId,
+        });
+        void get().fetchPortfolioBreakdown(userId);
+      } else {
+        set({ subscriberCount: state.subscriberCount + 1 });
       }
 
+      let active = true;
       return () => {
-        const currentState = get();
-        // Stale cleanup from a previous userId — ignore to avoid
-        // decrementing the new userId's subscriber count.
-        if (currentState.userId !== userId) return;
-
-        const updatedCount = currentState.subscriberCount - 1;
-        set({ subscriberCount: updatedCount });
-
-        if (updatedCount === 0 && currentState.pollingInterval) {
-          clearInterval(currentState.pollingInterval);
-          set({ pollingInterval: null });
+        if (!active) return;
+        active = false;
+        const current = get();
+        if (current.pollingGeneration !== generation) return;
+        const remaining = current.subscriberCount - 1;
+        if (remaining > 0) {
+          set({ subscriberCount: remaining });
+          return;
         }
+        if (current.pollingInterval) clearInterval(current.pollingInterval);
+        set({
+          subscriberCount: 0,
+          pollingInterval: null,
+          pollingUserId: null,
+        });
       };
     },
   })

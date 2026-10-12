@@ -8,11 +8,11 @@ import {
   PerpDbAdapter as CorePerpDbAdapter,
   PerpQuoteStateService as CorePerpQuoteStateService,
   isOpenPerpPositionStateValid,
-} from '@babylon/core/markets/perps';
+} from '@feed/core/markets/perps';
 import {
   PredictionDbAdapter as CorePredictionDbAdapter,
   PredictionMarketService as CorePredictionMarketService,
-} from '@babylon/core/markets/prediction';
+} from '@feed/core/markets/prediction';
 import {
   actorRelationships,
   and,
@@ -43,13 +43,13 @@ import {
   trendingTags,
   widgetCaches,
   worldFacts,
-} from '@babylon/db';
+} from '@feed/db';
 import {
   calculatePriceFromHoldings,
   generateSnowflakeId,
   logger,
   PERP_MARKET_CONFIG,
-} from '@babylon/shared';
+} from '@feed/shared';
 import {
   endTrace,
   getActiveTracer,
@@ -58,7 +58,7 @@ import {
   uninstallLLMInterceptor,
   writeTickTrace,
 } from './dag-trace';
-import { BabylonLLMClient } from './llm/openai-client';
+import { FeedLLMClient } from './llm/openai-client';
 import { QuestionManager } from './QuestionManager';
 import { RelationshipEvolutionEngine } from './RelationshipEvolutionEngine';
 // Services - using barrel exports from services/index.ts
@@ -197,7 +197,7 @@ export async function executeGameTick(
   skipContentGeneration = false,
   skip = new Set<string>()
 ): Promise<GameTickResult> {
-  const fastMode = process.env.BABYLON_TRUST_CORPUS_FAST_MODE === 'true';
+  const fastMode = process.env.FEED_TRUST_CORPUS_FAST_MODE === 'true';
   const timestamp = new Date();
   const startedAt = Date.now();
   const budgetMs = Number(process.env.GAME_TICK_BUDGET_MS || 180000); // 3 minutes default
@@ -207,7 +207,7 @@ export async function executeGameTick(
   const tokenStatsTickId = tokenStatsService.startTick(`tick-${startedAt}`);
 
   // DAG trace: capture all inputs/outputs when enabled
-  const dagTraceEnabled = process.env.BABYLON_DAG_TRACE === 'true';
+  const dagTraceEnabled = process.env.FEED_DAG_TRACE === 'true';
   if (dagTraceEnabled) {
     startTrace(`tick-${startedAt}`, 0);
     installLLMInterceptor();
@@ -238,833 +238,855 @@ export async function executeGameTick(
     alphaInvitesSent: 0,
   };
 
-  if (skip.has('gameplay-fast-path')) {
-    logger.info(
-      'Gameplay fast path enabled - skipping remaining game tick work',
-      undefined,
-      'GameTick'
-    );
-    tokenStatsService.endTick();
-    return result;
-  }
-
-  // Bootstrap game data if needed (actors, organizations, mappings, pools, etc.)
-  tracer?.startNode('bootstrap', { fastMode });
-  const bootstrapResult = fastMode ? null : await bootstrapGameIfNeeded();
-
-  // Initialize fal.ai for article image generation (non-blocking)
-  initFalClient();
-  if (bootstrapResult) {
-    const hasChanges =
-      bootstrapResult.actorsCreated > 0 ||
-      bootstrapResult.actorsToppedUp > 0 ||
-      bootstrapResult.organizationsCreated > 0 ||
-      bootstrapResult.poolsCreated > 0;
-
-    if (hasChanges) {
+  let tickError: unknown;
+  try {
+    if (skip.has('gameplay-fast-path')) {
       logger.info(
-        'Game data bootstrapped',
-        {
-          actorsCreated: bootstrapResult.actorsCreated,
-          actorsToppedUp: bootstrapResult.actorsToppedUp,
-          organizationsCreated: bootstrapResult.organizationsCreated,
-          poolsCreated: bootstrapResult.poolsCreated,
-        },
+        'Gameplay fast path enabled - skipping remaining game tick work',
+        undefined,
+        'GameTick'
+      );
+      tokenStatsService.endTick();
+      return result;
+    }
+
+    // Bootstrap game data if needed (actors, organizations, mappings, pools, etc.)
+    tracer?.startNode('bootstrap', { fastMode });
+    const bootstrapResult = fastMode ? null : await bootstrapGameIfNeeded();
+
+    // Initialize fal.ai for article image generation (non-blocking)
+    initFalClient();
+    if (bootstrapResult) {
+      const hasChanges =
+        bootstrapResult.actorsCreated > 0 ||
+        bootstrapResult.actorsToppedUp > 0 ||
+        bootstrapResult.organizationsCreated > 0 ||
+        bootstrapResult.poolsCreated > 0;
+
+      if (hasChanges) {
+        logger.info(
+          'Game data bootstrapped',
+          {
+            actorsCreated: bootstrapResult.actorsCreated,
+            actorsToppedUp: bootstrapResult.actorsToppedUp,
+            organizationsCreated: bootstrapResult.organizationsCreated,
+            poolsCreated: bootstrapResult.poolsCreated,
+          },
+          'GameTick'
+        );
+      }
+    }
+
+    tracer?.endNode('bootstrap', {
+      actorsCreated: bootstrapResult?.actorsCreated ?? 0,
+      organizationsCreated: bootstrapResult?.organizationsCreated ?? 0,
+      poolsCreated: bootstrapResult?.poolsCreated ?? 0,
+    });
+
+    // Compute game-relative day numbers for new writes (forward-only)
+    const [continuousGame] = await db
+      .select({ startedAt: games.startedAt, id: games.id })
+      .from(games)
+      .where(eq(games.isContinuous, true))
+      .limit(1);
+    const gameStartedAt = continuousGame?.startedAt ?? null;
+
+    // Validate startedAt is set - critical for day calculation
+    if (!gameStartedAt) {
+      logger.error(
+        'Game startedAt is NULL - day calculation will fail. Game day will default to 1.',
+        { gameId: continuousGame?.id },
         'GameTick'
       );
     }
-  }
 
-  tracer?.endNode('bootstrap', {
-    actorsCreated: bootstrapResult?.actorsCreated ?? 0,
-    organizationsCreated: bootstrapResult?.organizationsCreated ?? 0,
-    poolsCreated: bootstrapResult?.poolsCreated ?? 0,
-  });
+    const dayNumberForTimestamp = (t: Date): number | undefined => {
+      if (!gameStartedAt) return undefined;
+      return toSafeDayNumber(getGameDayNumber(gameStartedAt, t));
+    };
 
-  // Compute game-relative day numbers for new writes (forward-only)
-  const [continuousGame] = await db
-    .select({ startedAt: games.startedAt, id: games.id })
-    .from(games)
-    .where(eq(games.isContinuous, true))
-    .limit(1);
-  const gameStartedAt = continuousGame?.startedAt ?? null;
+    // Bootstrap initial content if this is a fresh setup
+    tracer?.startNode('bootstrap-content', { fastMode });
+    if (!fastMode) {
+      await bootstrapContentIfNeeded(timestamp);
+    }
+    tracer?.endNode('bootstrap-content', { skipped: fastMode });
 
-  // Validate startedAt is set - critical for day calculation
-  if (!gameStartedAt) {
-    logger.error(
-      'Game startedAt is NULL - day calculation will fail. Game day will default to 1.',
-      { gameId: continuousGame?.id },
+    // Initialize LLM client for game tick operations
+    // Priority: Groq > Claude > OpenAI
+    const llmClient = FeedLLMClient.forGameTick();
+    const stats = llmClient.getStats();
+    logger.info(
+      'LLM client initialized for game tick operations',
+      {
+        provider: stats.provider,
+        model: stats.model,
+      },
       'GameTick'
     );
-  }
 
-  const dayNumberForTimestamp = (t: Date): number | undefined => {
-    if (!gameStartedAt) return undefined;
-    return toSafeDayNumber(getGameDayNumber(gameStartedAt, t));
-  };
+    // Get active questions from database
+    tracer?.startNode('questions-load', { fastMode });
+    const activeQuestions = fastMode
+      ? []
+      : await db
+          .select()
+          .from(questionsSchema)
+          .where(eq(questionsSchema.status, 'active'));
+    if (fastMode) {
+      logger.info(
+        'Skipping active question load in fast mode',
+        undefined,
+        'GameTick'
+      );
+    }
 
-  // Bootstrap initial content if this is a fresh setup
-  tracer?.startNode('bootstrap-content', { fastMode });
-  if (!fastMode) {
-    await bootstrapContentIfNeeded(timestamp);
-  }
-  tracer?.endNode('bootstrap-content', { skipped: fastMode });
+    tracer?.endNode('questions-load', { count: activeQuestions.length });
 
-  // Initialize LLM client for game tick operations
-  // Priority: Groq > Claude > OpenAI
-  const llmClient = BabylonLLMClient.forGameTick();
-  const stats = llmClient.getStats();
-  logger.info(
-    'LLM client initialized for game tick operations',
-    {
-      provider: stats.provider,
-      model: stats.model,
-    },
-    'GameTick'
-  );
+    logger.info(
+      `Found ${activeQuestions.length} active questions`,
+      { count: activeQuestions.length },
+      'GameTick'
+    );
 
-  // Get active questions from database
-  tracer?.startNode('questions-load', { fastMode });
-  const activeQuestions = fastMode
-    ? []
-    : await db
+    // Generate initial questions FIRST if this is the first tick
+    let currentActiveQuestions = activeQuestions;
+    tracer?.startNode('questions-init', {
+      activeCount: activeQuestions.length,
+      fastMode,
+    });
+    if (activeQuestions.length === 0 && Date.now() < deadline && !fastMode) {
+      logger.info(
+        'First tick detected - generating initial questions',
+        {},
+        'GameTick'
+      );
+      const questionsGenerated = await generateNewQuestions(
+        5, // Generate 5 initial questions
+        llmClient,
+        deadline
+      );
+      result.questionsCreated = questionsGenerated;
+
+      // Reload active questions after generation (use new variable to avoid mutation)
+      currentActiveQuestions = await db
         .select()
         .from(questionsSchema)
         .where(eq(questionsSchema.status, 'active'));
-  if (fastMode) {
+
+      logger.info(
+        `Initial questions created: ${questionsGenerated}`,
+        { count: questionsGenerated },
+        'GameTick'
+      );
+    }
+    tracer?.endNode('questions-init', {
+      questionsCreated: result.questionsCreated,
+    });
+
+    // ==========================================================================
+    // QUESTION RESOLUTION - HANDLED BY markets-tick (DEDUPLICATION)
+    // ==========================================================================
+    // Question resolution (proof generation and payouts) is now
+    // exclusively handled by /api/cron/markets-tick to prevent race conditions
+    // and duplicate operations. This follows the single-responsibility principle:
+    //
+    // - game-tick: World simulation (events, question creation)
+    // - markets-tick: Market lifecycle (resolution, payouts)
+    //
+    // See: apps/web/src/app/api/cron/markets-tick/route.ts::resolveMarket()
+    // ==========================================================================
+
+    // ==========================================================================
+    // ORGANIZATION CONTENT - HANDLED BY organization-tick + article-tick (DEDUPLICATION)
+    // ==========================================================================
+    // Organization posts are handled by /api/cron/organization-tick
+    // Article generation is handled by /api/cron/article-tick
+    // NPC posts are handled by /api/cron/npc-tick
+    //
+    // game-tick now focuses ONLY on world events (below) which drive the narrative.
+    // ==========================================================================
+
+    // Generate world events based on active questions (KEPT - game-tick owns world state)
+    // Skip if buffer is sufficient (content generation handled by lookahead service)
+    tracer?.startNode('events', {
+      questionCount: currentActiveQuestions.length,
+      skipContentGeneration,
+      fastMode,
+    });
+    if (!skipContentGeneration && !fastMode) {
+      // Generate world events based on active questions
+      // Pass llmClient to enable breaking article generation for high-impact events
+      // Shuffle active questions before slicing to rotate which questions get events
+      // (without shuffle, DB insertion order causes the same questions to always be selected)
+      const shuffledQuestions = shuffleArray(currentActiveQuestions).slice(
+        0,
+        5
+      );
+      const eventsGenerated = await generateEvents(
+        shuffledQuestions,
+        timestamp,
+        dayNumberForTimestamp(timestamp),
+        llmClient
+      );
+      const pulseEventsGenerated = await generateArcPulseEventsIfNeeded(
+        shuffledQuestions,
+        timestamp,
+        dayNumberForTimestamp(timestamp)
+      );
+      result.eventsCreated = eventsGenerated + pulseEventsGenerated;
+    } else {
+      logger.info(
+        'Skipping content generation (buffer sufficient)',
+        undefined,
+        'GameTick'
+      );
+    }
+    tracer?.endNode('events', { eventsCreated: result.eventsCreated });
+
+    // =========================================================================
+    // CRITICAL PRIORITY: Generate and execute NPC trading decisions
+    // This ALWAYS runs - uses the full deadline, not the critical ops deadline
+    // Market decisions are essential for game economy and must always execute
+    // =========================================================================
     logger.info(
-      'Skipping active question load in fast mode',
-      undefined,
+      'Starting critical market decision operations',
+      {
+        timeRemaining: deadline - Date.now(),
+      },
       'GameTick'
     );
-  }
 
-  tracer?.endNode('questions-load', { count: activeQuestions.length });
+    // ==========================================================================
+    // NPC TRADING — handled by MultiStepExecutor in npc-tick
+    // NPCs make trade + social decisions together in one unified pipeline.
+    // MarketDecisionEngine batch trading has been removed.
+    // ==========================================================================
+    tracer?.skipNode('market-baseline', 'unifiedNpcPipeline');
+    tracer?.skipNode('market-decisions', 'unifiedNpcPipeline');
+    tracer?.skipNode('trade-execution', 'unifiedNpcPipeline');
+    tracer?.skipNode('price-updates', 'unifiedNpcPipeline');
 
-  logger.info(
-    `Found ${activeQuestions.length} active questions`,
-    { count: activeQuestions.length },
-    'GameTick'
-  );
+    // ==========================================================================
+    // NPC SOCIAL ENGAGEMENT - HANDLED BY npc-tick (DEDUPLICATION)
+    // ==========================================================================
+    // NPC social engagement (likes, shares, comments) and social actions
+    // (DMs, group invites) are now exclusively handled by /api/cron/npc-tick.
+    //
+    // See: apps/web/src/app/api/cron/npc-tick/route.ts
+    // ==========================================================================
 
-  // Generate initial questions FIRST if this is the first tick
-  let currentActiveQuestions = activeQuestions;
-  tracer?.startNode('questions-init', {
-    activeCount: activeQuestions.length,
-    fastMode,
-  });
-  if (activeQuestions.length === 0 && Date.now() < deadline && !fastMode) {
-    logger.info(
-      'First tick detected - generating initial questions',
-      {},
-      'GameTick'
-    );
-    const questionsGenerated = await generateNewQuestions(
-      5, // Generate 5 initial questions
-      llmClient,
-      deadline
-    );
-    result.questionsCreated = questionsGenerated;
+    // ==========================================================================
+    // NPC FOLLOWING - HANDLED BY npc-tick (DEDUPLICATION)
+    // ==========================================================================
+    // NPC following (processProactiveFollowing, processUnfollowChecks) is now
+    // exclusively handled by /api/cron/npc-tick.
+    //
+    // See: apps/web/src/app/api/cron/npc-tick/route.ts
+    // ==========================================================================
 
-    // Reload active questions after generation (use new variable to avoid mutation)
-    currentActiveQuestions = await db
-      .select()
-      .from(questionsSchema)
-      .where(eq(questionsSchema.status, 'active'));
+    // ==========================================================================
+    // NPC PORTFOLIO REBALANCING — handled by MultiStepExecutor in npc-tick
+    // LLM reasoning naturally handles position management via TRADE actions.
+    // ==========================================================================
+    tracer?.skipNode('rebalancing', 'unifiedNpcPipeline');
 
-    logger.info(
-      `Initial questions created: ${questionsGenerated}`,
-      { count: questionsGenerated },
-      'GameTick'
-    );
-  }
-  tracer?.endNode('questions-init', {
-    questionsCreated: result.questionsCreated,
-  });
+    // Article generation is now centralized in article-tick cron job.
+    // This prevents duplicate article generation and ensures proper rate limiting.
+    // Arc events still generate articles via generateArticlesForArcEvent() in narrative-event-processor.
+    // See: apps/web/src/app/api/cron/article-tick/route.ts
 
-  // ==========================================================================
-  // QUESTION RESOLUTION - HANDLED BY markets-tick (DEDUPLICATION)
-  // ==========================================================================
-  // Question resolution (proof generation and payouts) is now
-  // exclusively handled by /api/cron/markets-tick to prevent race conditions
-  // and duplicate operations. This follows the single-responsibility principle:
-  //
-  // - game-tick: World simulation (events, question creation)
-  // - markets-tick: Market lifecycle (resolution, payouts)
-  //
-  // See: apps/web/src/app/api/cron/markets-tick/route.ts::resolveMarket()
-  // ==========================================================================
+    const currentActiveCount =
+      currentActiveQuestions.length - result.questionsResolved;
+    tracer?.startNode('question-topup', { currentActiveCount, fastMode });
+    if (currentActiveCount < 10 && !fastMode) {
+      const shouldForceGeneration = currentActiveCount <= 0;
+      if (Date.now() < deadline || shouldForceGeneration) {
+        if (shouldForceGeneration && Date.now() >= deadline) {
+          logger.warn(
+            'No active prediction questions – forcing generation past tick budget',
+            { budgetMs, currentActiveCount },
+            'GameTick'
+          );
+        }
 
-  // ==========================================================================
-  // ORGANIZATION CONTENT - HANDLED BY organization-tick + article-tick (DEDUPLICATION)
-  // ==========================================================================
-  // Organization posts are handled by /api/cron/organization-tick
-  // Article generation is handled by /api/cron/article-tick
-  // NPC posts are handled by /api/cron/npc-tick
-  //
-  // game-tick now focuses ONLY on world events (below) which drive the narrative.
-  // ==========================================================================
-
-  // Generate world events based on active questions (KEPT - game-tick owns world state)
-  // Skip if buffer is sufficient (content generation handled by lookahead service)
-  tracer?.startNode('events', {
-    questionCount: currentActiveQuestions.length,
-    skipContentGeneration,
-    fastMode,
-  });
-  if (!skipContentGeneration && !fastMode) {
-    // Generate world events based on active questions
-    // Pass llmClient to enable breaking article generation for high-impact events
-    // Shuffle active questions before slicing to rotate which questions get events
-    // (without shuffle, DB insertion order causes the same questions to always be selected)
-    const shuffledQuestions = shuffleArray(currentActiveQuestions).slice(0, 5);
-    const eventsGenerated = await generateEvents(
-      shuffledQuestions,
-      timestamp,
-      dayNumberForTimestamp(timestamp),
-      llmClient
-    );
-    const pulseEventsGenerated = await generateArcPulseEventsIfNeeded(
-      shuffledQuestions,
-      timestamp,
-      dayNumberForTimestamp(timestamp)
-    );
-    result.eventsCreated = eventsGenerated + pulseEventsGenerated;
-  } else {
-    logger.info(
-      'Skipping content generation (buffer sufficient)',
-      undefined,
-      'GameTick'
-    );
-  }
-  tracer?.endNode('events', { eventsCreated: result.eventsCreated });
-
-  // =========================================================================
-  // CRITICAL PRIORITY: Generate and execute NPC trading decisions
-  // This ALWAYS runs - uses the full deadline, not the critical ops deadline
-  // Market decisions are essential for game economy and must always execute
-  // =========================================================================
-  logger.info(
-    'Starting critical market decision operations',
-    {
-      timeRemaining: deadline - Date.now(),
-    },
-    'GameTick'
-  );
-
-  // ==========================================================================
-  // NPC TRADING — handled by MultiStepExecutor in npc-tick
-  // NPCs make trade + social decisions together in one unified pipeline.
-  // MarketDecisionEngine batch trading has been removed.
-  // ==========================================================================
-  tracer?.skipNode('market-baseline', 'unifiedNpcPipeline');
-  tracer?.skipNode('market-decisions', 'unifiedNpcPipeline');
-  tracer?.skipNode('trade-execution', 'unifiedNpcPipeline');
-  tracer?.skipNode('price-updates', 'unifiedNpcPipeline');
-
-  // ==========================================================================
-  // NPC SOCIAL ENGAGEMENT - HANDLED BY npc-tick (DEDUPLICATION)
-  // ==========================================================================
-  // NPC social engagement (likes, shares, comments) and social actions
-  // (DMs, group invites) are now exclusively handled by /api/cron/npc-tick.
-  //
-  // See: apps/web/src/app/api/cron/npc-tick/route.ts
-  // ==========================================================================
-
-  // ==========================================================================
-  // NPC FOLLOWING - HANDLED BY npc-tick (DEDUPLICATION)
-  // ==========================================================================
-  // NPC following (processProactiveFollowing, processUnfollowChecks) is now
-  // exclusively handled by /api/cron/npc-tick.
-  //
-  // See: apps/web/src/app/api/cron/npc-tick/route.ts
-  // ==========================================================================
-
-  // ==========================================================================
-  // NPC PORTFOLIO REBALANCING — handled by MultiStepExecutor in npc-tick
-  // LLM reasoning naturally handles position management via TRADE actions.
-  // ==========================================================================
-  tracer?.skipNode('rebalancing', 'unifiedNpcPipeline');
-
-  // Article generation is now centralized in article-tick cron job.
-  // This prevents duplicate article generation and ensures proper rate limiting.
-  // Arc events still generate articles via generateArticlesForArcEvent() in narrative-event-processor.
-  // See: apps/web/src/app/api/cron/article-tick/route.ts
-
-  const currentActiveCount =
-    currentActiveQuestions.length - result.questionsResolved;
-  tracer?.startNode('question-topup', { currentActiveCount, fastMode });
-  if (currentActiveCount < 10 && !fastMode) {
-    const shouldForceGeneration = currentActiveCount <= 0;
-    if (Date.now() < deadline || shouldForceGeneration) {
-      if (shouldForceGeneration && Date.now() >= deadline) {
+        // If we've exceeded the tick budget, still allow a small window to avoid
+        // periods with zero active prediction markets.
+        const generationDeadline =
+          Date.now() < deadline ? deadline : Date.now() + 30_000;
+        const questionsGenerated = await generateNewQuestions(
+          Math.min(3, 15 - currentActiveCount),
+          llmClient,
+          generationDeadline
+        );
+        result.questionsCreated += questionsGenerated;
+      } else {
         logger.warn(
-          'No active prediction questions – forcing generation past tick budget',
-          { budgetMs, currentActiveCount },
+          'Skipping question generation – tick budget exceeded',
+          { budgetMs },
+          'GameTick'
+        );
+      }
+    }
+    tracer?.endNode('question-topup', {
+      questionsCreated: result.questionsCreated,
+    });
+
+    // Process narrative arcs for active questions
+    // Each question can have an arc that progresses through phases
+    // Arc events now create world events and can trigger article generation
+    tracer?.startNode('narrative-arcs', {
+      withinDeadline: Date.now() < deadline,
+      fastMode,
+    });
+    if (Date.now() < deadline && !fastMode) {
+      const narrativeStats = await processNarrativeArcs(
+        currentActiveQuestions,
+        dayNumberForTimestamp(timestamp) ?? 1,
+        llmClient
+      );
+      result.narrativeArcs = narrativeStats;
+      if (
+        narrativeStats.transitioned > 0 ||
+        narrativeStats.eventsGenerated > 0
+      ) {
+        logger.info('Narrative arcs processed', narrativeStats, 'GameTick');
+      }
+    }
+    tracer?.endNode('narrative-arcs', { ...(result.narrativeArcs ?? {}) });
+
+    // Process timeframed markets (multi-timeframe arcs: flash, intraday, daily, etc.)
+    // These use timestamp-based progression rather than day-based
+    tracer?.startNode('timeframed-markets', {
+      withinDeadline: Date.now() < deadline,
+    });
+    if (Date.now() < deadline && !fastMode) {
+      const timeframeStats = await timeframeArcProcessor.processTick(timestamp);
+      result.timeframedMarkets = timeframeStats;
+      if (timeframeStats.marketsProcessed > 0) {
+        logger.info(
+          'Timeframed markets processed',
+          {
+            processed: timeframeStats.marketsProcessed,
+            transitions: timeframeStats.transitionsOccurred,
+            events: timeframeStats.eventsGenerated,
+          },
+          'GameTick'
+        );
+      }
+    }
+    tracer?.endNode('timeframed-markets', {
+      ...(result.timeframedMarkets ?? {}),
+    });
+
+    // =========================================================================
+    // PREDICTION MARKET PRICES
+    // Prediction market prices are driven ONLY by NPC trading (via npc-tick).
+    // No system-level Auto-AMM — prices emerge organically from NPC decisions.
+    // =========================================================================
+    tracer?.skipNode(
+      'prediction-auto-amm',
+      'Disabled: prices driven only by NPC trading'
+    );
+
+    // Calculate and update currentDay based on game start time
+    tracer?.startNode('game-state-update', {});
+    const currentDay = dayNumberForTimestamp(timestamp);
+
+    // Log day calculation for diagnostics
+    logger.info(
+      'Game day calculation',
+      {
+        startedAt: gameStartedAt?.toISOString(),
+        currentTimestamp: timestamp.toISOString(),
+        calculatedDay: currentDay,
+        willSetTo: currentDay ?? 1,
+        hoursElapsed: gameStartedAt
+          ? Math.floor(
+              (timestamp.getTime() - gameStartedAt.getTime()) / (1000 * 60 * 60)
+            )
+          : null,
+      },
+      'GameTick'
+    );
+
+    await db
+      .update(games)
+      .set({
+        lastTickAt: timestamp,
+        updatedAt: timestamp,
+        currentDay: currentDay ?? 1,
+      })
+      .where(eq(games.isContinuous, true));
+    tracer?.endNode('game-state-update', { currentDay });
+
+    tracer?.startNode('widget-caches', { fastMode });
+    const cachesUpdated = fastMode ? 0 : await updateWidgetCaches();
+    result.widgetCachesUpdated = cachesUpdated;
+    tracer?.endNode('widget-caches', { cachesUpdated });
+
+    // Calculate trending tags if needed (checks 30-minute interval internally)
+    // Force calculation on first tick if we just generated baseline posts
+    tracer?.startNode('trending-tags', { fastMode });
+    const forceCalculation =
+      result.postsCreated > 0 && result.articlesCreated > 0;
+    const trendingCalculated = fastMode
+      ? false
+      : forceCalculation
+        ? await forceTrendingCalculation()
+        : await calculateTrendingIfNeeded();
+    result.trendingCalculated = trendingCalculated;
+    tracer?.endNode('trending-tags', { trendingCalculated });
+    if (trendingCalculated) {
+      logger.info('Trending tags recalculated', {}, 'GameTick');
+    }
+
+    // Sync reputation to ERC-8004 if service is available
+    // Service is provided by agents package via setReputationSyncService()
+    tracer?.startNode('reputation-sync', { fastMode });
+    if (!fastMode) {
+      const syncResult = await syncReputationIfAvailable({
+        limit: 10, // Small batch during game tick
+        offset: 0,
+        forceRecalculate: false,
+        prioritizeNew: true, // Prioritize new accounts
+      });
+      if (syncResult) {
+        result.reputationSynced = syncResult.synced > 0;
+        if (syncResult.synced > 0) {
+          result.reputationSyncStats = {
+            total: syncResult.total,
+            successful: syncResult.synced,
+            failed: syncResult.failed,
+          };
+          logger.info(
+            'Reputation sync completed during game tick',
+            result.reputationSyncStats,
+            'GameTick'
+          );
+        }
+      }
+    }
+    tracer?.endNode('reputation-sync', { synced: result.reputationSynced });
+
+    // ==========================================================================
+    // WORLD FACTS - process RSS + parodies inline if no cron is running
+    // ==========================================================================
+    if (!fastMode) {
+      try {
+        const feedResult = await rssFeedService.fetchAllFeeds();
+        if (feedResult.stored > 0) {
+          const untransformed =
+            await rssFeedService.getUntransformedHeadlines(10);
+          if (untransformed.length > 0) {
+            const { createParodyHeadlineGenerator } = await import(
+              './services/parody-headline-generator'
+            );
+            const gen = createParodyHeadlineGenerator();
+            const parodies = await gen.processHeadlines(untransformed);
+            if (parodies.length > 0) {
+              logger.info(
+                `Processed ${parodies.length} parody headlines`,
+                undefined,
+                'GameTick'
+              );
+            }
+          }
+        }
+      } catch (rssError) {
+        logger.warn(
+          'RSS/parody processing failed',
+          { error: formatError(rssError) },
+          'GameTick'
+        );
+        throw rssError;
+      }
+    }
+
+    // Process alpha group invites (small chance for highly engaged users)
+    tracer?.startNode('alpha-invites', {});
+    const skipAlphaInvites =
+      process.env.FEED_SKIP_ALPHA_GROUP_INVITES === 'true' ||
+      process.env.FEED_TRUST_CORPUS_FAST_MODE === 'true';
+    if (skipAlphaInvites || fastMode) {
+      logger.info(
+        'Skipping alpha group invites for this tick',
+        {
+          reason: 'FEED_SKIP_ALPHA_GROUP_INVITES/FEED_TRUST_CORPUS_FAST_MODE',
+        },
+        'GameTick'
+      );
+    } else {
+      const invites = await AlphaGroupInviteService.processTickInvites();
+      result.alphaInvitesSent = invites.length;
+      if (invites.length > 0) {
+        logger.info(
+          'Alpha group invites sent',
+          { count: invites.length, invites },
+          'GameTick'
+        );
+      }
+    }
+    tracer?.endNode('alpha-invites', { invitesSent: result.alphaInvitesSent });
+
+    // Evolve NPC relationships based on recent interactions (every 10 ticks to save compute)
+    const shouldEvolveRelationships =
+      Math.floor(timestamp.getTime() / 60000) % 10 === 0;
+    tracer?.startNode('relationships', {
+      shouldEvolve: shouldEvolveRelationships,
+      fastMode,
+    });
+    if (shouldEvolveRelationships && Date.now() < deadline && !fastMode) {
+      logger.info('Evolving NPC relationships...', undefined, 'GameTick');
+      const relationshipEngine = new RelationshipEvolutionEngine(llmClient);
+      const relationshipsUpdated =
+        await relationshipEngine.analyzeAndUpdateRelationships();
+      result.relationshipsUpdated = relationshipsUpdated;
+      if (relationshipsUpdated > 0) {
+        logger.info(
+          `✅ Updated ${relationshipsUpdated} relationships`,
+          { count: relationshipsUpdated },
           'GameTick'
         );
       }
 
-      // If we've exceeded the tick budget, still allow a small window to avoid
-      // periods with zero active prediction markets.
-      const generationDeadline =
-        Date.now() < deadline ? deadline : Date.now() + 30_000;
-      const questionsGenerated = await generateNewQuestions(
-        Math.min(3, 15 - currentActiveCount),
-        llmClient,
-        generationDeadline
+      // Cleanup stale NPC anti-repetition histories (same cadence as relationships)
+      // This prevents unbounded memory growth in long-running processes
+      const { antiRepetitionService } = await import(
+        './services/npc-anti-repetition-service'
       );
-      result.questionsCreated += questionsGenerated;
-    } else {
-      logger.warn(
-        'Skipping question generation – tick budget exceeded',
-        { budgetMs },
+      const cleanedHistories = antiRepetitionService.cleanupStaleHistories();
+      if (cleanedHistories > 0) {
+        logger.debug(
+          `Cleaned up ${cleanedHistories} stale NPC anti-repetition histories`,
+          { count: cleanedHistories },
+          'GameTick'
+        );
+      }
+    }
+    tracer?.endNode('relationships', {
+      updated: result.relationshipsUpdated ?? 0,
+    });
+
+    // Process NPC group dynamics (form, join, leave, post, invite, kick)
+    tracer?.startNode('group-dynamics', {});
+    const skipNpcGroupDynamics =
+      process.env.FEED_SKIP_NPC_GROUP_DYNAMICS === 'true' ||
+      process.env.FEED_TRUST_CORPUS_FAST_MODE === 'true';
+    if (skipNpcGroupDynamics || fastMode) {
+      logger.info(
+        'Skipping NPC group dynamics for this tick',
+        {
+          reason: 'FEED_SKIP_NPC_GROUP_DYNAMICS/FEED_TRUST_CORPUS_FAST_MODE',
+        },
         'GameTick'
       );
+    } else {
+      try {
+        const dynamics = await NPCGroupDynamicsService.processTickDynamics();
+        result.npcGroupDynamics = {
+          groupsCreated: dynamics.groupsCreated,
+          membersAdded: dynamics.membersAdded,
+          membersRemoved: dynamics.membersRemoved,
+          usersInvited: dynamics.usersInvited,
+          usersAutoJoined: dynamics.usersAutoJoined,
+          usersKicked: dynamics.usersKicked,
+          messagesPosted: dynamics.messagesPosted,
+        };
+        if (
+          dynamics.groupsCreated > 0 ||
+          dynamics.membersAdded > 0 ||
+          dynamics.membersRemoved > 0 ||
+          dynamics.usersInvited > 0 ||
+          dynamics.usersKicked > 0 ||
+          dynamics.messagesPosted > 0
+        ) {
+          logger.info('NPC group dynamics processed', dynamics, 'GameTick');
+        }
+      } catch (groupError) {
+        logger.error(
+          'NPC group dynamics failed',
+          groupError instanceof Error
+            ? groupError
+            : new Error(String(groupError)),
+          'GameTick'
+        );
+        throw groupError;
+      }
     }
-  }
-  tracer?.endNode('question-topup', {
-    questionsCreated: result.questionsCreated,
-  });
+    tracer?.endNode('group-dynamics', { ...(result.npcGroupDynamics ?? {}) });
 
-  // Process narrative arcs for active questions
-  // Each question can have an arc that progresses through phases
-  // Arc events now create world events and can trigger article generation
-  tracer?.startNode('narrative-arcs', {
-    withinDeadline: Date.now() < deadline,
-    fastMode,
-  });
-  if (Date.now() < deadline && !fastMode) {
-    const narrativeStats = await processNarrativeArcs(
-      currentActiveQuestions,
-      dayNumberForTimestamp(timestamp) ?? 1,
-      llmClient
-    );
-    result.narrativeArcs = narrativeStats;
-    if (narrativeStats.transitioned > 0 || narrativeStats.eventsGenerated > 0) {
-      logger.info('Narrative arcs processed', narrativeStats, 'GameTick');
+    const durationMs = Date.now() - startedAt;
+
+    // Validation: Quality checks after game tick
+    const validationWarnings: string[] = [];
+
+    // Note: NPC trading validation moved to npc-tick (single responsibility)
+
+    // Verify content was generated if buffer was low and not skipped
+    if (
+      !skipContentGeneration &&
+      result.postsCreated === 0 &&
+      result.articlesCreated === 0 &&
+      result.eventsCreated === 0
+    ) {
+      validationWarnings.push(
+        'Content generation ran but no content was created'
+      );
     }
-  }
-  tracer?.endNode('narrative-arcs', { ...(result.narrativeArcs ?? {}) });
 
-  // Process timeframed markets (multi-timeframe arcs: flash, intraday, daily, etc.)
-  // These use timestamp-based progression rather than day-based
-  tracer?.startNode('timeframed-markets', {
-    withinDeadline: Date.now() < deadline,
-  });
-  if (Date.now() < deadline && !fastMode) {
-    const timeframeStats = await timeframeArcProcessor.processTick(timestamp);
-    result.timeframedMarkets = timeframeStats;
-    if (timeframeStats.marketsProcessed > 0) {
-      logger.info(
-        'Timeframed markets processed',
+    // Verify questions resolved correctly
+    if (result.questionsResolved > 0) {
+      // Check that resolved questions have correct status
+      const resolvedQuestions = await db
+        .select()
+        .from(questionsSchema)
+        .where(
+          and(
+            eq(questionsSchema.status, 'resolved'),
+            gte(
+              questionsSchema.updatedAt,
+              new Date(timestamp.getTime() - 60000)
+            ) // Updated in last minute
+          )
+        )
+        .limit(result.questionsResolved);
+
+      if (resolvedQuestions.length !== result.questionsResolved) {
+        validationWarnings.push(
+          `Expected ${result.questionsResolved} resolved questions but found ${resolvedQuestions.length}`
+        );
+      }
+    }
+
+    // Validate market prices are reasonable (0-100% for predictions)
+    const activeMarkets = await db
+      .select()
+      .from(marketsSchema)
+      .where(
+        and(
+          eq(marketsSchema.resolved, false),
+          gte(marketsSchema.endDate, timestamp)
+        )
+      )
+      .limit(10);
+
+    for (const market of activeMarkets) {
+      const yesShares = Number(market.yesShares);
+      const noShares = Number(market.noShares);
+      const totalShares = yesShares + noShares;
+
+      if (totalShares > 0) {
+        const yesOdds = (yesShares / totalShares) * 100;
+        const noOdds = (noShares / totalShares) * 100;
+
+        // Odds should be between 0 and 100%
+        if (yesOdds < 0 || yesOdds > 100 || noOdds < 0 || noOdds > 100) {
+          validationWarnings.push(
+            `Market ${market.id} has invalid odds: YES=${yesOdds.toFixed(2)}%, NO=${noOdds.toFixed(2)}%`
+          );
+        }
+
+        // Odds should sum to approximately 100% (allowing for rounding)
+        const sum = yesOdds + noOdds;
+        if (sum < 99.9 || sum > 100.1) {
+          validationWarnings.push(
+            `Market ${market.id} odds don't sum to 100%: ${sum.toFixed(2)}%`
+          );
+        }
+      }
+    }
+
+    // Log validation warnings if any
+    if (validationWarnings.length > 0) {
+      logger.warn(
+        'Game tick validation warnings',
         {
-          processed: timeframeStats.marketsProcessed,
-          transitions: timeframeStats.transitionsOccurred,
-          events: timeframeStats.eventsGenerated,
+          warnings: validationWarnings,
+          result,
         },
         'GameTick'
       );
     }
-  }
-  tracer?.endNode('timeframed-markets', {
-    ...(result.timeframedMarkets ?? {}),
-  });
 
-  // =========================================================================
-  // PREDICTION MARKET PRICES
-  // Prediction market prices are driven ONLY by NPC trading (via npc-tick).
-  // No system-level Auto-AMM — prices emerge organically from NPC decisions.
-  // =========================================================================
-  tracer?.skipNode(
-    'prediction-auto-amm',
-    'Disabled: prices driven only by NPC trading'
-  );
-
-  // Calculate and update currentDay based on game start time
-  tracer?.startNode('game-state-update', {});
-  const currentDay = dayNumberForTimestamp(timestamp);
-
-  // Log day calculation for diagnostics
-  logger.info(
-    'Game day calculation',
-    {
-      startedAt: gameStartedAt?.toISOString(),
-      currentTimestamp: timestamp.toISOString(),
-      calculatedDay: currentDay,
-      willSetTo: currentDay ?? 1,
-      hoursElapsed: gameStartedAt
-        ? Math.floor(
-            (timestamp.getTime() - gameStartedAt.getTime()) / (1000 * 60 * 60)
-          )
-        : null,
-    },
-    'GameTick'
-  );
-
-  await db
-    .update(games)
-    .set({
-      lastTickAt: timestamp,
-      updatedAt: timestamp,
-      currentDay: currentDay ?? 1,
-    })
-    .where(eq(games.isContinuous, true));
-  tracer?.endNode('game-state-update', { currentDay });
-
-  tracer?.startNode('widget-caches', { fastMode });
-  const cachesUpdated = fastMode ? 0 : await updateWidgetCaches();
-  result.widgetCachesUpdated = cachesUpdated;
-  tracer?.endNode('widget-caches', { cachesUpdated });
-
-  // Calculate trending tags if needed (checks 30-minute interval internally)
-  // Force calculation on first tick if we just generated baseline posts
-  tracer?.startNode('trending-tags', { fastMode });
-  const forceCalculation =
-    result.postsCreated > 0 && result.articlesCreated > 0;
-  const trendingCalculated = fastMode
-    ? false
-    : forceCalculation
-      ? await forceTrendingCalculation()
-      : await calculateTrendingIfNeeded();
-  result.trendingCalculated = trendingCalculated;
-  tracer?.endNode('trending-tags', { trendingCalculated });
-  if (trendingCalculated) {
-    logger.info('Trending tags recalculated', {}, 'GameTick');
-  }
-
-  // Sync reputation to ERC-8004 if service is available
-  // Service is provided by agents package via setReputationSyncService()
-  tracer?.startNode('reputation-sync', { fastMode });
-  if (!fastMode) {
-    const syncResult = await syncReputationIfAvailable({
-      limit: 10, // Small batch during game tick
-      offset: 0,
-      forceRecalculate: false,
-      prioritizeNew: true, // Prioritize new accounts
-    });
-    if (syncResult) {
-      result.reputationSynced = syncResult.synced > 0;
-      if (syncResult.synced > 0) {
-        result.reputationSyncStats = {
-          total: syncResult.total,
-          successful: syncResult.synced,
-          failed: syncResult.failed,
-        };
-        logger.info(
-          'Reputation sync completed during game tick',
-          result.reputationSyncStats,
-          'GameTick'
+    // End token stats collection and store in database
+    const tickTokenStatsData = tokenStatsService.endTick();
+    if (tickTokenStatsData) {
+      // Calculate estimated cost from per-model usage
+      let estimatedCostUSD = 0;
+      for (const modelStats of tickTokenStatsData.byModel) {
+        const cost = calculateEstimatedCost(
+          modelStats.model,
+          modelStats.totalInputTokens,
+          modelStats.totalOutputTokens
         );
-      }
-    }
-  }
-  tracer?.endNode('reputation-sync', { synced: result.reputationSynced });
-
-  // ==========================================================================
-  // WORLD FACTS - process RSS + parodies inline if no cron is running
-  // ==========================================================================
-  if (!fastMode) {
-    try {
-      const feedResult = await rssFeedService.fetchAllFeeds();
-      if (feedResult.stored > 0) {
-        const untransformed =
-          await rssFeedService.getUntransformedHeadlines(10);
-        if (untransformed.length > 0) {
-          const { createParodyHeadlineGenerator } = await import(
-            './services/parody-headline-generator'
-          );
-          const gen = createParodyHeadlineGenerator();
-          const parodies = await gen.processHeadlines(untransformed);
-          if (parodies.length > 0) {
-            logger.info(
-              `Processed ${parodies.length} parody headlines`,
-              undefined,
-              'GameTick'
-            );
-          }
-        }
-      }
-    } catch (rssError) {
-      logger.warn(
-        'RSS/parody processing failed, continuing',
-        { error: formatError(rssError) },
-        'GameTick'
-      );
-    }
-  }
-
-  // Process alpha group invites (small chance for highly engaged users)
-  tracer?.startNode('alpha-invites', {});
-  const skipAlphaInvites =
-    process.env.BABYLON_SKIP_ALPHA_GROUP_INVITES === 'true' ||
-    process.env.BABYLON_TRUST_CORPUS_FAST_MODE === 'true';
-  if (skipAlphaInvites || fastMode) {
-    logger.info(
-      'Skipping alpha group invites for this tick',
-      {
-        reason:
-          'BABYLON_SKIP_ALPHA_GROUP_INVITES/BABYLON_TRUST_CORPUS_FAST_MODE',
-      },
-      'GameTick'
-    );
-  } else {
-    const invites = await AlphaGroupInviteService.processTickInvites();
-    result.alphaInvitesSent = invites.length;
-    if (invites.length > 0) {
-      logger.info(
-        'Alpha group invites sent',
-        { count: invites.length, invites },
-        'GameTick'
-      );
-    }
-  }
-  tracer?.endNode('alpha-invites', { invitesSent: result.alphaInvitesSent });
-
-  // Evolve NPC relationships based on recent interactions (every 10 ticks to save compute)
-  const shouldEvolveRelationships =
-    Math.floor(timestamp.getTime() / 60000) % 10 === 0;
-  tracer?.startNode('relationships', {
-    shouldEvolve: shouldEvolveRelationships,
-    fastMode,
-  });
-  if (shouldEvolveRelationships && Date.now() < deadline && !fastMode) {
-    logger.info('Evolving NPC relationships...', undefined, 'GameTick');
-    const relationshipEngine = new RelationshipEvolutionEngine(llmClient);
-    const relationshipsUpdated =
-      await relationshipEngine.analyzeAndUpdateRelationships();
-    result.relationshipsUpdated = relationshipsUpdated;
-    if (relationshipsUpdated > 0) {
-      logger.info(
-        `✅ Updated ${relationshipsUpdated} relationships`,
-        { count: relationshipsUpdated },
-        'GameTick'
-      );
-    }
-
-    // Cleanup stale NPC anti-repetition histories (same cadence as relationships)
-    // This prevents unbounded memory growth in long-running processes
-    const { antiRepetitionService } = await import(
-      './services/npc-anti-repetition-service'
-    );
-    const cleanedHistories = antiRepetitionService.cleanupStaleHistories();
-    if (cleanedHistories > 0) {
-      logger.debug(
-        `Cleaned up ${cleanedHistories} stale NPC anti-repetition histories`,
-        { count: cleanedHistories },
-        'GameTick'
-      );
-    }
-  }
-  tracer?.endNode('relationships', {
-    updated: result.relationshipsUpdated ?? 0,
-  });
-
-  // Process NPC group dynamics (form, join, leave, post, invite, kick)
-  tracer?.startNode('group-dynamics', {});
-  const skipNpcGroupDynamics =
-    process.env.BABYLON_SKIP_NPC_GROUP_DYNAMICS === 'true' ||
-    process.env.BABYLON_TRUST_CORPUS_FAST_MODE === 'true';
-  if (skipNpcGroupDynamics || fastMode) {
-    logger.info(
-      'Skipping NPC group dynamics for this tick',
-      {
-        reason:
-          'BABYLON_SKIP_NPC_GROUP_DYNAMICS/BABYLON_TRUST_CORPUS_FAST_MODE',
-      },
-      'GameTick'
-    );
-  } else {
-    try {
-      const dynamics = await NPCGroupDynamicsService.processTickDynamics();
-      result.npcGroupDynamics = {
-        groupsCreated: dynamics.groupsCreated,
-        membersAdded: dynamics.membersAdded,
-        membersRemoved: dynamics.membersRemoved,
-        usersInvited: dynamics.usersInvited,
-        usersAutoJoined: dynamics.usersAutoJoined,
-        usersKicked: dynamics.usersKicked,
-        messagesPosted: dynamics.messagesPosted,
-      };
-      if (
-        dynamics.groupsCreated > 0 ||
-        dynamics.membersAdded > 0 ||
-        dynamics.membersRemoved > 0 ||
-        dynamics.usersInvited > 0 ||
-        dynamics.usersKicked > 0 ||
-        dynamics.messagesPosted > 0
-      ) {
-        logger.info('NPC group dynamics processed', dynamics, 'GameTick');
-      }
-    } catch (groupError) {
-      logger.error(
-        'NPC group dynamics failed, continuing tick',
-        groupError instanceof Error
-          ? groupError
-          : new Error(String(groupError)),
-        'GameTick'
-      );
-    }
-  }
-  tracer?.endNode('group-dynamics', { ...(result.npcGroupDynamics ?? {}) });
-
-  const durationMs = Date.now() - startedAt;
-
-  // Validation: Quality checks after game tick
-  const validationWarnings: string[] = [];
-
-  // Note: NPC trading validation moved to npc-tick (single responsibility)
-
-  // Verify content was generated if buffer was low and not skipped
-  if (
-    !skipContentGeneration &&
-    result.postsCreated === 0 &&
-    result.articlesCreated === 0 &&
-    result.eventsCreated === 0
-  ) {
-    validationWarnings.push(
-      'Content generation ran but no content was created'
-    );
-  }
-
-  // Verify questions resolved correctly
-  if (result.questionsResolved > 0) {
-    // Check that resolved questions have correct status
-    const resolvedQuestions = await db
-      .select()
-      .from(questionsSchema)
-      .where(
-        and(
-          eq(questionsSchema.status, 'resolved'),
-          gte(questionsSchema.updatedAt, new Date(timestamp.getTime() - 60000)) // Updated in last minute
-        )
-      )
-      .limit(result.questionsResolved);
-
-    if (resolvedQuestions.length !== result.questionsResolved) {
-      validationWarnings.push(
-        `Expected ${result.questionsResolved} resolved questions but found ${resolvedQuestions.length}`
-      );
-    }
-  }
-
-  // Validate market prices are reasonable (0-100% for predictions)
-  const activeMarkets = await db
-    .select()
-    .from(marketsSchema)
-    .where(
-      and(
-        eq(marketsSchema.resolved, false),
-        gte(marketsSchema.endDate, timestamp)
-      )
-    )
-    .limit(10);
-
-  for (const market of activeMarkets) {
-    const yesShares = Number(market.yesShares);
-    const noShares = Number(market.noShares);
-    const totalShares = yesShares + noShares;
-
-    if (totalShares > 0) {
-      const yesOdds = (yesShares / totalShares) * 100;
-      const noOdds = (noShares / totalShares) * 100;
-
-      // Odds should be between 0 and 100%
-      if (yesOdds < 0 || yesOdds > 100 || noOdds < 0 || noOdds > 100) {
-        validationWarnings.push(
-          `Market ${market.id} has invalid odds: YES=${yesOdds.toFixed(2)}%, NO=${noOdds.toFixed(2)}%`
-        );
+        estimatedCostUSD += cost.totalCostUSD;
       }
 
-      // Odds should sum to approximately 100% (allowing for rounding)
-      const sum = yesOdds + noOdds;
-      if (sum < 99.9 || sum > 100.1) {
-        validationWarnings.push(
-          `Market ${market.id} odds don't sum to 100%: ${sum.toFixed(2)}%`
-        );
-      }
-    }
-  }
-
-  // Log validation warnings if any
-  if (validationWarnings.length > 0) {
-    logger.warn(
-      'Game tick validation warnings',
-      {
-        warnings: validationWarnings,
-        result,
-      },
-      'GameTick'
-    );
-  }
-
-  // End token stats collection and store in database
-  const tickTokenStatsData = tokenStatsService.endTick();
-  if (tickTokenStatsData) {
-    // Calculate estimated cost from per-model usage
-    let estimatedCostUSD = 0;
-    for (const modelStats of tickTokenStatsData.byModel) {
-      const cost = calculateEstimatedCost(
-        modelStats.model,
-        modelStats.totalInputTokens,
-        modelStats.totalOutputTokens
-      );
-      estimatedCostUSD += cost.totalCostUSD;
-    }
-
-    // Add token stats to result
-    result.tokenStats = {
-      totalCalls: tickTokenStatsData.totalCalls,
-      totalInputTokens: tickTokenStatsData.totalInputTokens,
-      totalOutputTokens: tickTokenStatsData.totalOutputTokens,
-      totalTokens: tickTokenStatsData.totalTokens,
-      estimatedCostUSD,
-    };
-
-    // Store token stats in database (non-blocking)
-    // Serialize complex types to JSON-compatible format
-    const byPromptTypeJson = JSON.parse(
-      JSON.stringify(tickTokenStatsData.byPromptType)
-    ) as JsonValue;
-    const byModelJson = JSON.parse(
-      JSON.stringify(tickTokenStatsData.byModel)
-    ) as JsonValue;
-
-    db.insert(tickTokenStats)
-      .values({
-        id: tickTokenStatsData.tickId,
-        tickId: tickTokenStatsData.tickId,
-        tickStartedAt: tickTokenStatsData.tickStartedAt,
-        tickCompletedAt: tickTokenStatsData.tickCompletedAt,
-        tickDurationMs: tickTokenStatsData.tickDurationMs,
+      // Add token stats to result
+      result.tokenStats = {
         totalCalls: tickTokenStatsData.totalCalls,
         totalInputTokens: tickTokenStatsData.totalInputTokens,
         totalOutputTokens: tickTokenStatsData.totalOutputTokens,
         totalTokens: tickTokenStatsData.totalTokens,
-        byPromptType: byPromptTypeJson,
-        byModel: byModelJson,
-      })
-      .catch((error: Error) => {
-        logger.warn(
-          'Failed to store token stats',
-          { error: error.message, tickId: tickTokenStatsData.tickId },
-          'GameTick'
-        );
-      });
-
-    logger.info(
-      'Token stats collected',
-      {
-        tickId: tickTokenStatsData.tickId,
-        totalCalls: tickTokenStatsData.totalCalls,
-        totalTokens: tickTokenStatsData.totalTokens,
-        inputTokens: tickTokenStatsData.totalInputTokens,
-        outputTokens: tickTokenStatsData.totalOutputTokens,
-      },
-      'GameTick'
-    );
-  }
-
-  // Simulate market volatility (independent of NPC trades)
-  // This keeps markets "alive" with realistic price movements
-  // Skip volatility when narrative events fired (they already moved prices)
-  try {
-    const narrativeEventsCount = result.narrativeArcs?.eventsGenerated ?? 0;
-    const volatilityUpdates = await simulateMarketVolatility({
-      narrativeEventsCount,
-    });
-    if (volatilityUpdates > 0) {
-      result.priceVolatilitySimulated = volatilityUpdates;
-    }
-  } catch (error) {
-    logger.warn(
-      'Volatility simulation failed',
-      { error: formatError(error) },
-      'GameTick'
-    );
-  }
-
-  try {
-    const quoteRefreshes = await refreshPerpQuoteStates();
-    if (quoteRefreshes > 0) {
-      logger.info(
-        'Refreshed perp quote states',
-        { marketsUpdated: quoteRefreshes },
-        'GameTick'
-      );
-    }
-  } catch (error) {
-    logger.warn(
-      'Perp quote state refresh failed',
-      { error: formatError(error) },
-      'GameTick'
-    );
-  }
-
-  try {
-    const redistributionResult =
-      await FeeRedistributionService.redistributeFunds();
-    if (redistributionResult.npcsToppedUp > 0) {
-      result.feeRedistribution = {
-        npcsToppedUp: redistributionResult.npcsToppedUp,
-        totalDistributed: redistributionResult.totalDistributed,
-        fundBalance: redistributionResult.fundBalanceAfter,
+        estimatedCostUSD,
       };
+
+      // Store token stats in database (non-blocking)
+      // Serialize complex types to JSON-compatible format
+      const byPromptTypeJson = JSON.parse(
+        JSON.stringify(tickTokenStatsData.byPromptType)
+      ) as JsonValue;
+      const byModelJson = JSON.parse(
+        JSON.stringify(tickTokenStatsData.byModel)
+      ) as JsonValue;
+
+      db.insert(tickTokenStats)
+        .values({
+          id: tickTokenStatsData.tickId,
+          tickId: tickTokenStatsData.tickId,
+          tickStartedAt: tickTokenStatsData.tickStartedAt,
+          tickCompletedAt: tickTokenStatsData.tickCompletedAt,
+          tickDurationMs: tickTokenStatsData.tickDurationMs,
+          totalCalls: tickTokenStatsData.totalCalls,
+          totalInputTokens: tickTokenStatsData.totalInputTokens,
+          totalOutputTokens: tickTokenStatsData.totalOutputTokens,
+          totalTokens: tickTokenStatsData.totalTokens,
+          byPromptType: byPromptTypeJson,
+          byModel: byModelJson,
+        })
+        .catch((error: Error) => {
+          logger.warn(
+            'Failed to store token stats',
+            { error: error.message, tickId: tickTokenStatsData.tickId },
+            'GameTick'
+          );
+          throw error;
+        });
+
       logger.info(
-        'Fee redistribution completed',
+        'Token stats collected',
         {
-          npcsToppedUp: redistributionResult.npcsToppedUp,
-          totalDistributed: redistributionResult.totalDistributed,
-          fundBalance: redistributionResult.fundBalanceAfter,
+          tickId: tickTokenStatsData.tickId,
+          totalCalls: tickTokenStatsData.totalCalls,
+          totalTokens: tickTokenStatsData.totalTokens,
+          inputTokens: tickTokenStatsData.totalInputTokens,
+          outputTokens: tickTokenStatsData.totalOutputTokens,
         },
         'GameTick'
       );
     }
-  } catch (error) {
-    logger.warn(
-      'Fee redistribution failed',
-      { error: formatError(error) },
+
+    // Simulate market volatility (independent of NPC trades)
+    // This keeps markets "alive" with realistic price movements
+    // Skip volatility when narrative events fired (they already moved prices)
+    try {
+      const narrativeEventsCount = result.narrativeArcs?.eventsGenerated ?? 0;
+      const volatilityUpdates = await simulateMarketVolatility({
+        narrativeEventsCount,
+      });
+      if (volatilityUpdates > 0) {
+        result.priceVolatilitySimulated = volatilityUpdates;
+      }
+    } catch (error) {
+      logger.warn(
+        'Volatility simulation failed',
+        { error: formatError(error) },
+        'GameTick'
+      );
+      throw error;
+    }
+
+    try {
+      const quoteRefreshes = await refreshPerpQuoteStates();
+      if (quoteRefreshes > 0) {
+        logger.info(
+          'Refreshed perp quote states',
+          { marketsUpdated: quoteRefreshes },
+          'GameTick'
+        );
+      }
+    } catch (error) {
+      logger.warn(
+        'Perp quote state refresh failed',
+        { error: formatError(error) },
+        'GameTick'
+      );
+      throw error;
+    }
+
+    try {
+      const redistributionResult =
+        await FeeRedistributionService.redistributeFunds();
+      if (redistributionResult.npcsToppedUp > 0) {
+        result.feeRedistribution = {
+          npcsToppedUp: redistributionResult.npcsToppedUp,
+          totalDistributed: redistributionResult.totalDistributed,
+          fundBalance: redistributionResult.fundBalanceAfter,
+        };
+        logger.info(
+          'Fee redistribution completed',
+          {
+            npcsToppedUp: redistributionResult.npcsToppedUp,
+            totalDistributed: redistributionResult.totalDistributed,
+            fundBalance: redistributionResult.fundBalanceAfter,
+          },
+          'GameTick'
+        );
+      }
+    } catch (error) {
+      logger.warn(
+        'Fee redistribution failed',
+        { error: formatError(error) },
+        'GameTick'
+      );
+      throw error;
+    }
+
+    // Finalize DAG trace
+    tracer?.startNode('token-stats-finalize', {});
+
+    tracer?.endNode('token-stats-finalize', { ...(result.tokenStats ?? {}) });
+
+    logger.info(
+      'Game tick completed',
+      {
+        ...result,
+        durationMs,
+        validationWarnings:
+          validationWarnings.length > 0 ? validationWarnings.length : undefined,
+      },
       'GameTick'
     );
-  }
 
-  // Finalize DAG trace
-  tracer?.startNode('token-stats-finalize', {});
-
-  tracer?.endNode('token-stats-finalize', { ...(result.tokenStats ?? {}) });
-
-  // Write DAG trace to disk if enabled
-  if (dagTraceEnabled) {
-    tracer?.setGameTickResult(result as unknown as Record<string, unknown>);
-    if (result.tokenStats) {
-      tracer?.setTokenStats({
-        totalCalls: result.tokenStats.totalCalls,
-        totalInputTokens: result.tokenStats.totalInputTokens,
-        totalOutputTokens: result.tokenStats.totalOutputTokens,
-        totalTokens: result.tokenStats.totalTokens,
-        estimatedCostUSD: result.tokenStats.estimatedCostUSD ?? 0,
-        byPromptType: {},
+    return result;
+  } catch (error) {
+    tickError = error;
+    throw error;
+  } finally {
+    if (tokenStatsService.isTickInProgress()) tokenStatsService.endTick();
+    if (dagTraceEnabled) {
+      tracer?.setGameTickResult({
+        ...result,
+        success: !tickError,
+        ...(tickError ? { error: formatError(tickError) } : {}),
       });
+      if (tickError) tracer?.failActiveNodes(tickError);
+      try {
+        const trace = endTrace();
+        if (trace) await writeTickTrace(trace);
+      } catch (traceError) {
+        if (tickError)
+          throw new AggregateError(
+            [tickError, traceError],
+            'Tick and trace persistence failed'
+          );
+        throw traceError;
+      } finally {
+        uninstallLLMInterceptor();
+      }
     }
-    const trace = endTrace();
-    if (trace) {
-      await writeTickTrace(trace);
-    }
-    uninstallLLMInterceptor();
   }
-
-  logger.info(
-    'Game tick completed',
-    {
-      ...result,
-      durationMs,
-      validationWarnings:
-        validationWarnings.length > 0 ? validationWarnings.length : undefined,
-    },
-    'GameTick'
-  );
-
-  return result;
 }
 
 async function refreshPerpQuoteStates(): Promise<number> {
@@ -1460,7 +1482,7 @@ export async function updateMarketPricesFromTrades(
  */
 async function generateNewQuestions(
   count: number,
-  llm: BabylonLLMClient,
+  llm: FeedLLMClient,
   deadlineMs: number
 ): Promise<number> {
   const questionManager = new QuestionManager(llm);
@@ -2028,9 +2050,14 @@ export async function updateWorldFactsIfNeeded(): Promise<{
   );
 
   // Set up periodic lock renewal to prevent expiry during long-running generation
+  let lockRenewalError: Error | undefined;
+  const assertLockHeld = () => {
+    if (lockRenewalError) throw lockRenewalError;
+  };
   let lockRenewalInterval: ReturnType<typeof setInterval> | null = null;
   const startLockRenewal = () => {
     lockRenewalInterval = setInterval(async () => {
+      if (lockRenewalError) return;
       try {
         const renewed = await DistributedLockService.acquireLock({
           lockId: WORLD_FACTS_LOCK_ID,
@@ -2041,6 +2068,7 @@ export async function updateWorldFactsIfNeeded(): Promise<{
         if (renewed) {
           logger.debug('World facts lock renewed', undefined, 'GameTick');
         } else {
+          lockRenewalError = new Error('World facts lock ownership lost');
           logger.warn(
             'Failed to renew world facts lock - another process may have acquired it',
             undefined,
@@ -2048,7 +2076,9 @@ export async function updateWorldFactsIfNeeded(): Promise<{
           );
         }
       } catch (error) {
-        logger.warn('Error renewing world facts lock', { error }, 'GameTick');
+        lockRenewalError =
+          error instanceof Error ? error : new Error(String(error));
+        logger.error('Error renewing world facts lock', { error }, 'GameTick');
       }
     }, WORLD_FACTS_LOCK_RENEWAL_INTERVAL_MS);
   };
@@ -2076,7 +2106,7 @@ export async function updateWorldFactsIfNeeded(): Promise<{
 
     const startTime = Date.now();
 
-    // Steps 1-3: RSS/parody pipeline - wrapped in try/catch so failures don't abort the whole tick
+    // Steps 1-3: RSS/parody pipeline; failures invalidate the tick.
     let feedResult = { fetched: 0, stored: 0, errors: 0 };
     let parodies: Awaited<
       ReturnType<
@@ -2120,6 +2150,7 @@ export async function updateWorldFactsIfNeeded(): Promise<{
         'GameTick'
       );
 
+      assertLockHeld();
       dailyTopic = await dailyTopicService.ensureTopicForDate(new Date());
       logger.info(
         'Daily topic ready',
@@ -2135,7 +2166,7 @@ export async function updateWorldFactsIfNeeded(): Promise<{
         { error },
         'GameTick'
       );
-      return { updated: false };
+      throw error;
     }
 
     // Step 4: Generate new world facts from game activity (events, markets, questions, actors)
@@ -2152,6 +2183,7 @@ export async function updateWorldFactsIfNeeded(): Promise<{
     };
     let factsGenerationSucceeded = false;
     try {
+      assertLockHeld();
       factsResult = await worldFactsGenerator.generateNewWorldFacts();
       factsGenerationSucceeded = true;
       logger.info(
@@ -2165,9 +2197,11 @@ export async function updateWorldFactsIfNeeded(): Promise<{
         { error },
         'GameTick'
       );
+      throw error;
       // Don't set factsGenerationSucceeded - marker will be skipped so retries aren't delayed
     }
 
+    assertLockHeld();
     // Step 5: Insert last-run marker to prevent re-triggers when generation produces 0 facts
     // Only insert marker on successful runs - failed runs should allow immediate retry
     if (factsGenerationSucceeded) {
@@ -2194,9 +2228,11 @@ export async function updateWorldFactsIfNeeded(): Promise<{
           { error, markerId, factsGenerated: factsResult.generated },
           'GameTick'
         );
+        throw error;
       }
     }
 
+    assertLockHeld();
     const duration = Date.now() - startTime;
     logger.info(
       '✅ World facts update completed',
@@ -2411,7 +2447,7 @@ export async function simulateMarketVolatility(options?: {
       { error: formatError(error) },
       'MarketVolatility'
     );
-    return 0;
+    throw error;
   }
 }
 
@@ -2427,7 +2463,7 @@ export async function simulateMarketVolatility(options?: {
 async function processNarrativeArcs(
   activeQuestions: Array<{ id: string }>,
   dayNumber: number,
-  llmClient: BabylonLLMClient
+  llmClient: FeedLLMClient
 ): Promise<{
   arcsProcessed: number;
   transitioned: number;
@@ -2484,6 +2520,7 @@ async function processNarrativeArcs(
         { error: formatError(error) },
         'GameTick'
       );
+      throw error;
     }
   }
 

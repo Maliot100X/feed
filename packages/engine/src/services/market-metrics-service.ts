@@ -22,8 +22,8 @@ import {
   predictionPriceHistories,
   sql,
   stockPrices,
-} from '@babylon/db';
-import { logger } from '@babylon/shared';
+} from '@feed/db';
+import { logger } from '@feed/shared';
 import { first, last } from '../utils/array-utils';
 import { formatError } from '../utils/error-utils';
 import { StaticDataRegistry } from './static-data-registry';
@@ -369,36 +369,12 @@ export class MarketMetricsService {
           });
         }
       } catch (error) {
-        // Only swallow "missing table" errors (Postgres error code 42P01)
-        // Other errors (connection, permission, query issues) should propagate
-        const errorMessage = formatError(error);
-        const errorCode =
-          error && typeof error === 'object' && 'code' in error
-            ? (error as { code?: string }).code
-            : undefined;
-
-        // Prefer Postgres error code 42P01 for missing table detection
-        // Fallback message check only for non-Postgres drivers (simplified pattern)
-        const isMissingTableError =
-          errorCode === '42P01' ||
-          errorMessage.toLowerCase().includes('does not exist');
-
-        if (isMissingTableError) {
-          // Table may not exist in all environments - continue without snapshot data
-          logger.debug(
-            'PerpMarketSnapshot table not available, using stockPrices only',
-            { error: errorMessage },
-            'MarketMetrics'
-          );
-        } else {
-          // Real DB error - log as error and rethrow
-          logger.error(
-            'Failed to query PerpMarketSnapshot',
-            { error: errorMessage, errorCode },
-            'MarketMetrics'
-          );
-          throw error;
-        }
+        logger.error(
+          'Failed to query required PerpMarketSnapshot data',
+          { error: formatError(error) },
+          'MarketMetrics'
+        );
+        throw error;
       }
     }
 

@@ -4,7 +4,7 @@
  * Runs each unit test file in its own bun subprocess so mock.module()
  * calls in one file cannot leak into another. Bun's test runner shares
  * a single module registry across all files in a single invocation,
- * which means mock.module('@babylon/shared', ...) in file A replaces
+ * which means mock.module('@feed/shared', ...) in file A replaces
  * the real module for file B too. This script works around that by
  * spawning a separate `bun test <file>` for each test file.
  *
@@ -17,6 +17,7 @@ import { join, relative, resolve } from 'node:path';
 
 const ROOT = resolve(import.meta.dir, '..');
 const TEST_DIRS = [
+  join(ROOT, 'apps/cli/src'),
   join(ROOT, 'packages/testing/unit'),
   join(ROOT, 'scripts'),
   join(ROOT, 'packages/engine/src'),
@@ -54,18 +55,30 @@ const EXCLUDED_FILES = new Set([
   'packages/engine/src/__tests__/integration/npc-voice-diversity.test.ts',
   // Queries ActorState table — requires a running database
   'packages/testing/unit/actor-context-builder.test.ts',
-  // Missing fixture files (need `bun run packages/training/scripts/generate-benchmark-scenarios.ts`)
-  'packages/training/src/benchmark/__tests__/ScenarioLoader.test.ts',
 ]);
-// Make concurrency configurable via env var, with a sensible default
-const CONCURRENCY = Number(process.env.TEST_CONCURRENCY) || 4;
+
+function resolveConcurrency(raw: string | undefined): number {
+  if (raw === undefined || raw === '') return 4;
+  const value = Number(raw);
+  if (!Number.isInteger(value) || value < 1) {
+    throw new Error(
+      `TEST_CONCURRENCY must be a positive integer, received "${raw}"`
+    );
+  }
+  return value;
+}
+
+const CONCURRENCY = resolveConcurrency(process.env.TEST_CONCURRENCY);
 
 export function collectTestFiles(dir: string): string[] {
   let entries: ReturnType<typeof readdirSync>;
   try {
     entries = readdirSync(dir, { withFileTypes: true });
-  } catch {
-    return [];
+  } catch (error) {
+    // A missing optional test directory is fine; any other read failure would
+    // silently drop tests from the gate, so surface it.
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return [];
+    throw error;
   }
   const files: string[] = [];
   for (const entry of entries) {
@@ -102,9 +115,13 @@ async function runOne(
     stdout: 'pipe',
     stderr: 'pipe',
   });
-  const exitCode = await proc.exited;
-  const stdout = await new Response(proc.stdout).text();
-  const stderr = await new Response(proc.stderr).text();
+  // Drain both pipes while waiting for exit: awaiting exit first can deadlock
+  // once a chatty test fills the pipe buffer.
+  const [exitCode, stdout, stderr] = await Promise.all([
+    proc.exited,
+    new Response(proc.stdout).text(),
+    new Response(proc.stderr).text(),
+  ]);
   return { rel, exitCode, stdout, stderr };
 }
 
@@ -135,7 +152,8 @@ async function main() {
 
     for (const { rel, exitCode, stdout, stderr } of results) {
       if (exitCode === 0) {
-        const match = stdout.match(/(\d+) pass/);
+        // bun test prints its summary on stderr.
+        const match = `${stdout}\n${stderr}`.match(/(\d+) pass/);
         const count = match ? match[1] : '?';
         console.log(`  ✓ ${rel} (${count} pass)`);
         passed++;

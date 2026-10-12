@@ -1,5 +1,5 @@
-import { ingestSentryWebhook, withErrorHandling } from '@babylon/api';
-import { logger } from '@babylon/shared';
+import { ingestSentryWebhook, withErrorHandling } from '@feed/api';
+import { logger } from '@feed/shared';
 import { NextResponse } from 'next/server';
 
 const DEFAULT_MAX_TIMESTAMP_SKEW_SECONDS = 300;
@@ -7,7 +7,6 @@ const MIN_TIMESTAMP_SKEW_SECONDS = 30;
 const MAX_TIMESTAMP_SKEW_SECONDS = 3600;
 
 export const dynamic = 'force-dynamic';
-export const maxDuration = 30;
 
 function parseMaxTimestampSkewSeconds(): number {
   const rawValue = process.env.SENTRY_WEBHOOK_MAX_TIMESTAMP_SKEW_SECONDS;

@@ -35,6 +35,30 @@ function indexKey(userId: string): string {
   return `chat-msgs-index:${userId}`;
 }
 
+/**
+ * Keep the newest MAX_CACHED_MESSAGES_PER_CHAT messages (chronological
+ * order). When older messages are dropped, pagination must resume from the
+ * oldest retained message (the API cursor is "messages older than this ID"),
+ * and there are by definition more messages to load.
+ */
+export function trimForCache(
+  data: Pick<ChatMessagesData, 'messages' | 'hasMore' | 'nextCursor'>
+): Pick<CachedChatMessages, 'messages' | 'hasMore' | 'nextCursor'> {
+  if (data.messages.length <= MAX_CACHED_MESSAGES_PER_CHAT) {
+    return {
+      messages: data.messages,
+      hasMore: data.hasMore,
+      nextCursor: data.nextCursor,
+    };
+  }
+  const messages = data.messages.slice(-MAX_CACHED_MESSAGES_PER_CHAT);
+  return {
+    messages,
+    hasMore: true,
+    nextCursor: messages[0]?.id ?? data.nextCursor,
+  };
+}
+
 export async function getCachedMessages(
   userId: string,
   chatId: string
@@ -52,9 +76,7 @@ export async function setCachedMessages(
   if (!isBrowser) return;
   const trimmed: CachedChatMessages = {
     chatId,
-    messages: data.messages.slice(-MAX_CACHED_MESSAGES_PER_CHAT),
-    hasMore: data.hasMore,
-    nextCursor: data.nextCursor,
+    ...trimForCache(data),
     cachedAt: Date.now(),
   };
   await set(storeKey(userId, chatId), trimmed);

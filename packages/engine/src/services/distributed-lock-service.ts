@@ -1,7 +1,7 @@
 /**
  * Distributed lock abstraction (engine-side).
  *
- * The engine should not depend on `@babylon/api` (Next.js / Redis / edge-specific),
+ * The engine should not depend on `@feed/api` (Next.js / Redis / edge-specific),
  * but some workflows still need best-effort locking to avoid race conditions.
  *
  * By default this uses an in-memory lock (single-process). The web/api layer can
@@ -27,7 +27,11 @@ class InMemoryDistributedLockProvider implements DistributedLockProvider {
     const now = Date.now();
     const current = this.locks.get(params.lockId);
 
-    if (current && current.expiresAt > now) {
+    if (
+      current &&
+      current.expiresAt > now &&
+      current.processId !== params.processId
+    ) {
       return false;
     }
 

@@ -1,6 +1,6 @@
 'use client';
 
-import { logger } from '@babylon/shared';
+import { logger } from '@feed/shared';
 import { useQueryClient } from '@tanstack/react-query';
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { useStewardAuthContext } from '@/components/providers/StewardAuthProvider';
@@ -11,6 +11,8 @@ import {
 } from '@/lib/auth/dev-auth';
 import { clearUserChatCache } from '@/lib/chat/message-store';
 import { type User, useAuthStore } from '@/stores/authStore';
+import { useInteractionStore } from '@/stores/interactionStore';
+import { useWidgetCacheStore } from '@/stores/widgetCacheStore';
 import { apiFetch } from '@/utils/api-fetch';
 import {
   listStorageKeys,
@@ -46,7 +48,9 @@ interface UseAuthReturn {
 
 // Global fetch deduplication — shared across all useAuth instances
 let globalFetchInFlight: Promise<void> | null = null;
-let globalTokenRetryTimeout: number | null = null;
+// Bumped on logout so an in-flight profile response from the previous
+// session can never repopulate auth state afterwards.
+let authSessionGeneration = 0;
 
 /**
  * Main authentication hook.
@@ -91,32 +95,6 @@ export function useAuth(): UseAuthReturn {
     return stewardAuth.getToken() ?? null;
   }, [devAuthSession, stewardAuth]);
 
-  // TODO: Phase 3 — rename window.__privyAccessToken / __privyGetAccessToken
-  // to window.__accessToken / __getAccessToken once all consumers have migrated.
-  // Keep window-level token in sync for apiFetch legacy compatibility
-  useEffect(() => {
-    const token = stewardAuth.getToken();
-    if (typeof window !== 'undefined') {
-      (
-        window as Window & { __privyAccessToken?: string | null }
-      ).__privyAccessToken = token;
-      (
-        window as Window & {
-          __privyGetAccessToken?: () => Promise<string | null>;
-        }
-      ).__privyGetAccessToken = getAccessToken;
-    }
-    return () => {
-      if (typeof window !== 'undefined') {
-        (
-          window as Window & {
-            __privyGetAccessToken?: () => Promise<string | null>;
-          }
-        ).__privyGetAccessToken = undefined;
-      }
-    };
-  }, [getAccessToken, stewardAuth]);
-
   // ── Dev auth sync ─────────────────────────────────────────────────────────
 
   useEffect(() => {
@@ -135,33 +113,41 @@ export function useAuth(): UseAuthReturn {
 
   const fetchDevCurrentUser = useCallback(async () => {
     if (!devAuthSession) return;
+    const generation = authSessionGeneration;
     setIsLoadingProfile(true);
     setLoadedUserId(devAuthSession.userId);
-    const response = await fetch('/api/users/me', {
-      headers: { Authorization: `Bearer ${devAuthSession.accessToken}` },
-      credentials: 'include',
-    });
-    if (!response.ok) {
-      setIsLoadingProfile(false);
-      return;
-    }
-    const data = (await response.json()) as {
-      authenticated: boolean;
-      needsOnboarding: boolean;
-      user: User | null;
-    };
-    setNeedsOnboarding(data.needsOnboarding);
-    if (data.user) {
-      setUser({
-        ...data.user,
-        displayName:
-          data.user.displayName?.trim() ||
-          devAuthSession.displayName ||
-          'Dev User',
-        email: data.user.email ?? devAuthSession.email ?? undefined,
+    try {
+      const response = await fetch('/api/users/me', {
+        headers: { Authorization: `Bearer ${devAuthSession.accessToken}` },
+        credentials: 'include',
       });
+      if (!response.ok) return;
+      const data = (await response.json()) as {
+        authenticated: boolean;
+        needsOnboarding: boolean;
+        user: User | null;
+      };
+      if (generation !== authSessionGeneration) return;
+      setNeedsOnboarding(data.needsOnboarding);
+      if (data.user) {
+        setUser({
+          ...data.user,
+          displayName:
+            data.user.displayName?.trim() ||
+            devAuthSession.displayName ||
+            'Dev User',
+          email: data.user.email ?? devAuthSession.email ?? undefined,
+        });
+      }
+    } catch (error) {
+      logger.warn(
+        'Dev auth profile fetch failed',
+        { error: error instanceof Error ? error.message : String(error) },
+        'useAuth'
+      );
+    } finally {
+      setIsLoadingProfile(false);
     }
-    setIsLoadingProfile(false);
   }, [
     devAuthSession,
     setIsLoadingProfile,
@@ -172,133 +158,128 @@ export function useAuth(): UseAuthReturn {
 
   // ── Profile fetch (Steward) ───────────────────────────────────────────────
 
-  const fetchCurrentUser = useCallback(
-    async (retryCount = 0) => {
-      if (!authenticated || !session) return;
-      if (globalFetchInFlight) {
-        await globalFetchInFlight;
+  const fetchCurrentUser = useCallback(async () => {
+    if (!authenticated || !session) return;
+    if (globalFetchInFlight) {
+      await globalFetchInFlight;
+      return;
+    }
+
+    const run = async () => {
+      const generation = authSessionGeneration;
+      setIsLoadingProfile(true);
+      setProfileFetchStatus('loading');
+      setLoadedUserId(session.userId ?? session.address);
+
+      // Steward reads its token synchronously from storage; if it is not
+      // there now, waiting will not produce one (session changes re-run
+      // this effect). End in a terminal error state instead of loading.
+      if (!stewardAuth.getToken()) {
+        logger.warn(
+          'Steward token unavailable for profile fetch',
+          {},
+          'useAuth'
+        );
+        setProfileFetchStatus('error');
+        setIsLoadingProfile(false);
         return;
       }
 
-      const run = async () => {
-        setIsLoadingProfile(true);
-        setProfileFetchStatus('loading');
-        setLoadedUserId(session.userId ?? session.address);
+      const referralCode =
+        typeof window !== 'undefined'
+          ? readStorageItem('sessionStorage', 'referralCode')
+          : null;
+      const url = referralCode
+        ? `/api/users/me?ref=${encodeURIComponent(referralCode)}`
+        : '/api/users/me';
 
-        const token = stewardAuth.getToken();
-        if (!token) {
-          if (retryCount >= 5) {
-            logger.error(
-              'Steward token unavailable after max retries',
-              { retryCount },
-              'useAuth'
-            );
-            setIsLoadingProfile(false);
-            return;
-          }
-          setIsLoadingProfile(false);
-          if (typeof window !== 'undefined') {
-            if (globalTokenRetryTimeout)
-              window.clearTimeout(globalTokenRetryTimeout);
-            globalTokenRetryTimeout = window.setTimeout(
-              () => void fetchCurrentUser(retryCount + 1),
-              200 * (retryCount + 1)
-            );
-          }
-          return;
-        }
-
-        const referralCode =
-          typeof window !== 'undefined'
-            ? readStorageItem('sessionStorage', 'referralCode')
-            : null;
-        const url = referralCode
-          ? `/api/users/me?ref=${encodeURIComponent(referralCode)}`
-          : '/api/users/me';
-
-        let response: Response;
-        try {
-          response = await apiFetch(url);
-        } catch (networkError) {
-          logger.warn(
-            'Failed to reach /api/users/me — keeping persisted auth state',
-            {
-              error:
-                networkError instanceof Error
-                  ? networkError.message
-                  : String(networkError),
-            },
-            'useAuth'
-          );
-          setProfileFetchStatus('error');
-          setIsLoadingProfile(false);
-          return;
-        }
-
-        if (response.status === 401) {
-          setProfileFetchStatus('error');
-          setIsLoadingProfile(false);
-          return;
-        }
-
-        if (!response.ok) {
-          logger.warn(
-            'Non-OK response from /api/users/me — keeping persisted auth state',
-            { status: response.status },
-            'useAuth'
-          );
-          setProfileFetchStatus('error');
-          setIsLoadingProfile(false);
-          return;
-        }
-
-        const data = (await response.json()) as {
-          authenticated: boolean;
-          needsOnboarding: boolean;
-          user: User | null;
-        };
-
-        setNeedsOnboarding(data.needsOnboarding ?? false);
-        setProfileFetchStatus('done');
-
-        if (data.user) {
-          setUser(data.user);
-        } else {
-          // Session valid but no profile yet — set minimal user
-          const currentUser = useAuthStore.getState().user;
-          if (!currentUser) {
-            setUser({
-              id: session.userId ?? session.address,
-              displayName: session.email ?? 'Anonymous',
-              email: session.email ?? undefined,
-            });
-          }
-        }
-
+      let response: Response;
+      try {
+        response = await apiFetch(url);
+      } catch (networkError) {
+        logger.warn(
+          'Failed to reach /api/users/me — keeping persisted auth state',
+          {
+            error:
+              networkError instanceof Error
+                ? networkError.message
+                : String(networkError),
+          },
+          'useAuth'
+        );
+        setProfileFetchStatus('error');
         setIsLoadingProfile(false);
-      };
+        return;
+      }
 
-      const promise = run().finally(() => {
-        globalFetchInFlight = null;
-        if (typeof window !== 'undefined' && globalTokenRetryTimeout) {
-          window.clearTimeout(globalTokenRetryTimeout);
-          globalTokenRetryTimeout = null;
+      if (response.status === 401) {
+        setProfileFetchStatus('error');
+        setIsLoadingProfile(false);
+        return;
+      }
+
+      if (!response.ok) {
+        logger.warn(
+          'Non-OK response from /api/users/me — keeping persisted auth state',
+          { status: response.status },
+          'useAuth'
+        );
+        setProfileFetchStatus('error');
+        setIsLoadingProfile(false);
+        return;
+      }
+
+      const data = (await response.json().catch(() => null)) as {
+        authenticated: boolean;
+        needsOnboarding: boolean;
+        user: User | null;
+      } | null;
+
+      if (!data) {
+        logger.warn('Malformed /api/users/me response', {}, 'useAuth');
+        setProfileFetchStatus('error');
+        setIsLoadingProfile(false);
+        return;
+      }
+
+      // The user logged out while this request was in flight.
+      if (generation !== authSessionGeneration) return;
+
+      setNeedsOnboarding(data.needsOnboarding ?? false);
+      setProfileFetchStatus('done');
+
+      if (data.user) {
+        setUser(data.user);
+      } else {
+        // Session valid but no profile yet — set minimal user
+        const currentUser = useAuthStore.getState().user;
+        if (!currentUser) {
+          setUser({
+            id: session.userId ?? session.address,
+            displayName: session.email ?? 'Anonymous',
+            email: session.email ?? undefined,
+          });
         }
-      });
-      globalFetchInFlight = promise;
-      await promise;
-    },
-    [
-      authenticated,
-      session,
-      stewardAuth,
-      setIsLoadingProfile,
-      setProfileFetchStatus,
-      setLoadedUserId,
-      setNeedsOnboarding,
-      setUser,
-    ]
-  );
+      }
+
+      setIsLoadingProfile(false);
+    };
+
+    const promise = run().finally(() => {
+      globalFetchInFlight = null;
+    });
+    globalFetchInFlight = promise;
+    await promise;
+  }, [
+    authenticated,
+    session,
+    stewardAuth,
+    setIsLoadingProfile,
+    setProfileFetchStatus,
+    setLoadedUserId,
+    setNeedsOnboarding,
+    setUser,
+  ]);
 
   // ── Auth state changes ────────────────────────────────────────────────────
 
@@ -328,17 +309,6 @@ export function useAuth(): UseAuthReturn {
     void fetchCurrentUser();
   }, [authenticated, devAuthSession, fetchCurrentUser, fetchDevCurrentUser]);
 
-  // ── Cleanup ───────────────────────────────────────────────────────────────
-
-  useEffect(() => {
-    return () => {
-      if (typeof window !== 'undefined' && globalTokenRetryTimeout) {
-        window.clearTimeout(globalTokenRetryTimeout);
-        globalTokenRetryTimeout = null;
-      }
-    };
-  }, []);
-
   // ── Actions ───────────────────────────────────────────────────────────────
 
   const refresh = async () => {
@@ -355,8 +325,12 @@ export function useAuth(): UseAuthReturn {
   }, [showLoginModal]);
 
   const handleLogout = async () => {
+    authSessionGeneration += 1;
     const logoutUserId = user?.id;
     queryClient.clear();
+    // Drop per-user client caches that outlive the React Query cache.
+    useInteractionStore.getState().resetStore();
+    useWidgetCacheStore.getState().clearAll();
     if (logoutUserId) void clearUserChatCache(logoutUserId);
 
     if (devAuthSession) {
@@ -367,13 +341,9 @@ export function useAuth(): UseAuthReturn {
         (
           window as Window & { __privyAccessToken?: string | null }
         ).__privyAccessToken = null;
-        localStorage.removeItem('babylon-auth');
+        removeStorageItem('localStorage', 'feed-auth');
       }
       globalFetchInFlight = null;
-      if (globalTokenRetryTimeout !== null) {
-        clearTimeout(globalTokenRetryTimeout);
-        globalTokenRetryTimeout = null;
-      }
       return;
     }
 
@@ -394,14 +364,10 @@ export function useAuth(): UseAuthReturn {
       (
         window as Window & { __privyAccessToken?: string | null }
       ).__privyAccessToken = null;
-      removeStorageItem('localStorage', 'babylon-auth');
+      removeStorageItem('localStorage', 'feed-auth');
     }
 
     globalFetchInFlight = null;
-    if (globalTokenRetryTimeout !== null) {
-      clearTimeout(globalTokenRetryTimeout);
-      globalTokenRetryTimeout = null;
-    }
 
     logger.info(
       'User logged out and all auth state cleared',

@@ -49,8 +49,8 @@ import {
   logAdminView,
   requireAdmin,
   withErrorHandling,
-} from '@babylon/api';
-import { db } from '@babylon/db';
+} from '@feed/api';
+import { db } from '@feed/db';
 import type { NextRequest } from 'next/server';
 import { NextResponse } from 'next/server';
 

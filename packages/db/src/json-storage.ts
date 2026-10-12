@@ -1,12 +1,12 @@
 /**
- * JSON Storage Backend for @babylon/db
+ * JSON Storage Backend for @feed/db
  *
  * Provides a file-based storage implementation that mirrors the PostgreSQL interface.
  * Used for simulation, training data generation, and debugging.
  *
  * Usage:
  * ```typescript
- * import { initJsonStorage, db } from '@babylon/db';
+ * import { initJsonStorage, db } from '@feed/db';
  *
  * // Initialize JSON mode
  * await initJsonStorage('./simulation-data');
@@ -128,23 +128,53 @@ function generateId(tableName: string): string {
 // Query Matching
 // ============================================================================
 
+const NUMERIC_STRING = /^-?\d+(\.\d+)?$/;
+const SUPPORTED_JSON_WHERE_OPS = new Set([
+  'equals',
+  'not',
+  'in',
+  'notIn',
+  'lt',
+  'lte',
+  'gt',
+  'gte',
+  'contains',
+  'mode',
+]);
+
+/** Comparable scalar: numbers and numeric strings as numbers, dates as ms. */
+function toComparableNumber(v: JsonValue | Date | undefined): number | null {
+  if (typeof v === 'number') return v;
+  if (v instanceof Date) return v.getTime();
+  if (typeof v === 'string') {
+    if (NUMERIC_STRING.test(v)) return Number(v);
+    const parsed = Date.parse(v);
+    return Number.isNaN(parsed) ? null : parsed;
+  }
+  return null;
+}
+
+/**
+ * Equality that treats Dates by value (stored records may hold Dates or ISO
+ * strings after a snapshot load).
+ */
+function valuesEqual(
+  a: JsonValue | Date | undefined,
+  b: JsonValue | Date | undefined
+): boolean {
+  if (a instanceof Date || b instanceof Date) {
+    const left = toComparableNumber(a);
+    const right = toComparableNumber(b);
+    return left !== null && left === right;
+  }
+  return a === b;
+}
+
 function matchesWhere<T extends JsonRecord>(
   record: T,
   where: WhereInput<T> | undefined
 ): boolean {
   if (!where) return true;
-
-  const toComparableNumber = (
-    v: JsonValue | Date | undefined
-  ): number | null => {
-    if (typeof v === 'number') return v;
-    if (v instanceof Date) return v.getTime();
-    if (typeof v === 'string') {
-      const parsed = Date.parse(v);
-      return Number.isNaN(parsed) ? null : parsed;
-    }
-    return null;
-  };
 
   // Handle AND
   if (where.AND) {
@@ -182,18 +212,29 @@ function matchesWhere<T extends JsonRecord>(
       !(condition instanceof Date)
     ) {
       const ops = condition as Record<string, JsonValue>;
+      const unsupported = Object.keys(ops).filter(
+        (op) => !SUPPORTED_JSON_WHERE_OPS.has(op)
+      );
+      if (unsupported.length > 0) {
+        // Silently ignoring an operator would match every record.
+        throw new Error(
+          `Unsupported where operator(s) ${unsupported.join(', ')} on field "${key}"`
+        );
+      }
 
       if ('equals' in ops) {
-        if (value !== ops.equals) return false;
+        if (!valuesEqual(value, ops.equals)) return false;
       }
       if ('not' in ops) {
-        if (value === ops.not) return false;
+        if (valuesEqual(value, ops.not)) return false;
       }
       if ('in' in ops && Array.isArray(ops.in)) {
-        if (!ops.in.includes(value as JsonValue)) return false;
+        if (!ops.in.some((candidate) => valuesEqual(value, candidate)))
+          return false;
       }
       if ('notIn' in ops && Array.isArray(ops.notIn)) {
-        if (ops.notIn.includes(value as JsonValue)) return false;
+        if (ops.notIn.some((candidate) => valuesEqual(value, candidate)))
+          return false;
       }
       if ('lt' in ops) {
         const left = toComparableNumber(value as JsonValue | Date | undefined);
@@ -228,8 +269,10 @@ function matchesWhere<T extends JsonRecord>(
           return false;
       }
     } else {
-      // Direct equality
-      if (value !== condition) return false;
+      // Direct equality (Dates compared by value). Arrays are not valid
+      // equality conditions.
+      if (Array.isArray(condition)) return false;
+      if (!valuesEqual(value, condition as JsonValue | Date)) return false;
     }
   }
 
@@ -314,8 +357,9 @@ export class JsonTableRepository<
     records = records.filter((r) => matchesWhere(r, options.where));
     records = sortRecords(records, options.orderBy);
     if (options.skip) records = records.slice(options.skip);
-    if (options.take) records = records.slice(0, options.take);
-    return records;
+    if (options.take !== undefined) records = records.slice(0, options.take);
+    // Return copies so callers cannot mutate stored records in place.
+    return records.map((record) => ({ ...record }));
   }
 
   async create(options: { data: TInsert }): Promise<TSelect> {
@@ -332,10 +376,16 @@ export class JsonTableRepository<
     if (!data.updatedAt) data.updatedAt = new Date();
 
     const id = String(data[this.idField]);
+    if (table[id]) {
+      // Match PostgreSQL primary-key semantics instead of overwriting.
+      throw new Error(
+        `Unique constraint violation: ${this.tableName}.${this.idField} = ${id}`
+      );
+    }
     table[id] = data;
 
     onStateChange();
-    return data as TSelect;
+    return { ...data } as TSelect;
   }
 
   async createMany(options: {

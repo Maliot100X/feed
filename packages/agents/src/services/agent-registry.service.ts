@@ -8,8 +8,8 @@
  * @packageDocumentation
  */
 
-import { verifyApiKey } from '@babylon/api';
-import type { JsonValue } from '@babylon/db';
+import { verifyApiKey } from '@feed/api';
+import type { JsonValue } from '@feed/db';
 import {
   type AgentRegistry,
   agentCapabilities,
@@ -27,9 +27,9 @@ import {
   or,
   type User,
   users,
-} from '@babylon/db';
-import { type StaticActor, StaticDataRegistry } from '@babylon/engine';
-import { logger } from '@babylon/shared';
+} from '@feed/db';
+import { type StaticActor, StaticDataRegistry } from '@feed/engine';
+import { logger } from '@feed/shared';
 import { createCipheriv, createDecipheriv, randomBytes } from 'crypto';
 import type {
   AgentCapabilities,
@@ -45,9 +45,12 @@ import { AgentStatus, AgentType } from '../types/agent-registry';
  * @internal
  */
 const getEncryptionKey = () => {
+  if (process.env.AGENT_ENCRYPTION_KEY) return process.env.AGENT_ENCRYPTION_KEY;
   if (process.env.CRON_SECRET) return process.env.CRON_SECRET;
   if (process.env.NODE_ENV === 'production') {
-    throw new Error('CRON_SECRET must be set in production');
+    throw new Error(
+      'AGENT_ENCRYPTION_KEY or CRON_SECRET must be set in production'
+    );
   }
   return 'dev-key-change-in-production-32-chars!!';
 };

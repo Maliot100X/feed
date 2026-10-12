@@ -3,7 +3,7 @@ import {
   getInitialReserves,
   logger,
   PERP_MARKET_CONFIG,
-} from '@babylon/shared';
+} from '@feed/shared';
 import {
   evolveSyntheticPerpQuoteState,
   getSyntheticPerpExecutionPrice,
@@ -245,10 +245,15 @@ export class PerpMarketService {
     try {
       // Use the immutable base price so average-fill math matches the
       // constant-product price impact port on both open and close legs.
-      const basePrice =
-        (await this.deps.priceImpact.getBasePrice?.(ticker)) ?? preImpactEntry;
-      if (!Number.isFinite(basePrice) || basePrice <= 0) {
-        return undefined;
+      const basePrice = await this.deps.priceImpact.getBasePrice?.(ticker);
+      if (
+        basePrice === undefined ||
+        !Number.isFinite(basePrice) ||
+        basePrice <= 0
+      ) {
+        throw new Error(
+          'Configured price impact port returned missing or invalid required pricing context'
+        );
       }
 
       const postImpactPrice =
@@ -258,7 +263,9 @@ export class PerpMarketService {
         !Number.isFinite(postImpactPrice) ||
         postImpactPrice <= 0
       ) {
-        return undefined;
+        throw new Error(
+          'Configured price impact port returned missing or invalid required pricing context'
+        );
       }
 
       const signedTradeSize = side === 'long' ? tradeSize : -tradeSize;
@@ -267,7 +274,9 @@ export class PerpMarketService {
         postImpactPrice
       );
       if (netHoldingsAfter === undefined) {
-        return undefined;
+        throw new Error(
+          'Configured price impact port returned missing or invalid required pricing context'
+        );
       }
 
       const netHoldingsBefore = netHoldingsAfter - signedTradeSize;
@@ -325,7 +334,7 @@ export class PerpMarketService {
         },
         'PerpService'
       );
-      return undefined;
+      throw error;
     }
   }
 
@@ -343,11 +352,17 @@ export class PerpMarketService {
     if (!this.deps.priceImpact) return undefined;
 
     try {
-      const basePrice =
-        (await this.deps.priceImpact.getBasePrice?.(params.ticker)) ??
-        params.currentSpotPrice;
-      if (!Number.isFinite(basePrice) || basePrice <= 0) {
-        return undefined;
+      const basePrice = await this.deps.priceImpact.getBasePrice?.(
+        params.ticker
+      );
+      if (
+        basePrice === undefined ||
+        !Number.isFinite(basePrice) ||
+        basePrice <= 0
+      ) {
+        throw new Error(
+          'Configured price impact port returned missing or invalid required pricing context'
+        );
       }
 
       const netHoldingsBefore = deriveNetHoldingsFromSpotPrice(
@@ -355,7 +370,9 @@ export class PerpMarketService {
         params.currentSpotPrice
       );
       if (netHoldingsBefore === undefined) {
-        return undefined;
+        throw new Error(
+          'Configured price impact port returned missing or invalid required pricing context'
+        );
       }
 
       const signedTradeSize =
@@ -380,7 +397,7 @@ export class PerpMarketService {
         },
         'PerpService'
       );
-      return undefined;
+      throw error;
     }
   }
 
@@ -393,7 +410,10 @@ export class PerpMarketService {
     if (!this.deps.priceImpact) return undefined;
 
     try {
-      return await this.deps.priceImpact.applyAndGetPrice(ticker);
+      const price = await this.deps.priceImpact.applyAndGetPrice(ticker);
+      if (price === undefined || !Number.isFinite(price) || price <= 0)
+        throw new Error(`Missing/invalid post-close price for ${ticker}`);
+      return price;
     } catch (error) {
       logger.error(
         'Post-close market impact update failed',
@@ -403,7 +423,7 @@ export class PerpMarketService {
         },
         'PerpService'
       );
-      return undefined;
+      throw error;
     }
   }
 
@@ -488,6 +508,22 @@ export class PerpMarketService {
    */
   async openPosition(input: PerpOpenInput): Promise<PerpTradeResult> {
     const { ticker, side, size, leverage, maxSlippage } = input;
+    if (
+      !Number.isFinite(size) ||
+      size <= 0 ||
+      !Number.isFinite(leverage) ||
+      leverage < 1
+    )
+      throw new Error(
+        'Position size and leverage must be finite positive values'
+      );
+    if (side !== 'long' && side !== 'short')
+      throw new Error('Invalid perp side');
+    if (
+      maxSlippage !== undefined &&
+      (!Number.isFinite(maxSlippage) || maxSlippage < 0 || maxSlippage > 1)
+    )
+      throw new Error('maxSlippage must be finite and between 0 and 1');
     const markets = await this.db.listMarkets();
     const market = markets.find((m) => m.ticker === ticker);
     if (!market) {
@@ -2339,7 +2375,7 @@ function calculateDynamicFundingRate(params: {
  * Funding payment for a single period given a **pre-converted** period rate.
  *
  * NOTE: This differs from the shared ``calculateFundingPayment`` in
- * ``@babylon/shared/perps-types`` which accepts an **annual** rate and
+ * ``@feed/shared/perps-types`` which accepts an **annual** rate and
  * internally divides by periods-per-year.  Here the caller
  * (``processFundingStep``) already converts to a period rate via
  * ``annualRate / periodsPerYear()``, so no further division is needed.

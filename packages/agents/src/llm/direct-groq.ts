@@ -11,8 +11,8 @@
  */
 
 import { createGroq } from '@ai-sdk/groq';
-import { GROQ_MODELS } from '@babylon/shared';
 import type { IAgentRuntime } from '@elizaos/core';
+import { GROQ_MODELS, getAgentLLMBridge, getSurplusConfig } from '@feed/shared';
 import { generateText } from 'ai';
 import {
   ensureTrajectoryStep,
@@ -21,6 +21,7 @@ import {
 } from '../plugins/plugin-trajectory-logger/src/action-interceptor';
 import { isPromptLoggingEnabled, logPrompt } from '../utils/prompt-logger';
 import { buildReasoningTraceMetadata } from './reasoning-trace';
+import { getAgentLLMTimeoutMs } from './request-timeout';
 
 function getRuntimeSetting(
   runtime: IAgentRuntime | undefined,
@@ -35,6 +36,8 @@ function getRuntimeSetting(
 }
 
 function resolveGroqBaseURL(runtime: IAgentRuntime | undefined): string {
+  const surplus = getSurplusConfig();
+  if (surplus) return surplus.baseURL;
   // When ElizaCloud is configured, route through its OpenAI-compatible proxy
   const elizacloudKey =
     getRuntimeSetting(runtime, 'ELIZACLOUD_API_KEY') ||
@@ -54,10 +57,12 @@ function resolveGroqBaseURL(runtime: IAgentRuntime | undefined): string {
   );
 }
 
-function resolveGroqModel(params: {
+export function resolveGroqModel(params: {
   modelSize?: 'small' | 'large';
   runtime?: IAgentRuntime;
 }): string {
+  const surplus = getSurplusConfig();
+  if (surplus) return surplus.model;
   const defaultSmall = process.env.GROQ_SMALL_MODEL || GROQ_MODELS.FREE.modelId;
   const defaultLarge = process.env.GROQ_LARGE_MODEL || GROQ_MODELS.PRO.modelId;
 
@@ -66,7 +71,9 @@ function resolveGroqModel(params: {
   const largeModel =
     getRuntimeSetting(params.runtime, 'GROQ_LARGE_MODEL') || defaultLarge;
   const primaryModel =
-    getRuntimeSetting(params.runtime, 'GROQ_PRIMARY_MODEL') || largeModel;
+    getRuntimeSetting(params.runtime, 'GROQ_PRIMARY_MODEL') ||
+    process.env.GROQ_PRIMARY_MODEL ||
+    largeModel;
 
   if (params.modelSize === 'small') {
     return smallModel;
@@ -76,6 +83,37 @@ function resolveGroqModel(params: {
   }
 
   return primaryModel;
+}
+
+export function createAgentGroq(runtime?: IAgentRuntime) {
+  const surplus = getSurplusConfig();
+  if (surplus) {
+    return createGroq({
+      apiKey: surplus.apiKey,
+      fetch: runtime?.fetch ?? undefined,
+      baseURL: surplus.baseURL,
+    });
+  }
+  const elizacloudKey =
+    getRuntimeSetting(runtime, 'ELIZACLOUD_API_KEY') ||
+    process.env.ELIZACLOUD_API_KEY;
+  const isElizaCloud = Boolean(elizacloudKey);
+  const apiKey =
+    elizacloudKey ||
+    getRuntimeSetting(runtime, 'GROQ_API_KEY') ||
+    process.env.GROQ_API_KEY;
+  if (!apiKey) {
+    throw new Error(
+      'No API key for inference — set GROQ_API_KEY or ELIZACLOUD_API_KEY'
+    );
+  }
+
+  return createGroq({
+    apiKey,
+    fetch: runtime?.fetch ?? undefined,
+    baseURL: resolveGroqBaseURL(runtime),
+    ...(isElizaCloud ? { headers: { 'X-API-Key': apiKey } } : {}),
+  });
 }
 
 export async function callGroqDirect(params: {
@@ -90,6 +128,9 @@ export async function callGroqDirect(params: {
   actionType?: string;
   runtime?: IAgentRuntime; // Pass runtime to access settings
 }): Promise<string> {
+  if (typeof params.prompt !== 'string' || !params.prompt.trim()) {
+    throw new Error('Agent LLM prompt is required');
+  }
   // Auto-extract trajectory context from runtime if not explicitly provided
   // This ensures ALL LLM calls are logged for RL training
   let trajectoryLogger = params.trajectoryLogger;
@@ -103,59 +144,13 @@ export async function callGroqDirect(params: {
     }
   }
 
-  // Resolve API key: prefer GROQ_API_KEY, fall back to ELIZACLOUD_API_KEY
-  const apiKey =
-    getRuntimeSetting(params.runtime, 'GROQ_API_KEY') ||
-    process.env.GROQ_API_KEY ||
-    getRuntimeSetting(params.runtime, 'ELIZACLOUD_API_KEY') ||
-    process.env.ELIZACLOUD_API_KEY;
-  if (!apiKey) {
-    throw new Error(
-      'No API key for inference — set GROQ_API_KEY or ELIZACLOUD_API_KEY'
-    );
-  }
-
-  const elizacloudKey =
-    getRuntimeSetting(params.runtime, 'ELIZACLOUD_API_KEY') ||
-    process.env.ELIZACLOUD_API_KEY;
-  const isElizaCloud = !!elizacloudKey;
-
-  const groq = createGroq({
-    apiKey,
-    baseURL: resolveGroqBaseURL(params.runtime),
-    ...(isElizaCloud ? { headers: { 'X-API-Key': apiKey } } : {}),
-  });
+  const groq = createAgentGroq(params.runtime);
 
   const model = resolveGroqModel({
     modelSize: params.modelSize,
     runtime: params.runtime,
   });
 
-  const startTime = Date.now();
-
-  // Add timeout to prevent hanging (60 seconds default, configurable)
-  const timeoutMs = params.maxTokens && params.maxTokens < 500 ? 20000 : 60000; // Shorter timeout for small outputs
-
-  const result = await Promise.race([
-    generateText({
-      model: groq.languageModel(model),
-      prompt: params.prompt,
-      system: params.system,
-      temperature: params.temperature ?? 0.7,
-      maxOutputTokens: params.maxTokens ?? 8192,
-      maxRetries: 2,
-      experimental_telemetry: { isEnabled: false },
-    }),
-    new Promise<{ text: string }>((_, reject) => {
-      setTimeout(() => {
-        reject(new Error(`LLM call timeout after ${timeoutMs}ms`));
-      }, timeoutMs);
-    }),
-  ]);
-
-  const latencyMs = Date.now() - startTime;
-
-  // Log to trajectory if available (CRITICAL for RL training data collection)
   let stepId: string | null = null;
   if (params.runtime) {
     const activeStep = await ensureTrajectoryStep(params.runtime);
@@ -168,6 +163,93 @@ export async function callGroqDirect(params: {
     stepId = trajectoryLogger.getCurrentStepId(trajectoryId);
   }
 
+  const startTime = Date.now();
+
+  // Add timeout to prevent hanging (60 seconds default, configurable)
+  const timeoutMs = getAgentLLMTimeoutMs(
+    params.maxTokens && params.maxTokens < 500 ? 20000 : 60000
+  ); // Shorter timeout for small outputs
+
+  const result = await generateText({
+    model: groq.languageModel(model),
+    prompt: params.prompt,
+    system: params.system,
+    temperature: params.temperature ?? 0.7,
+    maxOutputTokens: params.maxTokens ?? 8192,
+    maxRetries: 0, // Every request is observable; callers own explicit retries.
+    abortSignal: AbortSignal.timeout(timeoutMs),
+    experimental_telemetry: { isEnabled: false },
+  }).catch((error: Error) => {
+    if (trajectoryLogger && stepId) {
+      trajectoryLogger.logLLMCall(stepId, {
+        model,
+        systemPrompt: params.system || '',
+        userPrompt: params.prompt,
+        response: '',
+        temperature: params.temperature ?? 0.7,
+        maxTokens: params.maxTokens ?? 8192,
+        purpose: params.purpose || 'action',
+        actionType: params.actionType,
+        latencyMs: Date.now() - startTime,
+        metadata: { success: false, error: error.message },
+      });
+    }
+    getAgentLLMBridge()?.({
+      provider: 'groq',
+      model,
+      promptType: params.actionType || params.purpose || 'agent-groq-direct',
+      format: 'text',
+      temperature: params.temperature ?? 0.7,
+      maxTokens: params.maxTokens ?? 8192,
+      systemPrompt: params.system || '',
+      userPrompt: params.prompt,
+      rawResponse: '',
+      parsedResponse: null,
+      inputTokens: 0,
+      outputTokens: 0,
+      totalTokens: 0,
+      durationMs: Date.now() - startTime,
+      success: false,
+      error: error.message,
+    });
+    throw error;
+  });
+  if (!result.text?.trim()) {
+    if (trajectoryLogger && stepId) {
+      trajectoryLogger.logLLMCall(stepId, {
+        model,
+        systemPrompt: params.system || '',
+        userPrompt: params.prompt,
+        response: result.text || '',
+        temperature: params.temperature ?? 0.7,
+        maxTokens: params.maxTokens ?? 8192,
+        purpose: params.purpose || 'action',
+        actionType: params.actionType,
+        latencyMs: Date.now() - startTime,
+        promptTokens: result.usage.inputTokens,
+        completionTokens: result.usage.outputTokens,
+        metadata: { success: false, error: 'LLM returned empty content' },
+      });
+    }
+    getAgentLLMBridge()?.({
+      provider: 'groq',
+      model,
+      promptType: params.actionType || params.purpose || 'agent-groq-direct',
+      systemPrompt: params.system || '',
+      userPrompt: params.prompt,
+      rawResponse: result.text || '',
+      inputTokens: result.usage.inputTokens ?? 0,
+      outputTokens: result.usage.outputTokens ?? 0,
+      durationMs: Date.now() - startTime,
+      success: false,
+      error: 'LLM returned empty content',
+    });
+    throw new Error('LLM returned empty content');
+  }
+
+  const latencyMs = Date.now() - startTime;
+
+  // Log to trajectory if available (CRITICAL for RL training data collection)
   if (trajectoryLogger && trajectoryId && stepId) {
     const reasoningMetadata = buildReasoningTraceMetadata(result.text);
     trajectoryLogger.logLLMCall(stepId, {
@@ -180,8 +262,8 @@ export async function callGroqDirect(params: {
       purpose: params.purpose || 'action',
       actionType: params.actionType,
       latencyMs,
-      promptTokens: undefined, // Token counts not available from Groq SDK
-      completionTokens: undefined,
+      promptTokens: result.usage.inputTokens,
+      completionTokens: result.usage.outputTokens,
       ...reasoningMetadata,
     });
   }
@@ -201,8 +283,7 @@ export async function callGroqDirect(params: {
   }
 
   // Forward to DAG trace bridge if active (game-tick observability)
-  try {
-    const { getAgentLLMBridge } = require('@babylon/shared');
+  {
     const bridge = getAgentLLMBridge();
     if (bridge) {
       bridge({
@@ -216,15 +297,13 @@ export async function callGroqDirect(params: {
         userPrompt: params.prompt,
         rawResponse: result.text,
         parsedResponse: null,
-        inputTokens: 0,
-        outputTokens: 0,
-        totalTokens: 0,
+        inputTokens: result.usage.inputTokens ?? 0,
+        outputTokens: result.usage.outputTokens ?? 0,
+        totalTokens: result.usage.totalTokens ?? 0,
         durationMs: latencyMs,
         success: true,
       });
     }
-  } catch {
-    // Bridge not available — fine
   }
 
   return result.text;

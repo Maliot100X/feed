@@ -85,7 +85,8 @@ export function useAgent0Reputation(
       const agent = data.agent;
 
       // Check if agent has Agent0 registration
-      if (!agent?.agent0TokenId) {
+      // Token ID 0 is a valid registration.
+      if (agent?.agent0TokenId === null || agent?.agent0TokenId === undefined) {
         setIsAgent0Available(false);
         setProfile(null);
         setReputation(null);

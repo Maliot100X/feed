@@ -7,9 +7,6 @@
  * - Combined and sorted by time
  */
 
-import { agentTrades, db, desc, eq, npcTrades, users } from '@babylon/db';
-import { StaticDataRegistry } from '@babylon/engine';
-import { getTimeAgo } from '@babylon/shared';
 import type {
   Action,
   ActionResult,
@@ -18,6 +15,9 @@ import type {
   Memory,
   State,
 } from '@elizaos/core';
+import { agentTrades, db, desc, eq, npcTrades, users } from '@feed/db';
+import { StaticDataRegistry } from '@feed/engine';
+import { getTimeAgo } from '@feed/shared';
 import { logger } from '../../../../shared/logger';
 
 export const checkRecentMarketTradesAction: Action = {

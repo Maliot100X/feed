@@ -22,13 +22,9 @@ def load_script_module(module_name: str, script_path: Path):
     return module
 
 
-_first_script = Path(__file__).resolve().parent.parent / "scripts" / "build_scam_defense_release.py"
-if not _first_script.exists():
-    pytest.skip("script not found: build_scam_defense_release.py", allow_module_level=True)
-
 release_script = load_script_module(
     "build_scam_defense_release",
-    PYTHON_ROOT / "scripts" / "build_scam_defense_release.py",
+    PYTHON_ROOT / "scripts" / "releases" / "build_scam_defense_release.py",
 )
 
 
@@ -51,7 +47,7 @@ def test_load_release_selection_rewrites_legacy_workspace_paths(
 
     experiment_registry = paper_root / "runs" / "scam-defense" / "experiment_registry.json"
     publication_summary_md = paper_root / "generated" / "publication_summary.md"
-    paper_pdf = paper_root / "babylon_scam_defense_paper.pdf"
+    paper_pdf = paper_root / "feed_scam_defense_paper.pdf"
     model_dir = paper_root / "trained-models" / "demo-model"
     model_dir.mkdir(parents=True, exist_ok=True)
     scenario_catalog = tmp_path / "scambench" / "generated" / "scenario-catalog.json"
@@ -86,7 +82,7 @@ def test_load_release_selection_rewrites_legacy_workspace_paths(
                 "publication_summary_json": str(
                     marketplace_root / "generated" / "publication_summary.json"
                 ),
-                "paper_pdf": str(marketplace_root / "babylon_scam_defense_paper.pdf"),
+                "paper_pdf": str(marketplace_root / "feed_scam_defense_paper.pdf"),
             },
             "recommended_models": {},
             "methodology_caveats": [],
@@ -395,7 +391,7 @@ def test_build_release_cli_logs_missing_selection(tmp_path: Path):
     proc = subprocess.run(
         [
             sys.executable,
-            str(PYTHON_ROOT / "scripts" / "build_scam_defense_release.py"),
+            str(PYTHON_ROOT / "scripts" / "releases" / "build_scam_defense_release.py"),
             "--selection",
             str(tmp_path / "missing-selection.json"),
             "--output-dir",

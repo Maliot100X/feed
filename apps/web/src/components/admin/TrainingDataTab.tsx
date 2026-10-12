@@ -1,6 +1,6 @@
 'use client';
 
-import { BABYLON_POINTS_SYMBOL, cn } from '@babylon/shared';
+import { cn, FEED_POINTS_SYMBOL } from '@feed/shared';
 import {
   AlertCircle,
   CheckCircle,
@@ -10,8 +10,7 @@ import {
 } from 'lucide-react';
 import { useCallback, useEffect, useState } from 'react';
 import { toast } from 'sonner';
-import { getAuthToken } from '@/lib/auth';
-import { apiUrl } from '@/utils/api-url';
+import { apiFetch } from '@/utils/api-fetch';
 
 /**
  * Training data statistics structure for training data tab.
@@ -75,28 +74,21 @@ export function TrainingDataTab() {
   const [loading, setLoading] = useState(true);
 
   const fetchData = useCallback(async () => {
-    const token = getAuthToken();
-    if (!token) {
-      setLoading(false);
-      toast.error('Not authenticated');
-      return;
-    }
-
-    const response = await fetch(apiUrl('/api/admin/training-data'), {
-      headers: {
-        Authorization: `Bearer ${token}`,
-      },
-    });
-
-    if (!response.ok) {
-      setLoading(false);
+    try {
+      const response = await apiFetch('/api/admin/training-data');
+      if (!response.ok) {
+        // Do not keep showing data after an auth/permission failure.
+        if (response.status === 401 || response.status === 403) setData(null);
+        toast.error('Failed to load training data');
+        return;
+      }
+      const result = await response.json();
+      setData(result.data);
+    } catch {
       toast.error('Failed to load training data');
-      return;
+    } finally {
+      setLoading(false);
     }
-
-    const result = await response.json();
-    setData(result.data);
-    setLoading(false);
   }, []);
 
   useEffect(() => {
@@ -236,7 +228,7 @@ export function TrainingDataTab() {
                   : 'text-red-500'
               )}
             >
-              {BABYLON_POINTS_SYMBOL}
+              {FEED_POINTS_SYMBOL}
               {data.qualityMetrics.avgPnl.toFixed(2)}
             </div>
           </div>
@@ -271,7 +263,7 @@ export function TrainingDataTab() {
                       )}
                     >
                       {window.avgPnl >= 0 ? '+' : ''}
-                      {BABYLON_POINTS_SYMBOL}
+                      {FEED_POINTS_SYMBOL}
                       {window.avgPnl.toFixed(2)}
                     </div>
                     <div className="text-muted-foreground text-xs">avg P&L</div>
@@ -322,7 +314,7 @@ export function TrainingDataTab() {
                         )}
                       >
                         {traj.finalPnL >= 0 ? '+' : ''}
-                        {BABYLON_POINTS_SYMBOL}
+                        {FEED_POINTS_SYMBOL}
                         {traj.finalPnL.toFixed(2)}
                       </div>
                     )}
@@ -393,7 +385,7 @@ export function TrainingDataTab() {
               </p>
               <code className="block rounded bg-black/30 p-3 font-mono text-green-100 text-xs">
                 cd python{'\n'}
-                MODE=single python -m src.training.babylon_trainer
+                MODE=single python -m src.training.feed_trainer
               </code>
             </div>
           </div>

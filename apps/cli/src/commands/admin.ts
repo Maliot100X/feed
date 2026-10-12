@@ -9,16 +9,28 @@
  * @module cli/commands/admin
  */
 
-import { asc, closeDatabase, db, eq, or, sql, users } from '@babylon/db';
+import { asc, closeDatabase, db, eq, or, sql, users } from '@feed/db';
 import { parseArgs, wantsHelp } from '../lib/args.js';
 import { logger } from '../lib/logger.js';
+
+/**
+ * Matches a user by username, wallet address (both case-insensitive) or ID.
+ * Shared by check/grant/revoke so all three accept the same identifiers.
+ */
+function userIdentifierMatches(identifier: string) {
+  return or(
+    sql`lower(${users.username}) = lower(${identifier})`,
+    sql`lower(${users.walletAddress}) = lower(${identifier})`,
+    eq(users.id, identifier)
+  );
+}
 
 function printHelp(): void {
   console.log(`
 Admin Management
 
 USAGE:
-  babylon admin <command> [identifier]
+  feed admin <command> [identifier]
 
 COMMANDS:
   check <user>   Check admin status of a user
@@ -30,11 +42,11 @@ IDENTIFIER:
   Can be username, wallet address, or user ID
 
 EXAMPLES:
-  babylon admin check alice
-  babylon admin grant alice
-  babylon admin grant 0x1234...5678
-  babylon admin revoke bob
-  babylon admin list
+  feed admin check alice
+  feed admin grant alice
+  feed admin grant 0x1234...5678
+  feed admin revoke bob
+  feed admin list
 `);
 }
 
@@ -59,12 +71,7 @@ async function checkAdmin(identifier: string): Promise<void> {
       isAdmin: users.isAdmin,
     })
     .from(users)
-    .where(
-      or(
-        sql`lower(${users.username}) = lower(${identifier})`,
-        eq(users.id, identifier)
-      )
-    )
+    .where(userIdentifierMatches(identifier))
     .limit(1);
 
   if (result.length === 0) {
@@ -100,7 +107,7 @@ async function checkAdmin(identifier: string): Promise<void> {
 
   if (!userData.isAdmin) {
     console.log('\nTo grant admin privileges:');
-    console.log(`  babylon admin grant ${identifier}`);
+    console.log(`  feed admin grant ${identifier}`);
   }
 }
 
@@ -126,12 +133,7 @@ async function grantAdmin(identifier: string): Promise<void> {
       isActor: users.isActor,
     })
     .from(users)
-    .where(
-      or(
-        sql`lower(${users.username}) = lower(${identifier})`,
-        eq(users.id, identifier)
-      )
-    )
+    .where(userIdentifierMatches(identifier))
     .limit(1);
 
   if (result.length === 0) {
@@ -187,13 +189,7 @@ async function revokeAdmin(identifier: string): Promise<void> {
       isAdmin: users.isAdmin,
     })
     .from(users)
-    .where(
-      or(
-        eq(users.walletAddress, identifier),
-        sql`lower(${users.username}) = lower(${identifier})`,
-        eq(users.id, identifier)
-      )
-    )
+    .where(userIdentifierMatches(identifier))
     .limit(1);
 
   if (result.length === 0) {

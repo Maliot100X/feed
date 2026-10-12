@@ -111,9 +111,9 @@
  * @see {@link /lib/api/admin-middleware} Admin middleware
  */
 
-import { requireAdmin, successResponse, withErrorHandling } from '@babylon/api';
-import { and, db, desc, eq, reports, sql } from '@babylon/db';
-import { GetReportsSchema, logger } from '@babylon/shared';
+import { requireAdmin, successResponse, withErrorHandling } from '@feed/api';
+import { and, db, desc, eq, reports, sql } from '@feed/db';
+import { GetReportsSchema, logger } from '@feed/shared';
 import type { NextRequest } from 'next/server';
 
 export const GET = withErrorHandling(async (request: NextRequest) => {

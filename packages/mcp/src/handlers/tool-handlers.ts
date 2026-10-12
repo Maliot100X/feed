@@ -29,40 +29,46 @@
  * require passing referrer context through the MCP API key or session.
  */
 
-import type { JsonRpcParams, JsonRpcRequest } from '@babylon/a2a';
+import type { JsonRpcParams, JsonRpcRequest } from '@feed/a2a';
 import {
   handleAppealBanWithEscrow,
   handleCreateEscrowPayment,
   handleListEscrowPayments,
   handleRefundEscrowPayment,
   handleVerifyEscrowPayment,
-} from '@babylon/a2a';
+} from '@feed/a2a';
 import {
+  acceptGroupInvite,
   checkRateLimitAsync,
+  declineGroupInvite,
   logAdminModify,
   RATE_LIMIT_CONFIGS,
   RateLimitError,
-} from '@babylon/api';
-import { PerpDbAdapter, PerpMarketService } from '@babylon/core/markets/perps';
+} from '@feed/api';
+import { PerpDbAdapter, PerpMarketService } from '@feed/core/markets/perps';
 import {
   PredictionDbAdapter,
   PredictionMarketService,
-} from '@babylon/core/markets/prediction';
-import type { FeeProcessor, WalletPort } from '@babylon/core/markets/shared';
+} from '@feed/core/markets/prediction';
+import type { FeeProcessor, WalletPort } from '@feed/core/markets/shared';
 import {
   and,
   db,
+  desc,
   eq,
+  favorites,
   getBlockedByUserIds,
   getBlockedUserIds,
   getMutedUserIds,
-  groupMembers,
-  groups,
   hasBlocked,
+  inArray,
+  isNull,
+  lte,
   markets,
   perpMarketSnapshots,
+  posts,
   users,
-} from '@babylon/db';
+} from '@feed/db';
 import {
   createPerpPriceImpactPort,
   FEE_CONFIG,
@@ -70,15 +76,14 @@ import {
   invalidateAfterPredictionTrade,
   StaticDataRegistry,
   WalletService,
-} from '@babylon/engine';
-import type { JsonValue, StringRecord } from '@babylon/shared';
+} from '@feed/engine';
+import type { JsonValue, StringRecord } from '@feed/shared';
 import {
-  GROUP_CONFIG,
   generateSnowflakeId,
   getAPIBaseUrl,
   logger,
   retryIfRetryable,
-} from '@babylon/shared';
+} from '@feed/shared';
 
 function buildWalletPort(): WalletPort {
   return {
@@ -574,19 +579,16 @@ export async function executeGetMarkets(
     'MCP'
   );
 
-  const where: { resolved?: boolean } = {};
-  if (args.type === 'prediction') {
-    // Only prediction markets
-  } else if (args.type === 'perpetuals') {
-    // Only perpetuals (not implemented yet)
-    return { markets: [] };
+  if (args.type === 'perpetuals') {
+    // This tool returns prediction markets only; perpetuals have their own
+    // tool and shape. Do not answer with a misleading empty list.
+    throw new Error(
+      'get_markets returns prediction markets; use get_perpetuals for perpetual markets'
+    );
   }
 
   const markets = await db.market.findMany({
-    where: {
-      resolved: false,
-      ...where,
-    },
+    where: { resolved: false },
     orderBy: { createdAt: 'desc' },
     take: 50,
   });
@@ -938,19 +940,26 @@ export async function executeQueryFeed(
 ): Promise<QueryFeedResult> {
   logger.debug(`Agent ${agent.agentId} querying feed`, args, 'MCP');
 
+  // Posts reference questions by question number (Post.relatedQuestion).
+  let relatedQuestion: number | undefined;
+  if (args.questionId) {
+    const question = await db.question.findUnique({
+      where: { id: args.questionId },
+      select: { questionNumber: true },
+    });
+    if (!question) {
+      throw new Error(`Question not found: ${args.questionId}`);
+    }
+    relatedQuestion = question.questionNumber;
+  }
+
   const now = new Date();
   const posts = await db.post.findMany({
-    where: args.questionId
-      ? {
-          // Filter by question if provided
-          // Note: questionId might need to be mapped from market/question
-          deletedAt: null, // Filter out deleted posts
-          timestamp: { lte: now }, // ✅ No future posts
-        }
-      : {
-          deletedAt: null, // Filter out deleted posts
-          timestamp: { lte: now }, // ✅ No future posts
-        },
+    where: {
+      deletedAt: null,
+      timestamp: { lte: now }, // No future posts
+      ...(relatedQuestion !== undefined && { relatedQuestion }),
+    },
     orderBy: { timestamp: 'desc' },
     take: args.limit || 20,
   });
@@ -1837,7 +1846,7 @@ export async function executeSearchAgents(
  * Execute get_user_wallet tool
  */
 export async function executeGetUserWallet(
-  _agent: AuthenticatedAgent,
+  agent: AuthenticatedAgent,
   args: GetUserWalletArgs
 ): Promise<GetUserWalletResult> {
   const user = await db.user.findUnique({
@@ -1847,10 +1856,15 @@ export async function executeGetUserWallet(
       virtualBalance: true,
       totalDeposited: true,
       totalWithdrawn: true,
+      showWalletPublic: true,
     },
   });
   if (!user) {
     throw new Error('User not found');
+  }
+  // Respect the user's wallet privacy setting for anyone but themselves.
+  if (args.userId !== agent.userId && !user.showWalletPublic) {
+    throw new Error('This user has made their wallet private');
   }
   return {
     walletAddress: user.walletAddress,
@@ -2205,11 +2219,13 @@ export async function executeLeaveChat(
  * Execute get_unread_count tool
  */
 export async function executeGetUnreadCount(
-  _agent: AuthenticatedAgent,
+  agent: AuthenticatedAgent,
   _args: GetUnreadCountArgs
 ): Promise<GetUnreadCountResult> {
-  // Read tracking not implemented in schema yet, return 0
-  return { unreadCount: 0 };
+  const unreadCount = await db.notification.count({
+    where: { userId: agent.userId, read: false },
+  });
+  return { unreadCount };
 }
 
 // ============================================================================
@@ -2246,7 +2262,7 @@ export async function executeMarkNotificationsRead(
   agent: AuthenticatedAgent,
   args: MarkNotificationsReadArgs
 ): Promise<MarkNotificationsReadResult> {
-  await db.notification.updateMany({
+  const updated = await db.notification.updateMany({
     where: {
       id: { in: args.notificationIds },
       userId: agent.userId,
@@ -2255,7 +2271,8 @@ export async function executeMarkNotificationsRead(
   });
   return {
     success: true,
-    markedCount: args.notificationIds.length,
+    // Rows actually updated (IDs that are not the caller's are ignored).
+    markedCount: updated.count,
   };
 }
 
@@ -2276,7 +2293,7 @@ export async function executeGetPortfolio(
       },
     }),
     safeFetchRequired<StringRecord<JsonValue>>(
-      new URL(`${apiBaseUrl}/api/markets/positions/${agent.userId}`)
+      new URL(`${apiBaseUrl}/markets/positions/${agent.userId}`)
     ),
   ]);
 
@@ -2345,162 +2362,29 @@ export async function executeGetGroupInvites(
 }
 
 /**
- * Execute accept_group_invite tool
- * Chat.groupId → Group.id relationship
- * Wrapped in transaction for atomicity
+ * Execute accept_group_invite tool (canonical acceptGroupInvite transition)
  */
 export async function executeAcceptGroupInvite(
   agent: AuthenticatedAgent,
   args: AcceptGroupInviteArgs
 ): Promise<AcceptGroupInviteResult> {
-  // Pre-transaction validation (read-only operations)
-  const invite = await db.groupInvite.findUnique({
-    where: { id: args.inviteId },
-  });
-  if (!invite || invite.invitedUserId !== agent.userId) {
-    throw new Error('Invite not found or access denied');
-  }
-
-  // Check invite status for idempotency
-  if (invite.status !== 'pending') {
-    throw new Error('This invite has already been processed');
-  }
-
-  // Check if agent is at the NPC group limit - use join to avoid N+1
-  const activeNpcGroups = await db
-    .select({ groupId: groupMembers.groupId })
-    .from(groupMembers)
-    .innerJoin(groups, eq(groupMembers.groupId, groups.id))
-    .where(
-      and(
-        eq(groupMembers.userId, agent.userId),
-        eq(groupMembers.isActive, true),
-        eq(groups.type, 'npc')
-      )
-    );
-
-  const npcGroupCount = activeNpcGroups.length;
-
-  if (npcGroupCount >= GROUP_CONFIG.MAX_ACTIVE_USER_GROUPS) {
-    throw new Error(
-      `You can only be in ${GROUP_CONFIG.MAX_ACTIVE_USER_GROUPS} NPC groups at a time. Leave a group first.`
-    );
-  }
-
-  // Check for existing membership (idempotency)
-  const existingMember = await db.groupMember.findFirst({
-    where: {
-      groupId: invite.groupId,
-      userId: agent.userId,
-    },
-  });
-
-  if (existingMember?.isActive) {
-    throw new Error('You are already a member of this group');
-  }
-
-  // Find the chat for this group (Chat.groupId → Group.id)
-  const groupChat = await db.chat.findFirst({
-    where: { groupId: invite.groupId },
-    select: { id: true },
-  });
-
-  // Wrap state-changing operations in a transaction for atomicity
-  return await db.$transaction(async (tx) => {
-    // Update invite status
-    await tx.groupInvite.update({
-      where: { id: args.inviteId },
-      data: {
-        status: 'accepted',
-        respondedAt: new Date(),
-      },
-    });
-
-    // Add to chat participants (handle existing inactive participant)
-    if (groupChat) {
-      const existingParticipant = await tx.chatParticipant.findFirst({
-        where: {
-          chatId: groupChat.id,
-          userId: agent.userId,
-        },
-      });
-
-      if (existingParticipant) {
-        if (!existingParticipant.isActive) {
-          await tx.chatParticipant.update({
-            where: { id: existingParticipant.id },
-            data: {
-              isActive: true,
-              joinedAt: new Date(),
-            },
-          });
-        }
-      } else {
-        await tx.chatParticipant.create({
-          data: {
-            id: await generateSnowflakeId(),
-            chatId: groupChat.id,
-            userId: agent.userId,
-            invitedBy: invite.invitedBy,
-          },
-        });
-      }
-    }
-
-    // Add to GroupMember (handle existing inactive member)
-    if (existingMember) {
-      await tx.groupMember.update({
-        where: { id: existingMember.id },
-        data: {
-          isActive: true,
-          role: 'member',
-          joinedAt: new Date(),
-          addedBy: invite.invitedBy,
-          kickedAt: null,
-          kickReason: null,
-        },
-      });
-    } else {
-      await tx.groupMember.create({
-        data: {
-          id: await generateSnowflakeId(),
-          groupId: invite.groupId,
-          userId: agent.userId,
-          role: 'member',
-          addedBy: invite.invitedBy,
-        },
-      });
-    }
-
-    return {
-      success: true,
-      chatId: groupChat?.id || invite.groupId,
-    };
-  });
+  const result = await acceptGroupInvite(agent.userId, args.inviteId);
+  return {
+    success: true,
+    // Wire compatibility: groups without a chat have historically reported
+    // the group ID here.
+    chatId: result.chatId ?? result.groupId,
+  };
 }
 
 /**
- * Execute decline_group_invite tool
+ * Execute decline_group_invite tool (canonical declineGroupInvite transition)
  */
 export async function executeDeclineGroupInvite(
   agent: AuthenticatedAgent,
   args: DeclineGroupInviteArgs
 ): Promise<DeclineGroupInviteResult> {
-  const invite = await db.groupInvite.findUnique({
-    where: { id: args.inviteId },
-  });
-  if (!invite || invite.invitedUserId !== agent.userId) {
-    throw new Error('Invite not found or access denied');
-  }
-
-  await db.groupInvite.update({
-    where: { id: args.inviteId },
-    data: {
-      status: 'declined',
-      respondedAt: new Date(),
-    },
-  });
-
+  await declineGroupInvite(agent.userId, args.inviteId);
   return { success: true };
 }
 
@@ -2516,7 +2400,7 @@ export async function executeGetLeaderboard(
   args: GetLeaderboardArgs
 ): Promise<GetLeaderboardResult> {
   const apiBaseUrl = getAPIBaseUrl();
-  const url = new URL(`${apiBaseUrl}/api/leaderboard`);
+  const url = new URL(`${apiBaseUrl}/leaderboard`);
   if (args.page) url.searchParams.set('page', args.page.toString());
   if (args.pageSize) url.searchParams.set('pageSize', args.pageSize.toString());
   url.searchParams.set('type', args.type || 'wallet');
@@ -2684,11 +2568,11 @@ export async function executeGetReferralStats(
       where: { referrerId: agent.userId },
     }),
   ]);
-  // Referrer earnings not in schema, return 0 for now
-  const totalEarnings = 0;
+  // Referral earnings are not tracked, so none are reported (null) rather
+  // than a fabricated 0.
   return {
     totalReferrals: referralsList.length,
-    totalEarnings,
+    totalEarnings: null,
     referralCode: user?.referralCode || '',
   };
 }
@@ -2782,7 +2666,7 @@ export async function executeGetOrganizations(
 // ============================================================================
 // x402 Micropayments - Reserved Handlers
 // These tools are intentionally not registered in MCP discovery until the
-// Babylon MCP surface supports them end-to-end.
+// Feed MCP surface supports them end-to-end.
 // ============================================================================
 
 /**
@@ -2795,7 +2679,7 @@ export async function executePaymentRequest(
   _args: PaymentRequestArgs
 ): Promise<PaymentRequestResult> {
   throw new Error(
-    'MCP tool payment_request is disabled until x402 support is registered in Babylon MCP discovery.'
+    'MCP tool payment_request is disabled until x402 support is registered in Feed MCP discovery.'
   );
 }
 
@@ -2809,7 +2693,7 @@ export async function executePaymentReceipt(
   _args: PaymentReceiptArgs
 ): Promise<PaymentReceiptResult> {
   throw new Error(
-    'MCP tool payment_receipt is disabled until x402 support is registered in Babylon MCP discovery.'
+    'MCP tool payment_receipt is disabled until x402 support is registered in Feed MCP discovery.'
   );
 }
 
@@ -3360,35 +3244,46 @@ export async function executeGetFavoritePosts(
   agent: AuthenticatedAgent,
   args: GetFavoritePostsArgs
 ): Promise<GetFavoritePostsResult> {
-  const apiBaseUrl = getAPIBaseUrl();
-  const url = new URL(`${apiBaseUrl}/posts/feed/favorites`);
-  if (args.limit) url.searchParams.set('limit', args.limit.toString());
-  if (args.offset) url.searchParams.set('offset', args.offset.toString());
-  const data = await safeFetch<{
-    posts: Array<{
-      id: string;
-      content: string;
-      authorId: string;
-      timestamp: Date | string;
-    }>;
-  }>(url, {
-    headers: { 'X-User-Id': agent.userId },
-  });
-
-  // Handle null/empty response
-  if (!data) {
+  // Query directly as the authenticated agent. The HTTP favorites route
+  // authenticates the caller, so calling it with an X-User-Id header always
+  // returned an empty list.
+  const favoritedUserIds = (
+    await db
+      .select({ targetUserId: favorites.targetUserId })
+      .from(favorites)
+      .where(eq(favorites.userId, agent.userId))
+  ).map((row) => row.targetUserId);
+  if (favoritedUserIds.length === 0) {
     return { posts: [] };
   }
 
+  const limit = Math.min(args.limit ?? 20, 100);
+  const offset = args.offset ?? 0;
+  const rows = await db
+    .select({
+      id: posts.id,
+      content: posts.content,
+      authorId: posts.authorId,
+      timestamp: posts.timestamp,
+    })
+    .from(posts)
+    .where(
+      and(
+        inArray(posts.authorId, favoritedUserIds),
+        isNull(posts.deletedAt),
+        lte(posts.timestamp, new Date())
+      )
+    )
+    .orderBy(desc(posts.timestamp))
+    .offset(offset)
+    .limit(limit);
+
   return {
-    posts: data.posts.map((post) => ({
+    posts: rows.map((post) => ({
       id: post.id,
       content: post.content,
       authorId: post.authorId,
-      timestamp:
-        post.timestamp instanceof Date
-          ? post.timestamp.toISOString()
-          : post.timestamp,
+      timestamp: post.timestamp.toISOString(),
     })),
   };
 }

@@ -4,7 +4,9 @@
 
 import { z } from 'zod';
 import {
+  createQueryBooleanSchema,
   createTrimmedStringSchema,
+  OptionalQueryBooleanSchema,
   PaginationSchema,
   SnowflakeIdSchema,
   UserIdSchema,
@@ -86,21 +88,21 @@ export const ReplyToPostSchema = z.object({
 export const PostFeedQuerySchema = PaginationSchema.extend({
   userId: UserIdSchema.optional(),
   marketId: SnowflakeIdSchema.optional(),
-  onlyFollowing: z.coerce.boolean().default(false),
-  onlyFavorites: z.coerce.boolean().default(false),
+  onlyFollowing: createQueryBooleanSchema(false),
+  onlyFavorites: createQueryBooleanSchema(false),
   minSentiment: z.coerce.number().min(-1).max(1).optional(),
   maxSentiment: z.coerce.number().min(-1).max(1).optional(),
-  hasMedia: z.coerce.boolean().optional(),
+  hasMedia: OptionalQueryBooleanSchema,
 });
 
 /**
  * Post interactions query schema
  */
 export const PostInteractionsQuerySchema = z.object({
-  includeComments: z.coerce.boolean().default(true),
-  includeReactions: z.coerce.boolean().default(true),
-  includeShares: z.coerce.boolean().default(false),
-  limit: z.coerce.number().positive().max(100).default(50),
+  includeComments: createQueryBooleanSchema(true),
+  includeReactions: createQueryBooleanSchema(true),
+  includeShares: createQueryBooleanSchema(false),
+  limit: z.coerce.number().int().positive().max(100).default(50),
 });
 
 /**

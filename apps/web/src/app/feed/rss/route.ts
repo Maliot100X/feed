@@ -1,13 +1,15 @@
 /**
  * GET /feed/rss — RSS 2.0 feed of hot posts.
  *
- * WHY internal fetch: We reuse /api/feed/hot so filtering, scoring, and caching
- * live in one place; this route only converts JSON → RSS. No duplicate DB or business logic.
- * Cookie forwarded so optional auth on the API still applies (e.g. RLS); limit 50 for a full page of items.
+ * Reuses the /api/feed/hot handler in-process (anonymously — the RSS output
+ * is publicly cached) so filtering and scoring live in one place; this route
+ * only converts JSON → RSS. Limit 50 for a full page of items.
  */
 
-import { publicRateLimit } from '@babylon/api';
+import { publicRateLimit } from '@feed/api';
 import type { NextRequest } from 'next/server';
+import { GET as getHotPosts } from '@/app/api/feed/hot/route';
+import { loadAnonymousJson } from '@/lib/http/in-process';
 import {
   buildRssXml,
   getRssCacheHeaders,
@@ -15,42 +17,26 @@ import {
   type RssItem,
 } from '@/lib/rss';
 
-/** WHY: Behind a proxy we need x-forwarded-* to build absolute URLs for RSS <link> and <item> elements. */
-function getOrigin(request: NextRequest): string {
-  const forwardedHost = request.headers.get('x-forwarded-host');
-  const forwardedProto = request.headers.get('x-forwarded-proto');
-  if (forwardedHost && forwardedProto) {
-    return `${forwardedProto}://${forwardedHost}`;
-  }
-  return new URL(request.url).origin;
-}
-
 export async function GET(request: NextRequest) {
   const { error } = await publicRateLimit(request);
   if (error) return error;
 
-  const origin = getOrigin(request);
+  const origin = new URL(request.url).origin;
   const limit = 50;
 
-  const res = await fetch(`${origin}/api/feed/hot?limit=${limit}`, {
-    cache: 'no-store',
-    headers: { cookie: request.headers.get('cookie') ?? '' },
-  });
-
-  if (!res.ok) {
-    // WHY 502: Upstream API (our own) failed; caller should retry later.
-    return new Response('Feed temporarily unavailable', { status: 502 });
-  }
-
-  const data = (await res.json()) as {
-    success?: boolean;
+  const data = await loadAnonymousJson<{
     posts?: Array<{
       id: string;
       content: string;
       authorName: string;
       timestamp: string;
     }>;
-  };
+  }>(getHotPosts, new URL(`/api/feed/hot?limit=${limit}`, origin));
+
+  if (!data) {
+    // WHY 502: Upstream feed source failed; caller should retry later.
+    return new Response('Feed temporarily unavailable', { status: 502 });
+  }
 
   const posts = data.posts ?? [];
   // WHY 80/500: Keep title and description short for RSS readers; full content is at link.
@@ -63,9 +49,9 @@ export async function GET(request: NextRequest) {
   }));
 
   const channel: RssChannel = {
-    title: 'Babylon Feed',
+    title: 'Feed',
     link: `${origin}/feed`,
-    description: 'Hot posts from Babylon',
+    description: 'Hot posts from Feed',
     siteUrl: origin,
   };
 

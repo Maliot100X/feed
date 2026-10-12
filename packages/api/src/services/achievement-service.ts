@@ -38,7 +38,7 @@ import {
   userActivityLogs,
   userChallengeProgress,
   users,
-} from '@babylon/db';
+} from '@feed/db';
 import {
   ACHIEVEMENT_DEFINITIONS,
   type AchievementDef,
@@ -53,7 +53,7 @@ import {
   logger,
   POINTS,
   WEEKLY_CHALLENGE_DEFINITIONS,
-} from '@babylon/shared';
+} from '@feed/shared';
 import { createHash } from 'crypto';
 import { broadcastToChannel } from '../sse/event-broadcaster';
 import { createNotification } from './notification-service';
@@ -1042,23 +1042,36 @@ const CHALLENGE_RESOLVERS: Record<string, WindowedResolver> = {
 
 /**
  * Check and potentially unlock achievements + advance challenges for a user.
- * This is the main entry point called from route handlers (fire-and-forget).
+ * Await with failOnError for request paths that require completed progress updates.
  */
 export async function checkProgress(
   userId: string,
-  event: AchievementEvent
+  event: AchievementEvent,
+  options: { failOnError?: boolean } = {}
 ): Promise<void> {
   const eventType = event.type as AchievementEventType;
   const relevantTrackingTypes = EVENT_TO_TRACKING_TYPES[eventType];
   if (!relevantTrackingTypes || relevantTrackingTypes.length === 0) return;
 
   try {
-    await Promise.all([
+    const results = await Promise.allSettled([
       checkAchievements(userId, relevantTrackingTypes),
-      checkChallenges(userId, event, relevantTrackingTypes),
+      checkChallenges(
+        userId,
+        event,
+        relevantTrackingTypes,
+        options.failOnError
+      ),
     ]);
+    const failures = results.filter((result) => result.status === 'rejected');
+    if (failures.length > 0) {
+      throw new AggregateError(
+        failures.map((result) => result.reason),
+        'Achievement progress failed'
+      );
+    }
   } catch (error) {
-    // Log but don't rethrow — checkProgress is fire-and-forget
+    // Legacy background callers log; required request paths also reject.
     logger.error(
       'checkProgress failed',
       {
@@ -1069,6 +1082,7 @@ export async function checkProgress(
       },
       'AchievementService'
     );
+    if (options.failOnError) throw error;
   }
 }
 
@@ -1122,32 +1136,41 @@ async function unlockAchievement(
   userId: string,
   achievement: AchievementDef
 ): Promise<void> {
-  // Insert with conflict guard (unique on userId + achievementId)
-  const [inserted] = await db
-    .insert(userAchievements)
-    .values({
-      id: await generateSnowflakeId(),
+  // Unlock row and reward commit together: a failed award rolls back the
+  // unlock, so an achievement is never left unlocked but unpaid.
+  const unlocked = await db.transaction(async (tx) => {
+    const [inserted] = await tx
+      .insert(userAchievements)
+      .values({
+        id: await generateSnowflakeId(),
+        userId,
+        achievementId: achievement.id,
+        pointsAwarded: achievement.pointsReward,
+        unlockedAt: new Date(),
+      })
+      .onConflictDoNothing()
+      .returning({ id: userAchievements.id });
+
+    if (!inserted) return false; // Already unlocked by a concurrent request
+
+    const award = await ReputationService.awardReputationInTx(
+      tx,
       userId,
-      achievementId: achievement.id,
-      pointsAwarded: achievement.pointsReward,
-      unlockedAt: new Date(),
-    })
-    .onConflictDoNothing()
-    .returning();
-
-  if (!inserted) return; // Already unlocked by a concurrent request
-
-  // Award points
-  await ReputationService.awardReputation(
-    userId,
-    achievement.pointsReward,
-    'achievement_unlock',
-    {
-      achievementId: achievement.id,
-      achievementName: achievement.name,
-      tier: achievement.tier,
+      achievement.pointsReward,
+      'achievement_unlock',
+      {
+        achievementId: achievement.id,
+        achievementName: achievement.name,
+        tier: achievement.tier,
+      }
+    );
+    if (!award.success) {
+      throw new Error(award.error ?? 'Failed to award achievement reputation');
     }
-  );
+    return true;
+  });
+
+  if (!unlocked) return;
 
   const notification = buildAchievementUnlockedNotification({
     achievementId: achievement.id,
@@ -1191,7 +1214,8 @@ async function unlockAchievement(
 async function checkChallenges(
   userId: string,
   _event: AchievementEvent,
-  relevantTrackingTypes: string[]
+  relevantTrackingTypes: string[],
+  failOnError = false
 ): Promise<void> {
   const now = new Date();
   const dailyIds = getActiveDailyChallengeIds(now);
@@ -1242,60 +1266,59 @@ async function checkChallenges(
       }
 
       const progress = await resolver(userId, start, end);
-      const completed = progress >= challenge.threshold ? 1 : 0;
-      const completedAt = completed ? new Date() : null;
 
-      // Track whether this request actually transitioned to completed
-      let didComplete = false;
-
-      if (existing[0]) {
-        // Update existing progress — only award if we transition completed 0→1
-        if (completed && !existing[0].completed) {
-          const [updated] = await db
-            .update(userChallengeProgress)
-            .set({
-              progress,
-              completed,
-              completedAt,
-              pointsAwarded: challenge.pointsReward,
-            })
-            .where(
-              and(
-                eq(userChallengeProgress.id, existing[0].id),
-                eq(userChallengeProgress.completed, 0)
-              )
-            )
-            .returning({ id: userChallengeProgress.id });
-          didComplete = !!updated;
-        } else {
-          // Just update progress, not completing
-          await db
-            .update(userChallengeProgress)
-            .set({ progress, completed, completedAt })
-            .where(eq(userChallengeProgress.id, existing[0].id));
-        }
-      } else {
-        // Insert new progress record — returning confirms insert won the race
-        const [inserted] = await db
+      // Persist progress and, if this observation completes the challenge,
+      // the completion and its reward in one transaction. Completion is a
+      // monotonic transition (completed = 0 -> 1) claimed with a conditional
+      // UPDATE, so a stale incomplete observation can never undo it and only
+      // one request awards it.
+      const didComplete = await db.transaction(async (tx) => {
+        // Make sure the row exists (concurrent first observations race here).
+        await tx
           .insert(userChallengeProgress)
           .values({
             id: await generateSnowflakeId(),
             userId,
             challengeId: challenge.id,
             periodKey,
-            progress,
-            completed,
-            completedAt,
-            pointsAwarded: completed ? challenge.pointsReward : 0,
+            progress: 0,
+            completed: 0,
+            completedAt: null,
+            pointsAwarded: 0,
           })
-          .onConflictDoNothing()
-          .returning({ id: userChallengeProgress.id });
-        didComplete = completed === 1 && !!inserted;
-      }
+          .onConflictDoNothing();
 
-      // Award points only if this request actually transitioned to completed
-      if (didComplete) {
-        await ReputationService.awardReputation(
+        const rowFilter = and(
+          eq(userChallengeProgress.userId, userId),
+          eq(userChallengeProgress.challengeId, challenge.id),
+          eq(userChallengeProgress.periodKey, periodKey),
+          eq(userChallengeProgress.completed, 0)
+        );
+
+        if (progress < challenge.threshold) {
+          await tx
+            .update(userChallengeProgress)
+            .set({
+              progress: sql`GREATEST(${userChallengeProgress.progress}, ${progress})`,
+            })
+            .where(rowFilter);
+          return false;
+        }
+
+        const [claimed] = await tx
+          .update(userChallengeProgress)
+          .set({
+            progress,
+            completed: 1,
+            completedAt: new Date(),
+            pointsAwarded: challenge.pointsReward,
+          })
+          .where(rowFilter)
+          .returning({ id: userChallengeProgress.id });
+        if (!claimed) return false;
+
+        const award = await ReputationService.awardReputationInTx(
+          tx,
           userId,
           challenge.pointsReward,
           'challenge_complete',
@@ -1305,7 +1328,16 @@ async function checkChallenges(
             periodKey,
           }
         );
+        if (!award.success) {
+          throw new Error(
+            award.error ?? 'Failed to award challenge reputation'
+          );
+        }
+        return true;
+      });
 
+      // Notify only after the completion and reward committed.
+      if (didComplete) {
         const notification = buildChallengeCompletedNotification({
           challengeId: challenge.id,
           challengeName: challenge.name,
@@ -1348,6 +1380,7 @@ async function checkChallenges(
         },
         'AchievementService'
       );
+      if (failOnError) throw error;
     }
   }
 }
@@ -1391,28 +1424,37 @@ async function checkCompletionBonus(
       ? POINTS.CHALLENGE_DAILY_ALL_BONUS
       : POINTS.CHALLENGE_WEEKLY_ALL_BONUS;
 
-  // Record the bonus award
-  const [insertedBonus] = await db
-    .insert(userChallengeProgress)
-    .values({
-      id: await generateSnowflakeId(),
+  // Record the bonus and award it in one transaction.
+  const awarded = await db.transaction(async (tx) => {
+    const [insertedBonus] = await tx
+      .insert(userChallengeProgress)
+      .values({
+        id: await generateSnowflakeId(),
+        userId,
+        challengeId: `${pool}_all_bonus`,
+        periodKey: bonusPeriodKey,
+        progress: target,
+        completed: 1,
+        completedAt: new Date(),
+        pointsAwarded: bonus,
+      })
+      .onConflictDoNothing()
+      .returning({ id: userChallengeProgress.id });
+    if (!insertedBonus) return false;
+
+    const award = await ReputationService.awardReputationInTx(
+      tx,
       userId,
-      challengeId: `${pool}_all_bonus`,
-      periodKey: bonusPeriodKey,
-      progress: target,
-      completed: 1,
-      completedAt: new Date(),
-      pointsAwarded: bonus,
-    })
-    .onConflictDoNothing()
-    .returning({ id: userChallengeProgress.id });
-
-  if (!insertedBonus) return;
-
-  await ReputationService.awardReputation(userId, bonus, 'challenge_complete', {
-    type: `${pool}_all_bonus`,
-    periodKey,
+      bonus,
+      'challenge_complete',
+      { type: `${pool}_all_bonus`, periodKey }
+    );
+    if (!award.success) {
+      throw new Error(award.error ?? 'Failed to award challenge bonus');
+    }
+    return true;
   });
+  if (!awarded) return;
 
   await broadcastToChannel(`notifications:${userId}`, {
     type: 'challenge_bonus',

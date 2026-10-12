@@ -4,7 +4,7 @@ from transformers import AutoModelForCausalLM, AutoTokenizer
 
 # Paths
 BASE_MODEL_ID = "Qwen/Qwen2.5-0.5B-Instruct"
-ADAPTER_PATH = "./trained_models/babylon-v1/adapter"
+ADAPTER_PATH = "./trained_models/feed-v1/adapter"
 
 
 def get_device():
@@ -19,9 +19,6 @@ def main():
     device = get_device()
     print(f"Running on: {device}")
 
-    if device != "cuda":
-        model.to(device)
-
     print(f"Loading base model: {BASE_MODEL_ID}...")
     tokenizer = AutoTokenizer.from_pretrained(BASE_MODEL_ID)
 
@@ -29,15 +26,18 @@ def main():
     model = AutoModelForCausalLM.from_pretrained(
         BASE_MODEL_ID, torch_dtype=torch.float16, device_map="auto"
     )
+    # device_map="auto" places weights on CUDA; move explicitly otherwise.
+    if device != "cuda":
+        model.to(device)
 
     # Load Adapter
     print(f"Loading adapter from: {ADAPTER_PATH}...")
     try:
         model = PeftModel.from_pretrained(model, ADAPTER_PATH)
-    except Exception as e:
+    except (OSError, ValueError) as e:
         print(f"Error loading adapter: {e}")
         print("Did you finish training? Check if the directory exists.")
-        return
+        raise SystemExit(1) from e
 
     print("\n✅ Model Loaded! (Type 'quit' to exit)\n")
 

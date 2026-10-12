@@ -1,6 +1,6 @@
 'use client';
 
-import { cn, formatDate } from '@babylon/shared';
+import { cn, formatDate } from '@feed/shared';
 import {
   Ban,
   CheckCircle,
@@ -43,7 +43,6 @@ const UserSchema = z.object({
   reputationPoints: z.number(),
   referralCount: z.number(),
   nftTokenId: z.number().nullable(),
-  hasFarcaster: z.boolean(),
   hasTwitter: z.boolean(),
   createdAt: z.string(),
   updatedAt: z.string(),

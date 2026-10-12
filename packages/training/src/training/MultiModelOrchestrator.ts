@@ -11,6 +11,7 @@
  * - Real vLLM/OpenAI-compatible API integration
  */
 
+import { getSurplusConfig } from '@feed/shared';
 import { logger } from '../utils/logger';
 import {
   getModelForArchetype as getArchetypeModel,
@@ -106,11 +107,14 @@ export class MultiModelOrchestrator {
   private vllmAvailable: boolean | null = null;
 
   constructor(config: OrchestratorConfig) {
+    const surplus = getSurplusConfig();
     this.config = {
       vllmBaseUrl: process.env.VLLM_BASE_URL || 'http://localhost:9001',
       fallbackApiUrl:
-        process.env.GROQ_API_URL || 'https://api.groq.com/openai/v1',
-      fallbackApiKey: process.env.GROQ_API_KEY,
+        surplus?.baseURL ||
+        process.env.GROQ_API_URL ||
+        'https://api.groq.com/openai/v1',
+      fallbackApiKey: surplus?.apiKey || process.env.GROQ_API_KEY,
       inferenceTimeoutMs: 30000,
       ...config,
     };
@@ -351,7 +355,7 @@ export class MultiModelOrchestrator {
   ): Promise<CompletionResponse> {
     if (!this.config.fallbackApiKey) {
       throw new Error(
-        'No fallback API key configured. Set GROQ_API_KEY environment variable.'
+        'No fallback API key configured. Set SURPLUS_API_KEY environment variable.'
       );
     }
 
@@ -362,7 +366,11 @@ export class MultiModelOrchestrator {
     );
 
     // Use a fast model for fallback
-    const fallbackModel = 'llama-3.1-8b-instant';
+    const surplus = getSurplusConfig();
+    const fallbackModel =
+      surplus && this.config.fallbackApiUrl === surplus.baseURL
+        ? surplus.model
+        : 'llama-3.1-8b-instant';
 
     const response = await fetch(
       `${this.config.fallbackApiUrl}/chat/completions`,

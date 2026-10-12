@@ -4,9 +4,9 @@
  */
 
 import { afterAll, beforeAll, describe, expect, it } from 'bun:test';
-import type { PrivyEmailAccount, PrivyUserWithEmails } from '@babylon/shared';
+import type { PrivyEmailAccount, PrivyUserWithEmails } from '@feed/shared';
 
-// Import from absolute source path with cache-busting to avoid mocked @babylon/shared.
+// Import from absolute source path with cache-busting to avoid mocked @feed/shared.
 const { checkForAdminEmail, findEmailByDomain, getAllVerifiedEmails } =
   await import(
     `${import.meta.dir}/../../../shared/src/auth/privy-email-utils?t=${Date.now()}`
@@ -138,7 +138,7 @@ describe('Privy Email Utilities', () => {
             address: 'verified@example.com',
             verified_at: Date.now(),
           } as PrivyEmailAccount,
-          { type: 'farcaster', fid: 12345 },
+          { type: 'twitter', username: 'testuser' },
           {
             type: 'email',
             address: 'another@example.com',
@@ -322,7 +322,7 @@ describe('Privy Email Utilities', () => {
       const user: PrivyUserWithEmails = {
         linkedAccounts: [
           { type: 'wallet', address: '0x123' },
-          { type: 'farcaster', fid: 12345 },
+          { type: 'twitter', username: 'testuser' },
           {
             type: 'email',
             address: 'hidden@elizalabs.ai',

@@ -8,7 +8,7 @@
  * @security DISPLAY-ONLY PREFERENCE
  * This endpoint manages the admin's UI environment preference for display purposes only.
  * It does NOT affect which database, Redis instance, or backend services are used.
- * The actual environment is determined by process.env.VERCEL_ENV and NODE_ENV.
+ * The actual environment is determined by process.env.DEPLOYMENT_ENV and NODE_ENV.
  * The preference cookie only affects how the admin dashboard displays environment context.
  */
 
@@ -18,8 +18,8 @@ import {
   requireSuperAdmin,
   successResponse,
   withErrorHandling,
-} from '@babylon/api';
-import { logger } from '@babylon/shared';
+} from '@feed/api';
+import { logger } from '@feed/shared';
 import { cookies } from 'next/headers';
 import type { NextRequest } from 'next/server';
 
@@ -36,8 +36,8 @@ const VALID_ENVIRONMENTS: AdminEnvironment[] = [
  * Get the actual environment from environment variables
  */
 function getActualEnvironment(): AdminEnvironment {
-  if (process.env.VERCEL_ENV === 'production') return 'production';
-  if (process.env.VERCEL_ENV === 'preview') return 'staging';
+  if (process.env.DEPLOYMENT_ENV === 'staging') return 'staging';
+  if (process.env.DEPLOYMENT_ENV === 'production') return 'production';
   if (process.env.NODE_ENV === 'production') return 'production';
   return 'development';
 }
@@ -61,9 +61,9 @@ export const GET = withErrorHandling(async (request: NextRequest) => {
     available: VALID_ENVIRONMENTS,
     info: {
       nodeEnv: process.env.NODE_ENV,
-      vercelEnv: process.env.VERCEL_ENV || 'local',
-      vercelUrl: process.env.VERCEL_URL || 'localhost',
-      region: process.env.VERCEL_REGION || 'local',
+      deploymentEnv: process.env.DEPLOYMENT_ENV || 'local',
+      deploymentPlatform: process.env.DEPLOYMENT_PLATFORM || 'local',
+      appUrl: process.env.NEXT_PUBLIC_APP_URL || 'localhost',
     },
   });
 });

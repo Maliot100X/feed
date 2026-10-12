@@ -15,38 +15,9 @@ import * as Sentry from '@sentry/nextjs';
 
 const sentryServerRelease =
   process.env.SENTRY_RELEASE ??
-  process.env.VERCEL_GIT_COMMIT_SHA ??
+  process.env.COMMIT_SHA ??
   process.env.NEXT_PUBLIC_SENTRY_RELEASE ??
-  process.env.NEXT_PUBLIC_VERCEL_GIT_COMMIT_SHA;
-
-// Suppress noisy Sentry logger messages from Next.js integration
-const originalConsoleLog = console.log;
-const originalConsoleError = console.error;
-
-console.log = (...args: Parameters<typeof console.log>) => {
-  const message = args.join(' ');
-  // Only filter Next.js Sentry logger messages
-  if (
-    message.includes('[next] Sentry Logger') &&
-    (message.includes('SpanExporter exported') ||
-      message.includes('spans are waiting'))
-  ) {
-    return;
-  }
-  originalConsoleLog(...args);
-};
-
-console.error = (...args: Parameters<typeof console.error>) => {
-  const message = args.join(' ');
-  // Only filter Next.js Sentry "Transport disabled" error
-  if (
-    message.includes('[next] Sentry Logger') &&
-    message.includes('Transport disabled')
-  ) {
-    return;
-  }
-  originalConsoleError(...args);
-};
+  process.env.NEXT_PUBLIC_COMMIT_SHA;
 
 // Log initialization status in development
 if (process.env.NODE_ENV === 'development') {
@@ -63,13 +34,23 @@ if (process.env.NODE_ENV === 'development') {
   }
 }
 
+/** Error classes the API error handler maps to 4xx responses. */
+const HANDLED_CLIENT_ERROR_NAMES = new Set([
+  'ZodError',
+  'ValidationError',
+  'UnauthorizedError',
+  'AuthenticationError',
+  'AuthorizationError',
+  'ForbiddenError',
+]);
+
 Sentry.init({
   dsn: process.env.SENTRY_DSN || process.env.NEXT_PUBLIC_SENTRY_DSN,
 
   // Environment detection
   environment:
     process.env.SENTRY_ENVIRONMENT ??
-    process.env.VERCEL_ENV ??
+    process.env.DEPLOYMENT_ENV ??
     process.env.NODE_ENV ??
     'development',
 
@@ -122,9 +103,8 @@ Sentry.init({
     'ZodError',
     // Authentication errors (handled by error handler)
     'UnauthorizedError',
-    // Common non-actionable errors
-    'ECONNREFUSED', // Connection refused (often infrastructure)
-    'ETIMEDOUT', // Timeout errors (often infrastructure)
+    // Infrastructure failures (ECONNREFUSED/ETIMEDOUT) are intentionally
+    // reported: they indicate real outages.
   ],
 
   // Server-specific integrations
@@ -165,22 +145,12 @@ Sentry.init({
       }
     }
 
-    // Filter out known non-actionable errors
+    // Filter out errors the API error handler already maps to 4xx, by class
+    // (not by message substrings, which also matched real failures that
+    // merely mention e.g. "validation" or "authentication").
     const error = hint.originalException;
-    if (error instanceof Error) {
-      // Skip validation errors (already handled)
-      if (error.name === 'ZodError' || error.message.includes('validation')) {
-        return null;
-      }
-
-      // Skip authentication errors (already handled)
-      if (
-        error.message.includes('unauthorized') ||
-        error.message.includes('authentication') ||
-        error.message.includes('forbidden')
-      ) {
-        return null;
-      }
+    if (error instanceof Error && HANDLED_CLIENT_ERROR_NAMES.has(error.name)) {
+      return null;
     }
 
     return event;

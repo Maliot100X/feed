@@ -63,11 +63,12 @@ setup('extract auth tokens for integration tests', async ({ page }) => {
       baseURL: baseURL,
     };
 
-    writeFileSync(tokenFile, JSON.stringify(tokenData, null, 2));
+    writeFileSync(tokenFile, JSON.stringify(tokenData, null, 2), {
+      mode: 0o600,
+    });
 
     console.log(`✅ Dev auth tokens extracted and saved to ${tokenFile}`);
     console.log(`   User ID: ${devSession.userId}`);
-    console.log(`   Token: ${devSession.accessToken.substring(0, 20)}...`);
     console.log(`   Updated: ${tokenData.updatedAt}`);
     return;
   }
@@ -89,6 +90,7 @@ setup('extract auth tokens for integration tests', async ({ page }) => {
         privy?.ready === true && typeof privy.getAccessToken === 'function'
       );
     },
+    undefined,
     { timeout: 30000 }
   );
 
@@ -145,10 +147,9 @@ setup('extract auth tokens for integration tests', async ({ page }) => {
     baseURL: baseURL,
   };
 
-  writeFileSync(tokenFile, JSON.stringify(tokenData, null, 2));
+  writeFileSync(tokenFile, JSON.stringify(tokenData, null, 2), { mode: 0o600 });
 
   console.log(`✅ Auth tokens extracted and saved to ${tokenFile}`);
   console.log(`   User ID: ${userId}`);
-  console.log(`   Token: ${accessToken.substring(0, 20)}...`);
   console.log(`   Updated: ${tokenData.updatedAt}`);
 });

@@ -9,6 +9,7 @@
  * @packageDocumentation
  */
 
+import type { IAgentRuntime } from '@elizaos/core';
 import {
   db,
   eq,
@@ -16,8 +17,7 @@ import {
   type User,
   userAgentConfigs,
   users,
-} from '@babylon/db';
-import type { IAgentRuntime } from '@elizaos/core';
+} from '@feed/db';
 import { ArchetypeConfigService } from '../archetypes/ArchetypeConfigService';
 import {
   areAgentDependenciesConfigured,

@@ -22,7 +22,7 @@ export const autonomyStatusProvider: Provider = {
 
   get: async (runtime: IAgentRuntime, message: Memory, _state?: State) => {
     // Get autonomy service
-    const autonomyService = runtime.getService('autonomy');
+    const autonomyService = runtime.getService('AUTONOMOUS');
     if (!autonomyService) {
       return { text: '' }; // Service not available, don't show status
     }

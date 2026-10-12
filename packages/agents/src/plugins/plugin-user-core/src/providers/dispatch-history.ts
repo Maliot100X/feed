@@ -17,14 +17,6 @@
  * - Avoid re-dispatching when a response already exists
  */
 
-import {
-  and,
-  db,
-  desc,
-  eq,
-  messages as messagesTable,
-  users,
-} from '@babylon/db';
 import type {
   IAgentRuntime,
   Memory,
@@ -32,6 +24,7 @@ import type {
   ProviderResult,
   State,
 } from '@elizaos/core';
+import { and, db, desc, eq, messages as messagesTable, users } from '@feed/db';
 
 function formatRelativeTime(date: Date): string {
   const diffMs = Date.now() - date.getTime();

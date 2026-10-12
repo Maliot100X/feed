@@ -29,10 +29,6 @@ function getBaseUrl(): string {
   const fromEnv = process.env.NEXT_PUBLIC_APP_URL?.trim();
   if (fromEnv) return fromEnv.replace(/\/+$/, '');
 
-  if (process.env.VERCEL_URL) {
-    return `https://${process.env.VERCEL_URL}`.replace(/\/+$/, '');
-  }
-
   return 'http://localhost:3000';
 }
 
@@ -204,7 +200,7 @@ export async function sendNotificationEmail(
     email: input.userEmail,
   });
 
-  const subject = `[Babylon] ${input.title}`;
+  const subject = `[Feed] ${input.title}`;
   const html = createEmailHtml({
     title: input.title,
     message: input.message,

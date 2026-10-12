@@ -5,7 +5,7 @@
  * All calls are null-safe: getActiveTracer() returns null when tracing is disabled.
  */
 
-import { logger } from '@babylon/shared';
+import { logger } from '@feed/shared';
 import { GAME_TICK_DAG } from './dag-definition';
 import type {
   LLMCallInput,
@@ -186,6 +186,7 @@ export class TickTracer {
       systemPrompt: call.systemPrompt,
       userPrompt: call.userPrompt,
       rawResponse: call.rawResponse,
+      messages: call.messages,
       parsedResponse: call.parsedResponse,
       inputTokens: call.inputTokens,
       outputTokens: call.outputTokens,
@@ -296,6 +297,12 @@ export class TickTracer {
 
   setEnvironmentFlags(flags: Record<string, string | boolean>): void {
     this.envFlags = flags;
+  }
+
+  failActiveNodes(error: unknown): void {
+    for (const [id, node] of this.nodes) {
+      if (node.endMs === 0) this.failNode(id, error);
+    }
   }
 
   finalize(): TickTrace {

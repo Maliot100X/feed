@@ -34,7 +34,6 @@ export interface PrivyEmailAccount {
 export type PrivyLinkedAccount =
   | PrivyEmailAccount
   | { type: 'wallet'; address?: string; walletClient?: string }
-  | { type: 'farcaster'; fid?: number; username?: string }
   | { type: 'twitter'; username?: string }
   | { type: 'google_oauth'; email?: string }
   | { type: 'apple_oauth'; email?: string }
@@ -98,7 +97,7 @@ function isEmailVerified(account: {
  * // Returns: ['user@gmail.com', 'user@company.com']
  *
  * @example
- * // User logged in with Farcaster, later linked and verified email
+ * // User logged in with a wallet, later linked and verified email
  * const emails = getAllVerifiedEmails(privyUser);
  * // Returns email from linkedAccounts if verified
  */

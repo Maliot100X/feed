@@ -7,8 +7,8 @@
  * Token-aware: Limits context size to prevent LLM token overflows
  */
 
-import { PerpDbAdapter } from '@babylon/core/markets/perps';
-import { maxSafeBuy } from '@babylon/core/markets/prediction/client';
+import { PerpDbAdapter } from '@feed/core/markets/perps';
+import { maxSafeBuy } from '@feed/core/markets/prediction/client';
 import {
   actorRelationships,
   actorState,
@@ -31,8 +31,8 @@ import {
   posts,
   questions,
   worldEvents,
-} from '@babylon/db';
-import { logger } from '@babylon/shared';
+} from '@feed/db';
+import { logger } from '@feed/shared';
 import {
   getSimulationPrice,
   getSimulationTickers,
@@ -67,6 +67,23 @@ import {
 } from './prediction-market-profiles';
 import { SignalExtractionService } from './signal-extraction-service';
 import { StaticDataRegistry } from './static-data-registry';
+
+function requiredFinancialNumber(
+  value: string | number | null | undefined,
+  field: string,
+  minimum?: number
+): number {
+  if (
+    value === null ||
+    value === undefined ||
+    (typeof value === 'string' && !value.trim())
+  )
+    throw new Error(`Missing required ${field}`);
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed) || (minimum !== undefined && parsed < minimum))
+    throw new Error(`Invalid required ${field}`);
+  return parsed;
+}
 
 export class MarketContextService {
   /**
@@ -206,6 +223,15 @@ export class MarketContextService {
       .filter((actor) => !actor.name.includes('Group Test') && !actor.isTest)
       .map((actor) => {
         const state = stateMap.get(actor.id);
+        if (
+          !state ||
+          state.tradingBalance == null ||
+          !Number.isFinite(Number(state.tradingBalance))
+        ) {
+          throw new Error(
+            `Missing or invalid trading state for NPC ${actor.id}`
+          );
+        }
         return {
           id: actor.id,
           name: actor.name,
@@ -216,9 +242,9 @@ export class MarketContextService {
           affiliations: actor.affiliations,
           postStyle: actor.postStyle,
           postExample: actor.postExample,
-          tradingBalance: state?.tradingBalance ?? '10000',
-          reputationPoints: state?.reputationPoints ?? 10000,
-          hasPool: state?.hasPool ?? false,
+          tradingBalance: state.tradingBalance,
+          reputationPoints: state.reputationPoints,
+          hasPool: state.hasPool,
         };
       });
 
@@ -314,7 +340,11 @@ export class MarketContextService {
 
     for (const npc of npcs) {
       // Use actor's trading balance (no pools)
-      const availableBalance = Number.parseFloat(npc.tradingBalance.toString());
+      const availableBalance = requiredFinancialNumber(
+        npc.tradingBalance,
+        `NPC ${npc.id} balance`,
+        0
+      );
 
       // Filter group chats this NPC is a member of (based on chat participants)
       const npcGroupChats: GroupChatContext[] = [];
@@ -349,8 +379,8 @@ export class MarketContextService {
             actorId: otherActorId,
             actorName: otherActorId,
             relationshipType: rel.relationshipType,
-            sentiment: rel.sentiment || 0,
-            strength: rel.strength || 0.5,
+            sentiment: rel.sentiment ?? 0,
+            strength: rel.strength ?? 0.5,
             history: rel.history || undefined,
           };
         });
@@ -411,13 +441,20 @@ export class MarketContextService {
 
     // Get dynamic state from database
     const npcState = await getDbInstance().getActorState(npcId);
+    if (
+      !npcState ||
+      npcState.tradingBalance == null ||
+      !Number.isFinite(Number(npcState.tradingBalance))
+    ) {
+      throw new Error(`Missing or invalid trading state for NPC ${npcId}`);
+    }
 
     // Combine static and dynamic data
     const npc = {
       ...staticNpc,
-      tradingBalance: npcState?.tradingBalance ?? '10000',
-      reputationPoints: npcState?.reputationPoints ?? 10000,
-      hasPool: npcState?.hasPool ?? false,
+      tradingBalance: npcState.tradingBalance,
+      reputationPoints: npcState.reputationPoints,
+      hasPool: npcState.hasPool,
     };
 
     const [marketSnapshots, recentPosts, recentEvents, groupChatMessages] =
@@ -437,7 +474,11 @@ export class MarketContextService {
     const relationships = await this.getRelationshipsForNPC(npcId);
 
     // Use actor's trading balance (no pools)
-    const availableBalance = Number.parseFloat(npc.tradingBalance.toString());
+    const availableBalance = requiredFinancialNumber(
+      npc.tradingBalance,
+      `NPC ${npc.id} balance`,
+      0
+    );
 
     const currentPositions =
       (await this.getCurrentPositionsByNpcIds([npcId])).get(npcId) ?? [];
@@ -489,8 +530,8 @@ export class MarketContextService {
         actorId: otherActorId,
         actorName: otherActorId,
         relationshipType: rel.relationshipType,
-        sentiment: rel.sentiment || 0,
-        strength: rel.strength || 0.5,
+        sentiment: rel.sentiment ?? 0,
+        strength: rel.strength ?? 0.5,
         history: rel.history || undefined,
       };
     });
@@ -540,12 +581,8 @@ export class MarketContextService {
         .orderBy(desc(messages.createdAt))
         .limit(20);
 
-      for (const msg of chatMessages.slice(0, 5)) {
-        const maxMsgLength = 300;
-        const message =
-          msg.content.length > maxMsgLength
-            ? msg.content.slice(0, maxMsgLength) + '...'
-            : msg.content;
+      for (const msg of chatMessages) {
+        const message = msg.content;
 
         result.push({
           chatId: chat.id,
@@ -614,17 +651,9 @@ export class MarketContextService {
       .limit(15);
 
     return postList.map((post) => {
-      const maxContentLength = 500;
-      const content =
-        post.content.length > maxContentLength
-          ? post.content.slice(0, maxContentLength) + '...'
-          : post.content;
+      const content = post.content;
 
-      const maxTitleLength = 120;
-      const articleTitle =
-        post.articleTitle && post.articleTitle.length > maxTitleLength
-          ? post.articleTitle.slice(0, maxTitleLength) + '...'
-          : post.articleTitle;
+      const articleTitle = post.articleTitle;
 
       return {
         author: post.authorId,
@@ -659,11 +688,7 @@ export class MarketContextService {
       .limit(20);
 
     return eventList.map((event) => {
-      const maxDescLength = 300;
-      const description =
-        event.description.length > maxDescLength
-          ? event.description.slice(0, maxDescLength) + '...'
-          : event.description;
+      const description = event.description;
 
       return {
         type: event.eventType,
@@ -731,11 +756,7 @@ export class MarketContextService {
     });
 
     return npcEvents.slice(0, 15).map((event) => {
-      const maxDescLength = 200;
-      const description =
-        event.description.length > maxDescLength
-          ? event.description.slice(0, maxDescLength) + '...'
-          : event.description;
+      const description = event.description;
 
       return {
         type: event.eventType,
@@ -783,11 +804,7 @@ export class MarketContextService {
       .limit(10);
 
     return npcPosts.map((post) => {
-      const maxContentLength = 200;
-      const content =
-        post.content.length > maxContentLength
-          ? post.content.slice(0, maxContentLength) + '...'
-          : post.content;
+      const content = post.content;
 
       return {
         author: post.authorId,
@@ -937,15 +954,16 @@ export class MarketContextService {
           'MarketContextService'
         );
       } catch (error) {
-        // Signal extraction is optional - continue if it fails
+        // Required context retrieval must not disappear on failure
         logger.debug(
-          'Signal extraction failed for market (non-critical)',
+          'Signal extraction failed for market',
           {
             marketId: market.id,
             error: error instanceof Error ? error.message : 'Unknown',
           },
           'MarketContextService'
         );
+        throw error;
       }
     }
 
@@ -1032,6 +1050,12 @@ export class MarketContextService {
     );
 
     const pushPosition = (npcId: string, position: NPCPosition): void => {
+      if (
+        position.marketType === 'perp' ? !position.ticker : !position.marketId
+      )
+        throw new Error(
+          `Position ${position.id} is missing its market identifier`
+        );
       const existing = positionsByNpc.get(npcId);
       if (existing) {
         existing.push(position);
@@ -1046,10 +1070,25 @@ export class MarketContextService {
         marketType: 'perp',
         ticker: position.ticker,
         side: position.side,
-        entryPrice: Number(position.entryPrice),
-        currentPrice: Number(position.currentPrice),
-        size: Number(position.size),
-        unrealizedPnL: Number(position.unrealizedPnL),
+        entryPrice: requiredFinancialNumber(
+          position.entryPrice,
+          `position ${position.id} entryPrice`,
+          0
+        ),
+        currentPrice: requiredFinancialNumber(
+          position.currentPrice,
+          `position ${position.id} currentPrice`,
+          0
+        ),
+        size: requiredFinancialNumber(
+          position.size,
+          `position ${position.id} size`,
+          0
+        ),
+        unrealizedPnL: requiredFinancialNumber(
+          position.unrealizedPnL,
+          `position ${position.id} unrealizedPnL`
+        ),
         openedAt: position.openedAt.toISOString(),
       });
     }
@@ -1061,10 +1100,25 @@ export class MarketContextService {
         marketType: 'perp',
         ticker: position.ticker ?? undefined,
         side: position.side,
-        entryPrice: Number(position.entryPrice),
-        currentPrice: Number(position.currentPrice),
-        size: Number(position.size),
-        unrealizedPnL: Number(position.unrealizedPnL),
+        entryPrice: requiredFinancialNumber(
+          position.entryPrice,
+          `position ${position.id} entryPrice`,
+          0
+        ),
+        currentPrice: requiredFinancialNumber(
+          position.currentPrice,
+          `position ${position.id} currentPrice`,
+          0
+        ),
+        size: requiredFinancialNumber(
+          position.size,
+          `position ${position.id} size`,
+          0
+        ),
+        unrealizedPnL: requiredFinancialNumber(
+          position.unrealizedPnL,
+          `position ${position.id} unrealizedPnL`
+        ),
         openedAt: position.openedAt.toISOString(),
       });
     }
@@ -1076,14 +1130,30 @@ export class MarketContextService {
         marketType: 'prediction',
         marketId: position.marketId || undefined,
         side: position.side,
-        entryPrice: Number(position.entryPrice),
-        currentPrice: Number(position.currentPrice),
-        size: Number(position.size),
-        shares:
-          position.shares === null || position.shares === undefined
-            ? undefined
-            : Number(position.shares),
-        unrealizedPnL: Number(position.unrealizedPnL),
+        entryPrice: requiredFinancialNumber(
+          position.entryPrice,
+          `position ${position.id} entryPrice`,
+          0
+        ),
+        currentPrice: requiredFinancialNumber(
+          position.currentPrice,
+          `position ${position.id} currentPrice`,
+          0
+        ),
+        size: requiredFinancialNumber(
+          position.size,
+          `position ${position.id} size`,
+          0
+        ),
+        shares: requiredFinancialNumber(
+          position.shares,
+          `position ${position.id} shares`,
+          0
+        ),
+        unrealizedPnL: requiredFinancialNumber(
+          position.unrealizedPnL,
+          `position ${position.id} unrealizedPnL`
+        ),
         openedAt: position.openedAt.toISOString(),
       });
     }

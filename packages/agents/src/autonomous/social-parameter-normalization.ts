@@ -29,7 +29,7 @@ function normalizeIdInput(value: unknown): string | undefined {
   const trimmed =
     typeof value === 'string'
       ? value.trim()
-      : typeof value === 'number' && Number.isFinite(value)
+      : typeof value === 'number' && Number.isSafeInteger(value)
         ? String(Math.trunc(value))
         : typeof value === 'bigint'
           ? value.toString()
@@ -131,67 +131,6 @@ function dedupeRecentPostAuthors(
   return authors;
 }
 
-function chooseCommentPost(
-  context: AgentTickContext,
-  agentUserId: string
-): string | undefined {
-  return (
-    context.recentPosts.find(
-      (post) => post.authorId !== agentUserId && !post.agentComment
-    )?.id ??
-    context.recentPosts.find((post) => post.authorId !== agentUserId)?.id ??
-    context.recentPosts[0]?.id
-  );
-}
-
-function chooseLikePost(
-  context: AgentTickContext,
-  agentUserId: string
-): string | undefined {
-  return (
-    context.recentPosts.find(
-      (post) => post.authorId !== agentUserId && !post.agentLiked
-    )?.id ??
-    context.recentPosts.find((post) => post.authorId !== agentUserId)?.id ??
-    context.recentPosts[0]?.id
-  );
-}
-
-function chooseRepostPost(
-  context: AgentTickContext,
-  agentUserId: string
-): string | undefined {
-  return (
-    context.recentPosts.find(
-      (post) => post.authorId !== agentUserId && !post.agentReposted
-    )?.id ??
-    context.recentPosts.find((post) => post.authorId !== agentUserId)?.id ??
-    context.recentPosts[0]?.id
-  );
-}
-
-function choosePendingCommentTarget(
-  context: AgentTickContext
-): { id: string; postId: string } | undefined {
-  const target = context.pendingCommentReplies[0];
-  if (!target) {
-    return undefined;
-  }
-
-  return { id: target.id, postId: target.postId };
-}
-
-function choosePendingChatId(
-  context: AgentTickContext,
-  groupOnly = false
-): string | undefined {
-  if (groupOnly) {
-    return context.groupChats?.[0]?.id;
-  }
-
-  return context.pendingChatMessages[0]?.chatId;
-}
-
 export function normalizeSocialDecisionParameters(
   action: string,
   parameters: DecisionParameters,
@@ -224,8 +163,7 @@ export function normalizeSocialDecisionParameters(
         : undefined;
       const resolvedPostId =
         resolveCandidateId(nextParameters.postId, recentPosts) ??
-        parentTarget?.postId ??
-        chooseCommentPost(context, agentUserId);
+        parentTarget?.postId;
 
       if (resolvedPostId) {
         nextParameters.postId = resolvedPostId;
@@ -247,10 +185,9 @@ export function normalizeSocialDecisionParameters(
         nextParameters.commentId,
         pendingReplies
       );
-      const target =
-        (resolvedCommentId &&
-          pendingReplies.find((reply) => reply.id === resolvedCommentId)) ??
-        choosePendingCommentTarget(context);
+      const target = resolvedCommentId
+        ? pendingReplies.find((reply) => reply.id === resolvedCommentId)
+        : undefined;
 
       if (target) {
         nextParameters.commentId = target.id;
@@ -264,9 +201,10 @@ export function normalizeSocialDecisionParameters(
     }
 
     case Actions.LIKE: {
-      const resolvedPostId =
-        resolveCandidateId(nextParameters.postId, recentPosts) ??
-        chooseLikePost(context, agentUserId);
+      const resolvedPostId = resolveCandidateId(
+        nextParameters.postId,
+        recentPosts
+      );
 
       if (resolvedPostId) {
         nextParameters.postId = resolvedPostId;
@@ -278,9 +216,10 @@ export function normalizeSocialDecisionParameters(
     }
 
     case Actions.REPOST: {
-      const resolvedPostId =
-        resolveCandidateId(nextParameters.postId, recentPosts) ??
-        chooseRepostPost(context, agentUserId);
+      const resolvedPostId = resolveCandidateId(
+        nextParameters.postId,
+        recentPosts
+      );
 
       if (resolvedPostId) {
         nextParameters.postId = resolvedPostId;
@@ -293,9 +232,10 @@ export function normalizeSocialDecisionParameters(
 
     case Actions.FOLLOW:
     case Actions.UNFOLLOW: {
-      const resolvedUserId =
-        resolveCandidateId(nextParameters.userId, recentAuthors) ??
-        recentAuthors[0]?.id;
+      const resolvedUserId = resolveCandidateId(
+        nextParameters.userId,
+        recentAuthors
+      );
 
       if (resolvedUserId) {
         nextParameters.userId = resolvedUserId;
@@ -307,9 +247,10 @@ export function normalizeSocialDecisionParameters(
     }
 
     case Actions.DM: {
-      const resolvedRecipientId =
-        resolveCandidateId(nextParameters.recipientId, recentAuthors) ??
-        recentAuthors[0]?.id;
+      const resolvedRecipientId = resolveCandidateId(
+        nextParameters.recipientId,
+        recentAuthors
+      );
 
       if (resolvedRecipientId) {
         nextParameters.recipientId = resolvedRecipientId;
@@ -321,9 +262,10 @@ export function normalizeSocialDecisionParameters(
     }
 
     case Actions.REPLY_CHAT: {
-      const resolvedChatId =
-        resolveCandidateId(nextParameters.chatId, pendingChats) ??
-        choosePendingChatId(context);
+      const resolvedChatId = resolveCandidateId(
+        nextParameters.chatId,
+        pendingChats
+      );
 
       if (resolvedChatId) {
         nextParameters.chatId = resolvedChatId;
@@ -335,9 +277,10 @@ export function normalizeSocialDecisionParameters(
     }
 
     case Actions.GROUP_MESSAGE: {
-      const resolvedChatId =
-        resolveCandidateId(nextParameters.chatId, groupChats) ??
-        choosePendingChatId(context, true);
+      const resolvedChatId = resolveCandidateId(
+        nextParameters.chatId,
+        groupChats
+      );
 
       if (resolvedChatId) {
         nextParameters.chatId = resolvedChatId;

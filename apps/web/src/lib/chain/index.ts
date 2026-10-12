@@ -1,8 +1,4 @@
 /**
  * Chain utilities
  */
-export {
-  getExplorerBaseUrl,
-  getExplorerName,
-  getExplorerTxUrl,
-} from './explorer';
+export { getExplorer, getExplorerTxUrl } from './explorer';

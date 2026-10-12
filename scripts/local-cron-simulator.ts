@@ -2,7 +2,7 @@
 /**
  * Local Cron Simulator
  *
- * Simulates Vercel Cron locally by calling game-tick, markets-tick, agent-tick, and npc-tick endpoints every minute.
+ * Simulates the Cloudflare cron scheduler locally by calling game-tick, markets-tick, agent-tick, and npc-tick endpoints every minute.
  * Use this if you don't want to run the full daemon but want content generation and agent activity.
  *
  * Usage:
@@ -344,7 +344,7 @@ async function main() {
   console.info('🔄 LOCAL CRON SIMULATOR', undefined, 'LocalCron');
   console.info('======================', undefined, 'LocalCron');
   console.info(
-    'Simulating Vercel Cron by calling game-tick, markets-tick, agent-tick, npc-tick every minute',
+    'Simulating the cron scheduler by calling game-tick, markets-tick, agent-tick, npc-tick every minute',
     undefined,
     'LocalCron'
   );

@@ -1,3 +1,4 @@
+import { getSurplusConfig } from '@feed/shared';
 /**
  * Trending Grouping Service
  *
@@ -7,8 +8,9 @@
  * is unavailable.
  */
 
-import { logger } from '@babylon/shared';
+import { logger } from '@feed/shared';
 import OpenAI from 'openai';
+import { tracedCompletion } from '../llm/traced-completion';
 import { first } from '../utils/array-utils';
 import { isPromptLoggingEnabled, logPrompt } from '../utils/prompt-logger';
 
@@ -16,30 +18,48 @@ import { isPromptLoggingEnabled, logPrompt } from '../utils/prompt-logger';
 const LLM_TIMEOUT_MS = 15000; // 15 seconds
 const LLM_MAX_RETRIES = 2;
 const GROUPING_MODEL =
+  getSurplusConfig()?.model ||
   process.env.TRENDING_GROUPING_MODEL ||
-  (process.env.GROQ_API_KEY ? 'llama-3.1-8b-instant' : 'gpt-5-nano');
+  (process.env.GROQ_API_KEY
+    ? process.env.GROQ_SMALL_MODEL ||
+      process.env.GROQ_PRIMARY_MODEL ||
+      'llama-3.1-8b-instant'
+    : 'gpt-5-nano');
 const SUMMARY_MODEL =
+  getSurplusConfig()?.model ||
   process.env.TRENDING_SUMMARY_MODEL ||
-  (process.env.GROQ_API_KEY ? 'llama-3.1-8b-instant' : 'gpt-5-nano');
+  (process.env.GROQ_API_KEY
+    ? process.env.GROQ_SMALL_MODEL ||
+      process.env.GROQ_PRIMARY_MODEL ||
+      'llama-3.1-8b-instant'
+    : 'gpt-5-nano');
 
 // Check if LLM is available
-const hasApiKey = !!(process.env.GROQ_API_KEY || process.env.OPENAI_API_KEY);
+const hasApiKey = !!(
+  getSurplusConfig()?.apiKey ||
+  process.env.GROQ_API_KEY ||
+  process.env.OPENAI_API_KEY
+);
 const useGroq = !!process.env.GROQ_API_KEY;
 const groqBaseURL =
   process.env.GROQ_BASE_URL || 'https://api.groq.com/openai/v1';
 const suppressOptionalLlmWarnings = ['1', 'true', 'yes'].includes(
-  (process.env.BABYLON_SUPPRESS_OPTIONAL_LLM_WARNINGS || '')
-    .trim()
-    .toLowerCase()
+  (process.env.FEED_SUPPRESS_OPTIONAL_LLM_WARNINGS || '').trim().toLowerCase()
 );
 
 // Only initialize OpenAI client if we have an API key
 let openai: OpenAI | null = null;
 if (hasApiKey) {
   openai = new OpenAI({
-    apiKey: process.env.GROQ_API_KEY || process.env.OPENAI_API_KEY,
-    baseURL: useGroq ? groqBaseURL : 'https://api.openai.com/v1',
+    apiKey:
+      getSurplusConfig()?.apiKey ||
+      process.env.GROQ_API_KEY ||
+      process.env.OPENAI_API_KEY,
+    baseURL:
+      getSurplusConfig()?.baseURL ||
+      (useGroq ? groqBaseURL : 'https://api.openai.com/v1'),
     timeout: LLM_TIMEOUT_MS,
+    maxRetries: 0,
   });
 } else if (!suppressOptionalLlmWarnings) {
   logger.warn(
@@ -317,7 +337,7 @@ Return ONLY valid XML. No markdown, no explanations.`;
 
   const response = await withRetry(
     async () =>
-      await client.chat.completions.create({
+      await tracedCompletion(client, useGroq ? 'groq' : 'openai', 'trending', {
         model: GROUPING_MODEL,
         messages: [
           {
@@ -368,12 +388,7 @@ Return ONLY valid XML. No markdown, no explanations.`;
   }
 
   if (!content) {
-    logger.warn(
-      'No content in grouping response, using fallback',
-      undefined,
-      'TrendingGroupingService'
-    );
-    return { tagToGroup: fallbackGrouping(tags), groupSummaries: new Map() };
+    throw new Error('Trending grouping returned empty content');
   }
 
   // Parse XML response
@@ -476,42 +491,27 @@ One sentence summary:`;
 
   const startTime = Date.now();
 
-  let response;
-  try {
-    response = await withRetry(
-      async () =>
-        await client.chat.completions.create({
-          model: SUMMARY_MODEL,
-          messages: [
-            {
-              role: 'system',
-              content:
-                'You are a trending topics summarization expert. Generate concise, engaging one-sentence summaries.',
-            },
-            {
-              role: 'user',
-              content: prompt,
-            },
-          ],
-          temperature: 0.7,
-          max_tokens: 50,
-        }),
-      LLM_MAX_RETRIES,
-      'Single trend summary generation'
-    );
-  } catch (error) {
-    logger.warn(
-      'Trending summary generation failed, using fallback',
-      {
-        tagDisplayName,
-        category,
-        error: error instanceof Error ? error.message : String(error),
-      },
-      'TrendingGroupingService'
-    );
-    return `Trending topic in ${category || 'general'} discussions`;
-  }
-
+  const response = await withRetry(
+    async () =>
+      await tracedCompletion(client, useGroq ? 'groq' : 'openai', 'trending', {
+        model: SUMMARY_MODEL,
+        messages: [
+          {
+            role: 'system',
+            content:
+              'You are a trending topics summarization expert. Generate concise, engaging one-sentence summaries.',
+          },
+          {
+            role: 'user',
+            content: prompt,
+          },
+        ],
+        temperature: 0.7,
+        max_tokens: 50,
+      }),
+    LLM_MAX_RETRIES,
+    'Single trend summary generation'
+  );
   const duration = Date.now() - startTime;
   const tokensUsed = response.usage?.total_tokens || 0;
   const estimatedCost = calculateCost(SUMMARY_MODEL, tokensUsed);
@@ -549,7 +549,7 @@ One sentence summary:`;
   }
 
   if (!cleanSummary) {
-    return `Trending topic in ${category || 'general'} discussions`;
+    throw new Error('Trending summary returned empty content');
   }
 
   if (
@@ -616,22 +616,7 @@ export async function groupTrendingTags(
   );
 
   // Get grouping instructions AND summaries from LLM in single call
-  let tagToGroup: Map<string, number>;
-  let groupSummaries: Map<number, string>;
-  try {
-    ({ tagToGroup, groupSummaries } = await analyzeAndSummarizeTags(tags));
-  } catch (error) {
-    logger.warn(
-      'Trending tag grouping failed, using fallback grouping',
-      {
-        tagCount: tags.length,
-        error: error instanceof Error ? error.message : String(error),
-      },
-      'TrendingGroupingService'
-    );
-    tagToGroup = fallbackGrouping(tags);
-    groupSummaries = new Map();
-  }
+  const { tagToGroup, groupSummaries } = await analyzeAndSummarizeTags(tags);
 
   // Build groups
   const groups = new Map<number, TrendingTag[]>();

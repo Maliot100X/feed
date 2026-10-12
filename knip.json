@@ -24,7 +24,11 @@
       "entry": ["src/index.ts", "src/**/__tests__/**/*.test.ts"]
     },
     "packages/training": {
-      "entry": ["scripts/**/*.ts", "src/**/*.ts"]
+      "entry": [
+        "scripts/**/*.ts",
+        "src/index.ts",
+        "src/**/__tests__/**/*.test.ts"
+      ]
     }
   }
 }

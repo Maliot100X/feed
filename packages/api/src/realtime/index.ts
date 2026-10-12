@@ -1,21 +1,15 @@
-import { logger } from '@babylon/shared';
+import { logger } from '@feed/shared';
 import { createHmac, randomBytes, timingSafeEqual } from 'crypto';
+import { z } from 'zod';
 import { streamAdd } from '../redis';
 import type { JsonValue } from '../types';
-// import { enqueueOutbox } from './outbox'; // Uncomment when needed
 
 /**
- * Supported realtime channels.
+ * Realtime channel name. Known channels: 'feed', 'markets', 'breaking-news',
+ * 'upcoming-events', `chat:<id>`, `notifications:<userId>`, `agent:<id>`.
+ * Typed as a plain string because channels are also built dynamically.
  */
-export type RealtimeChannel =
-  | 'feed'
-  | 'markets'
-  | 'breaking-news'
-  | 'upcoming-events'
-  | `chat:${string}`
-  | `notifications:${string}`
-  | `agent:${string}`
-  | string;
+export type RealtimeChannel = string;
 
 export interface RealtimeEventEnvelope<T extends JsonValue = JsonValue> {
   channel: RealtimeChannel;
@@ -32,11 +26,6 @@ export interface RealtimeTokenPayload {
   iat: number; // epoch seconds
 }
 
-const REALTIME_SECRET =
-  process.env.REALTIME_SIGNING_SECRET ||
-  process.env.JWT_SECRET ||
-  process.env.CRON_SECRET;
-
 const base64url = (input: Buffer) =>
   input
     .toString('base64')
@@ -52,10 +41,14 @@ const decodeBase64url = (input: string) => {
 };
 
 const getSecret = (): Buffer => {
-  if (!REALTIME_SECRET) {
+  const secret =
+    process.env.REALTIME_SIGNING_SECRET ||
+    process.env.JWT_SECRET ||
+    process.env.CRON_SECRET;
+  if (!secret) {
     throw new Error('REALTIME_SIGNING_SECRET is not configured');
   }
-  return Buffer.from(REALTIME_SECRET);
+  return Buffer.from(secret);
 };
 
 /**
@@ -76,7 +69,9 @@ export function signRealtimeToken(payload: RealtimeTokenPayload): string {
 export function verifyRealtimeToken(
   token: string
 ): RealtimeTokenPayload | null {
-  const [h, p, s] = token.split('.');
+  const parts = token.split('.');
+  if (parts.length !== 3) return null;
+  const [h, p, s] = parts as [string, string, string];
   if (!h || !p || !s) return null;
   const signingInput = `${h}.${p}`;
   const expected = createHmac('sha256', getSecret())
@@ -86,21 +81,52 @@ export function verifyRealtimeToken(
   if (expected.length !== actual.length || !timingSafeEqual(expected, actual)) {
     return null;
   }
-  const payload = JSON.parse(
-    decodeBase64url(p).toString()
-  ) as RealtimeTokenPayload;
+
+  // The signing secret may be shared with other HS256 tokens (JWT_SECRET),
+  // so require the realtime header to prevent cross-token confusion.
+  const header = RealtimeTokenHeaderSchema.safeParse(
+    safeParseJson(decodeBase64url(h).toString())
+  );
+  if (!header.success) return null;
+
+  const payload = RealtimeTokenPayloadSchema.safeParse(
+    safeParseJson(decodeBase64url(p).toString())
+  );
+  if (!payload.success) return null;
+
   const now = Math.floor(Date.now() / 1000);
-  if (payload.exp <= now) return null;
-  return payload;
+  if (payload.data.exp <= now) return null;
+  return payload.data;
+}
+
+const RealtimeTokenHeaderSchema = z.object({
+  alg: z.literal('HS256'),
+  typ: z.literal('JWT'),
+  kid: z.literal('realtime'),
+});
+
+const RealtimeTokenPayloadSchema = z.object({
+  userId: z.string().min(1),
+  channels: z.array(z.string()),
+  exp: z.number().int().finite(),
+  iat: z.number().int().finite(),
+});
+
+function safeParseJson(text: string): JsonValue | undefined {
+  try {
+    return JSON.parse(text) as JsonValue;
+  } catch {
+    return undefined;
+  }
 }
 
 /**
  * Publish an event to a realtime channel.
  *
- * Contract:
- * - If DB logic fails upstream, surface the error (caller decides).
- * - If publish fails but upstream work succeeded, we log and rely on the
- *   outbox/worker to replay later.
+ * Delivery is best-effort: if the Redis stream is unavailable the event is
+ * logged and dropped (it is NOT enqueued for replay). Callers that need
+ * guaranteed delivery must persist with enqueueOutbox, which the
+ * realtime-drain cron publishes with retries.
  */
 export async function publishEvent(
   event: RealtimeEventEnvelope,

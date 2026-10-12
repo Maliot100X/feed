@@ -10,7 +10,6 @@ const mockTrackServerEvent = mock();
 const mockGetOrCreateReferralCode = mock();
 const mockAwardReferralSignup = mock();
 const mockAwardPoints = mock();
-const mockAwardFarcasterLink = mock();
 const mockAwardTwitterLink = mock();
 const mockAwardWalletConnect = mock();
 const mockAwardProfileCompletion = mock();
@@ -59,8 +58,8 @@ mock.module('zod', () => ({
   ..._actualZod,
 }));
 
-const _actualApi = await import('@babylon/api');
-mock.module('@babylon/api', () => ({
+const _actualApi = await import('@feed/api');
+mock.module('@feed/api', () => ({
   ..._actualApi,
   authenticate: mockAuthenticate,
   cachedDb: {
@@ -80,7 +79,6 @@ mock.module('@babylon/api', () => ({
     awardReferralSignup: mockAwardReferralSignup,
     awardReputation: mockAwardPoints,
     awardPoints: mockAwardPoints,
-    awardFarcasterLink: mockAwardFarcasterLink,
     awardTwitterLink: mockAwardTwitterLink,
     awardWalletConnect: mockAwardWalletConnect,
     awardProfileCompletion: mockAwardProfileCompletion,
@@ -88,7 +86,6 @@ mock.module('@babylon/api', () => ({
   PointsService: {
     awardReferralSignup: mockAwardReferralSignup,
     awardPoints: mockAwardPoints,
-    awardFarcasterLink: mockAwardFarcasterLink,
     awardTwitterLink: mockAwardTwitterLink,
     awardWalletConnect: mockAwardWalletConnect,
     awardProfileCompletion: mockAwardProfileCompletion,
@@ -108,8 +105,8 @@ mock.module('@babylon/api', () => ({
   ) => handler,
 }));
 
-const _actualDb = await import('@babylon/db');
-mock.module('@babylon/db', () => ({
+const _actualDb = await import('@feed/db');
+mock.module('@feed/db', () => ({
   ..._actualDb,
   and: (...conditions: unknown[]) => conditions,
   balanceTransactions: { id: 'balanceTransactions.id' },
@@ -145,7 +142,7 @@ mock.module('@babylon/db', () => ({
   withTransaction: mockWithTransaction,
 }));
 
-const _actualEngine = await import('@babylon/engine');
+const _actualEngine = await import('@feed/engine');
 (
   _actualEngine.UserAlphaGroupAssignmentService as unknown as Record<
     string,
@@ -156,12 +153,12 @@ const _actualEngine = await import('@babylon/engine');
   assignments: [],
   errors: [],
 }));
-mock.module('@babylon/engine', () => ({
+mock.module('@feed/engine', () => ({
   ..._actualEngine,
 }));
 
-const _actualShared = await import('@babylon/shared');
-mock.module('@babylon/shared', () => ({
+const _actualShared = await import('@feed/shared');
+mock.module('@feed/shared', () => ({
   ..._actualShared,
   checkForAdminEmail: mock(() => ({
     adminEmail: null,
@@ -209,7 +206,6 @@ describe('signup route referral code handling', () => {
     mockGetOrCreateReferralCode.mockReset();
     mockAwardReferralSignup.mockReset();
     mockAwardPoints.mockReset();
-    mockAwardFarcasterLink.mockReset();
     mockAwardTwitterLink.mockReset();
     mockAwardWalletConnect.mockReset();
     mockAwardProfileCompletion.mockReset();
@@ -248,7 +244,6 @@ describe('signup route referral code handling', () => {
       pointsAwarded: 0,
       newTotal: 0,
     });
-    mockAwardFarcasterLink.mockResolvedValue({ pointsAwarded: 0 });
     mockAwardTwitterLink.mockResolvedValue({ pointsAwarded: 0 });
     mockAwardWalletConnect.mockResolvedValue({ pointsAwarded: 0 });
     mockAwardProfileCompletion.mockResolvedValue({ pointsAwarded: 0 });
@@ -271,9 +266,7 @@ describe('signup route referral code handling', () => {
         referredBy: null,
         reputationPoints: 1000,
         pointsAwardedForProfile: true,
-        hasFarcaster: false,
         hasTwitter: false,
-        farcasterUsername: null,
         twitterUsername: null,
         createdAt: new Date('2026-03-20T20:11:55.000Z'),
         updatedAt: new Date('2026-03-20T20:11:55.000Z'),
@@ -285,20 +278,17 @@ describe('signup route referral code handling', () => {
   });
 
   it('returns success without a post-signup referral code regeneration call', async () => {
-    const request = new MockNextRequest(
-      'https://babylon.market/api/users/signup',
-      {
-        method: 'POST',
-        body: JSON.stringify({
-          username: 'alice',
-          displayName: 'Alice',
-          isWaitlist: true,
-        }),
-        headers: {
-          'content-type': 'application/json',
-        },
-      }
-    );
+    const request = new MockNextRequest('https://feed.fun/api/users/signup', {
+      method: 'POST',
+      body: JSON.stringify({
+        username: 'alice',
+        displayName: 'Alice',
+        isWaitlist: true,
+      }),
+      headers: {
+        'content-type': 'application/json',
+      },
+    });
 
     const response = await POST(request as unknown as NextRequest);
     const data = await response.json();

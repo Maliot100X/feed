@@ -1,5 +1,5 @@
 {
-  "name": "babylon",
+  "name": "feed",
   "version": "0.1.0",
   "private": true,
   "workspaces": [
@@ -8,17 +8,13 @@
     "packages/examples/*"
   ],
   "scripts": {
-    "postinstall": "bun run scripts/postinstall-install-python-deps.ts && bun run scripts/postinstall-agent-frameworks.ts",
+    "postinstall": "bun run scripts/postinstall-install-python-deps.ts",
     "agent-frameworks:bootstrap": "bun run scripts/postinstall-agent-frameworks.ts",
     "dev": "bun run scripts/pre-dev/pre-dev-local.ts && bun run scripts/dev-wrapper.ts",
     "dev:web": "turbo dev --filter=web",
     "dev:web:staging": "NODE_ENV=development bun --env-file=.env.staging.local run dev:web",
     "dev:web:production": "NODE_ENV=development bun --env-file=.env.production.local run dev:web",
-    "vercel:dev:web:staging": "bun run env:pull:staging && bun run dev:web:staging",
-    "vercel:dev:web:production": "bun run env:pull:production && bun run dev:web:production",
     "dev:next-only": "turbo dev:next-only --filter=web",
-    "env:pull:staging": "vercel env pull --yes .env.staging.local --environment=staging",
-    "env:pull:production": "vercel env pull --yes .env.production.local --environment=production",
     "env:audit": "bun run scripts/env-audit.ts",
     "env:audit:check": "bun run scripts/env-audit.ts --check --format=json",
     "env:validate": "bun run scripts/validate-env.ts",
@@ -44,9 +40,7 @@
     "test:integration:live": "RUN_OPTIONAL_INTEGRATION_TESTS=1 RUN_LIVE_LLM_TESTS=1 bun run scripts/test-integration-with-server.ts packages/testing/integration/agent-actions-persistence.integration.test.ts packages/testing/integration/engine-generation-output.test.ts packages/testing/integration/full-agent-tick.test.ts packages/testing/integration/full-production-tick.test.ts packages/testing/integration/trading-and-questions.integration.test.ts",
     "test:integration:agent0": "RUN_OPTIONAL_INTEGRATION_TESTS=1 bun run scripts/test-integration-with-server.ts packages/testing/integration/agent0-sdk.integration.test.ts",
     "test:integration:db-lazy": "bun test packages/testing/integration/db-lazy-connection.integration.test.ts",
-    "test:ci": "bash scripts/ci/run-all-tests.sh",
     "test:e2e": "bun run build && rm -rf packages/testing/node_modules/@playwright packages/testing/node_modules/playwright && bunx playwright test --config packages/testing/playwright.config.ts",
-    "miniapp:deploy": "bash scripts/deploy-miniapp.sh",
     "db:generate": "bun run --cwd packages/db db:generate",
     "db:migrate": "bun run --cwd packages/db db:migrate",
     "db:push": "bun run --cwd packages/db db:push",
@@ -56,7 +50,7 @@
     "db:seed": "bun run scripts/seed-database.ts",
     "db:seed:test": "bun run scripts/seed-test-data.ts all",
     "test:chroma": "cd tools/chroma && bun run test",
-    "babylon": "bun run apps/cli/src/index.ts",
+    "feed": "bun run apps/cli/src/index.ts",
     "hf:collect": "bun run apps/cli/src/index.ts model collect-data",
     "hf:upload": "bun run apps/cli/src/index.ts model upload-dataset",
     "stress-test": "bun run apps/cli/src/index.ts test load",
@@ -67,6 +61,7 @@
     "skills:package": "bun run scripts/generate-skills-md.ts --package",
     "characters:generate": "bun run scripts/generate-local-character-sheets.ts",
     "sim:generate": "bun run scripts/generate-simulation-data.ts",
+    "brand:generate": "bun run scripts/generate-brand-assets.ts",
     "pfp:gallery": "bun run scripts/pfp-gallery.ts",
     "pfp:serve": "bun run scripts/pfp-gallery.ts && python3 -m http.server 8899 --directory output/pfp-gallery",
     "pfp:user": "bun run scripts/generate-user-pfps.ts",
@@ -82,7 +77,6 @@
     "privy:setup:offline-controls": "bun run scripts/setup-privy-offline-controls.ts",
     "privy:setup:solana-policy": "bun run scripts/create-privy-solana-policy.ts",
     "solana:registration:debug": "bun run scripts/debug-solana-registration.ts",
-    "seed:nft-snapshot:csv": "bun run scripts/seed-nft-snapshot-csv.ts",
     "users:export:newsletter": "bun run scripts/export-newsletter-users-csv.ts",
     "report:feed": "bun run scripts/feed-health.ts",
     "report:markets": "bun run scripts/market-diversity-report.ts",
@@ -94,21 +88,23 @@
     "steward:init": "bun run scripts/steward-init.ts",
     "steward:migrate": "bun run scripts/migrate-privy-to-steward.ts",
     "inspect:context": "bun run scripts/context-inspector.ts",
-    "find:duplicates": "bun run scripts/find-duplicates.ts"
+    "find:duplicates": "bun run scripts/find-duplicates.ts",
+    "build:cloudflare": "bun run scripts/build-cloudflare.ts",
+    "test:cloudflare": "bun test packages/testing/unit/cloudflare-*.test.ts",
+    "typecheck:cloudflare": "tsc -p workers/tsconfig.json --noEmit"
   },
   "dependencies": {
     "@a2a-js/sdk": "^0.3.5",
-    "@babylon/a2a": "workspace:*",
-    "@babylon/agents": "workspace:*",
-    "@babylon/api": "workspace:*",
-    "@babylon/core": "workspace:*",
-    "@babylon/db": "workspace:*",
-    "@babylon/engine": "workspace:*",
-    "@babylon/mcp": "workspace:*",
-    "@babylon/shared": "workspace:*",
-    "@babylon/testing": "workspace:*",
-    "@babylon/training": "workspace:*",
-    "@neondatabase/serverless": "^1.0.2",
+    "@feed/a2a": "workspace:*",
+    "@feed/agents": "workspace:*",
+    "@feed/api": "workspace:*",
+    "@feed/core": "workspace:*",
+    "@feed/db": "workspace:*",
+    "@feed/engine": "workspace:*",
+    "@feed/mcp": "workspace:*",
+    "@feed/shared": "workspace:*",
+    "@feed/testing": "workspace:*",
+    "@feed/training": "workspace:*",
     "@tailwindcss/postcss": "4.1.17",
     "dotenv": "^16.4.5",
     "drizzle-orm": "^0.44.7",
@@ -130,6 +126,7 @@
   },
   "devDependencies": {
     "@biomejs/biome": "2.4.9",
+    "@cloudflare/workers-types": "5.20261010.1",
     "@fal-ai/client": "^1.9.5",
     "@intellectronica/ruler": "0.3.37",
     "@playwright/test": "1.58.2",
@@ -150,7 +147,8 @@
     "sharp": "^0.34.5",
     "tsx": "^4.21.0",
     "turbo": "2.8.21",
-    "typescript": "^5.9.3"
+    "typescript": "^5.9.3",
+    "wrangler": "4.149.0"
   },
   "lint-staged": {
     "*.{js,ts,cjs,mjs,jsx,tsx,json,jsonc}": [
@@ -200,7 +198,6 @@
     "parse-duration": "2.1.5",
     "qs": "6.15.0",
     "cookie": "1.1.1",
-    "path-to-regexp": "0.1.13",
     "ws": "8.20.0"
   },
   "trustedDependencies": [
@@ -210,5 +207,8 @@
     "core-js",
     "core-js-pure",
     "protobufjs"
-  ]
+  ],
+  "patchedDependencies": {
+    "postgres@3.4.8": "patches/postgres@3.4.8.patch"
+  }
 }

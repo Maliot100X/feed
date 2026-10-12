@@ -12,16 +12,16 @@
  *
  * Write-Back Cache for lastUsedAt:
  * - Updates go to Redis first (fast writes)
- * - Background flusher batches and flushes to database periodically (every 30s or 100+ updates)
- * - Reduces database load by 90%+ compared to individual writes
- * - Fallback to direct DB write when Redis unavailable
+ * - Background flusher writes them to the database periodically (every 30s)
+ * - Fallback to direct (monotonic) DB write when Redis unavailable
  * - See `api-key-lastused-flusher.ts` for flush service implementation
  */
 
-import { asSystem, eq, userApiKeys } from '@babylon/db';
-import { logger } from '@babylon/shared';
+import { asSystem, eq, userApiKeys } from '@feed/db';
+import { logger } from '@feed/shared';
 import crypto from 'crypto';
 import { getRedisClient, isRedisAvailable } from '../redis';
+import { monotonicLastUsedAt } from './api-key-lastused-flusher';
 
 // ============================================================================
 // Cache Configuration
@@ -43,20 +43,11 @@ const LAST_USED_UPDATE_INTERVAL_MS = 60 * 1000;
 /**
  * Redis keys for write-back cache of lastUsedAt updates.
  *
- * WHY write-back cache: Batches multiple updates into single database queries,
- * reducing database load by 90%+ compared to individual writes.
- *
  * Structure:
  * - Hash: api-key:last-used:updates (keyId → timestamp ISO string)
- *   - WHY: O(1) lookup to check if update is pending, easy to read all updates
  * - Sorted Set: api-key:last-used:queue (score = timestamp ms, member = keyId)
- *   - WHY: Natural ordering for batching oldest updates first
  *
- * Flush process:
- * 1. Get oldest N entries from sorted set (ZRANGE with LIMIT)
- * 2. Read corresponding timestamps from hash (HMGET)
- * 3. Batch UPDATE query to database (single query with CASE statement)
- * 4. Remove processed entries from both structures
+ * See `api-key-lastused-flusher.ts` for the flush/acknowledge protocol.
  */
 const REDIS_KEY_LAST_USED_UPDATES = 'api-key:last-used:updates'; // Hash
 const REDIS_KEY_LAST_USED_QUEUE = 'api-key:last-used:queue'; // Sorted Set
@@ -112,7 +103,8 @@ function evictLeastRecentlyUsed(): void {
 function isCacheEntryValid(entry: CachedKeyInfo): boolean {
   const now = Date.now();
   if (now - entry.cachedAt > CACHE_TTL_MS) return false;
-  if (entry.expiresAt && entry.expiresAt.getTime() < now) return false;
+  // Match the DB predicate (expiresAt > now): a key is expired AT expiresAt.
+  if (entry.expiresAt && entry.expiresAt.getTime() <= now) return false;
   return true;
 }
 
@@ -168,31 +160,34 @@ function scheduleLastUsedUpdate(
   if (redisClient && isRedisAvailable()) {
     const timestamp = new Date().toISOString();
 
-    // Use Redis pipeline for atomic updates to both structures
-    // WHY: Ensures consistency - both hash and sorted set updated together. If one succeeds
-    // but other fails, we'd have inconsistent state. Pipeline ensures both succeed or both fail.
-    // WHY ISO string for hash: Easy to parse back to Date, human-readable for debugging.
-    // WHY milliseconds for sorted set score: Numeric score enables efficient range queries
-    // for batching oldest entries first.
-    const pipeline = redisClient.pipeline();
-    pipeline.hset(REDIS_KEY_LAST_USED_UPDATES, keyId, timestamp);
-    pipeline.zadd(REDIS_KEY_LAST_USED_QUEUE, now, keyId);
-
-    // Execute pipeline (fire-and-forget)
-    // WHY fire-and-forget: Don't block authentication flow waiting for Redis write. If Redis
-    // is slow or fails, we fall back to direct DB write. This ensures authentication always
-    // succeeds even if Redis has issues.
-    pipeline.exec().catch((err) => {
-      logger.warn(
-        'Failed to write lastUsedAt to Redis cache',
-        { keyId, error: err },
-        'ApiKeyAuth'
-      );
-      // Fallback to direct DB write if Redis fails
-      // WHY: Ensures lastUsedAt is still updated even if Redis is down. This maintains
-      // backward compatibility and fault tolerance.
-      fallbackToDirectDbWrite(keyId);
-    });
+    // MULTI/EXEC so the hash and queue are updated together.
+    // Fire-and-forget: authentication must not wait on (or fail because of)
+    // lastUsedAt telemetry. On Redis failure, fall back to a direct DB write.
+    redisClient
+      .multi()
+      .hset(REDIS_KEY_LAST_USED_UPDATES, keyId, timestamp)
+      .zadd(REDIS_KEY_LAST_USED_QUEUE, now, keyId)
+      .exec()
+      .then((results) => {
+        const failed =
+          results === null || results.some(([cmdErr]) => cmdErr !== null);
+        if (failed) {
+          logger.warn(
+            'Failed to write lastUsedAt to Redis cache',
+            { keyId },
+            'ApiKeyAuth'
+          );
+          fallbackToDirectDbWrite(keyId);
+        }
+      })
+      .catch((err) => {
+        logger.warn(
+          'Failed to write lastUsedAt to Redis cache',
+          { keyId, error: err },
+          'ApiKeyAuth'
+        );
+        fallbackToDirectDbWrite(keyId);
+      });
 
     return;
   }
@@ -221,7 +216,7 @@ function fallbackToDirectDbWrite(keyId: string): void {
   asSystem(async (dbClient) => {
     await dbClient
       .update(userApiKeys)
-      .set({ lastUsedAt: new Date() })
+      .set({ lastUsedAt: monotonicLastUsedAt(new Date()) })
       .where(eq(userApiKeys.id, keyId));
   }).catch((err) => {
     logger.warn(
@@ -292,6 +287,11 @@ export function hashApiKey(apiKey: string): string {
  * ```
  */
 export function verifyApiKey(apiKey: string, storedHash: string): boolean {
+  // timingSafeEqual throws on length mismatch; a malformed stored hash is
+  // simply a non-match. The shape check leaks nothing about the key.
+  if (!/^[0-9a-f]{64}$/.test(storedHash)) {
+    return false;
+  }
   const inputHash = hashApiKey(apiKey);
   return crypto.timingSafeEqual(
     Buffer.from(inputHash),

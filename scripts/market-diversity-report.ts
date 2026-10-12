@@ -8,13 +8,19 @@
  */
 
 import { parseArgs } from 'node:util';
-import { getRawDrizzle } from '@babylon/db';
-import {
-  organizations,
-  questions,
-  timeframedMarkets,
-} from '@babylon/db/schema';
+import { getRawDrizzle } from '@feed/db';
+import { organizations, questions, timeframedMarkets } from '@feed/db/schema';
 import { and, eq, gte } from 'drizzle-orm';
+
+// ANSI helpers
+const RED = '\x1b[31m';
+const YEL = '\x1b[33m';
+const GRN = '\x1b[32m';
+const RST = '\x1b[0m';
+
+const warn = (s: string) => `${YEL}${s}${RST}`;
+const crit = (s: string) => `${RED}${s}${RST}`;
+const ok = (s: string) => `${GRN}${s}${RST}`;
 
 // ---------------------------------------------------------------------------
 // CLI args
@@ -28,9 +34,9 @@ const { values: args } = parseArgs({
 });
 
 const verbose = args.verbose ?? false;
-const historyDays = args.history ? Number.parseInt(args.history, 10) : 0;
-if (args.history && Number.isNaN(historyDays)) {
-  console.error(crit('Invalid --history value: must be a number'));
+const historyDays = args.history ? Number(args.history) : 0;
+if (args.history && (!Number.isInteger(historyDays) || historyDays < 1)) {
+  console.error(crit('Invalid --history value: must be a positive integer'));
   process.exit(1);
 }
 
@@ -126,16 +132,6 @@ const MARKET_STRUCTURE: Record<string, number> = {
   '30m': 2,
   '15m': 2,
 };
-
-// ANSI helpers
-const RED = '\x1b[31m';
-const YEL = '\x1b[33m';
-const GRN = '\x1b[32m';
-const RST = '\x1b[0m';
-
-const warn = (s: string) => `${YEL}${s}${RST}`;
-const crit = (s: string) => `${RED}${s}${RST}`;
-const ok = (s: string) => `${GRN}${s}${RST}`;
 
 // ---------------------------------------------------------------------------
 // Helpers

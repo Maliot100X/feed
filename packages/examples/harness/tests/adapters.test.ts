@@ -389,12 +389,10 @@ describe('OpenClawAdapter', () => {
 
 // ─── Production client interface tests ───────────────────────────────────────
 
-describe('BabylonProductionClient', () => {
+describe('FeedProductionClient', () => {
   test('can be imported and instantiated', async () => {
-    const { BabylonProductionClient } = await import(
-      '../src/production-client'
-    );
-    const client = new BabylonProductionClient({
+    const { FeedProductionClient } = await import('../src/production-client');
+    const client = new FeedProductionClient({
       baseUrl: 'http://localhost:3000',
       apiKey: 'test-key',
       agentName: 'test-agent',
@@ -407,15 +405,13 @@ describe('BabylonProductionClient', () => {
   });
 
   test('contextId is unique per instance', async () => {
-    const { BabylonProductionClient } = await import(
-      '../src/production-client'
-    );
-    const a = new BabylonProductionClient({
+    const { FeedProductionClient } = await import('../src/production-client');
+    const a = new FeedProductionClient({
       baseUrl: 'http://localhost:3000',
       apiKey: 'k',
       agentName: 'a',
     });
-    const b = new BabylonProductionClient({
+    const b = new FeedProductionClient({
       baseUrl: 'http://localhost:3000',
       apiKey: 'k',
       agentName: 'b',

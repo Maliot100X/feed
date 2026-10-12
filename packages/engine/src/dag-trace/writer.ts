@@ -18,11 +18,11 @@
 
 import * as fs from 'node:fs';
 import * as path from 'node:path';
-import { logger } from '@babylon/shared';
+import { logger } from '@feed/shared';
 import type { TickTrace } from './types';
 
 const TRACE_DIR = path.resolve(process.cwd(), 'runs', 'dag-traces');
-const MAX_TRACES = Number(process.env.BABYLON_DAG_TRACE_KEEP || 100);
+const MAX_TRACES = Number(process.env.FEED_DAG_TRACE_KEEP || 100);
 
 export async function writeTickTrace(trace: TickTrace): Promise<string> {
   const dirName = `tick-${trace.timestamp.replace(/[:.]/g, '-')}-${trace.tickNumber}`;
@@ -127,7 +127,7 @@ export async function writeTickTrace(trace: TickTrace): Promise<string> {
       err instanceof Error ? err : new Error(String(err)),
       'DagTrace'
     );
-    return traceDir;
+    throw err;
   }
 }
 

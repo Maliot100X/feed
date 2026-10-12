@@ -14,7 +14,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-WORKSPACE_ROOT = Path(__file__).resolve().parents[5]
+WORKSPACE_ROOT = Path(__file__).resolve().parents[6]
 DATASETS_ROOT = WORKSPACE_ROOT / "datasets"
 SOURCE_ROOT = DATASETS_ROOT / "source" / "huggingface"
 REGISTRY_PATH = DATASETS_ROOT / "manifests" / "source_registry.json"

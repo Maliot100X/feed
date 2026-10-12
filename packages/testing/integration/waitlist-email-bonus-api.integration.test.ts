@@ -22,8 +22,8 @@ import {
   expect,
   test,
 } from 'bun:test';
-import { db, eq, inArray, pointsTransactions, users } from '@babylon/db';
-import { generateSnowflakeId } from '@babylon/shared';
+import { db, eq, inArray, pointsTransactions, users } from '@feed/db';
+import { generateSnowflakeId } from '@feed/shared';
 import { waitForEndpointAvailability } from './helpers';
 
 const BASE_URL =
@@ -119,20 +119,19 @@ afterEach(() => {
 
 describe('POST /api/waitlist/bonus/email', () => {
   describe('success cases', () => {
-    test('awards 100 points and saves email on first submission', async () => {
+    test('awards 100 points when the submitted email is the account email', async () => {
       if (!serverAvailable || !dbAvailable) return;
 
-      const userId = await createTestUser();
-      const email = `success-${userId}@example.com`;
+      const email = `success-${await generateSnowflakeId()}@example.com`;
+      const userId = await createTestUser({ email });
 
-      const res = await post(userId, { email });
+      const res = await post(userId, { email: email.toUpperCase() });
       expect(res.status).toBe(200);
 
       const body = await res.json();
       expect(body.awarded).toBe(true);
       expect(body.bonusAmount).toBe(100);
 
-      // Verify DB state
       const [user] = await db
         .select({
           email: users.email,
@@ -150,40 +149,32 @@ describe('POST /api/waitlist/bonus/email', () => {
       expect(user?.reputationPoints).toBe(200); // 100 base + 100 bonus
     });
 
-    test('returns awarded=false and bonusAmount=0 on second submission', async () => {
+    test('awards once even when submitted twice', async () => {
       if (!serverAvailable || !dbAvailable) return;
 
-      const userId = await createTestUser();
-      const email = `double-${userId}@example.com`;
+      const email = `double-${await generateSnowflakeId()}@example.com`;
+      const userId = await createTestUser({ email });
 
-      // First submission
-      const res1 = await post(userId, { email });
-      expect(res1.status).toBe(200);
-      const body1 = await res1.json();
-      expect(body1.awarded).toBe(true);
+      const [res1, res2] = await Promise.all([
+        post(userId, { email }),
+        post(userId, { email }),
+      ]);
+      const bodies = [await res1.json(), await res2.json()];
+      expect(bodies.filter((b) => b.awarded)).toHaveLength(1);
 
-      // Second submission
-      const res2 = await post(userId, { email: `other-${userId}@example.com` });
-      expect(res2.status).toBe(200);
-      const body2 = await res2.json();
-      expect(body2.awarded).toBe(false);
-      expect(body2.bonusAmount).toBe(0);
-
-      // Points only awarded once
       const [user] = await db
         .select({ bonusPoints: users.bonusPoints })
         .from(users)
         .where(eq(users.id, userId))
         .limit(1);
-
       expect(user?.bonusPoints).toBe(100);
     });
 
     test('creates a points transaction with reason email_submit', async () => {
       if (!serverAvailable || !dbAvailable) return;
 
-      const userId = await createTestUser({ reputationPoints: 50 });
-      const email = `txn-${userId}@example.com`;
+      const email = `txn-${await generateSnowflakeId()}@example.com`;
+      const userId = await createTestUser({ reputationPoints: 50, email });
 
       await post(userId, { email });
 
@@ -198,6 +189,40 @@ describe('POST /api/waitlist/bonus/email', () => {
       expect(txn?.amount).toBe(100);
       expect(txn?.pointsBefore).toBe(50);
       expect(txn?.pointsAfter).toBe(150);
+    });
+  });
+
+  describe('identity protection', () => {
+    test('never writes a submitted email to the account', async () => {
+      if (!serverAvailable || !dbAvailable) return;
+
+      const userId = await createTestUser({ email: null });
+      const res = await post(userId, { email: 'someone@admin-domain.example' });
+      expect(res.status).toBe(200);
+      expect((await res.json()).awarded).toBe(false);
+
+      const [user] = await db
+        .select({ email: users.email, bonusPoints: users.bonusPoints })
+        .from(users)
+        .where(eq(users.id, userId))
+        .limit(1);
+      expect(user).toEqual({ email: null, bonusPoints: 0 });
+    });
+
+    test('does not replace an existing email with a different one', async () => {
+      if (!serverAvailable || !dbAvailable) return;
+
+      const email = `verified-${await generateSnowflakeId()}@example.com`;
+      const userId = await createTestUser({ email });
+      const res = await post(userId, { email: 'attacker@example.com' });
+      expect((await res.json()).awarded).toBe(false);
+
+      const [user] = await db
+        .select({ email: users.email })
+        .from(users)
+        .where(eq(users.id, userId))
+        .limit(1);
+      expect(user?.email).toBe(email);
     });
   });
 

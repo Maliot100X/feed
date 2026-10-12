@@ -71,75 +71,67 @@ describe('apiUrl', () => {
 
   describe('when NEXT_PUBLIC_API_URL is set (mobile mode)', () => {
     it('prepends base URL to relative paths', async () => {
-      const apiUrl = await importApiUrl('https://play.babylon.market');
-      expect(apiUrl('/api/posts')).toBe(
-        'https://play.babylon.market/api/posts'
-      );
+      const apiUrl = await importApiUrl('https://play.feed.fun');
+      expect(apiUrl('/api/posts')).toBe('https://play.feed.fun/api/posts');
     });
 
     it('prepends base URL to paths with query params', async () => {
-      const apiUrl = await importApiUrl('https://play.babylon.market');
+      const apiUrl = await importApiUrl('https://play.feed.fun');
       expect(apiUrl('/api/posts?limit=10&cursor=abc')).toBe(
-        'https://play.babylon.market/api/posts?limit=10&cursor=abc'
+        'https://play.feed.fun/api/posts?limit=10&cursor=abc'
       );
     });
 
     it('does not double-prefix absolute http URLs', async () => {
-      const apiUrl = await importApiUrl('https://play.babylon.market');
+      const apiUrl = await importApiUrl('https://play.feed.fun');
       expect(apiUrl('https://other.com/api/foo')).toBe(
         'https://other.com/api/foo'
       );
     });
 
     it('does not double-prefix absolute https URLs', async () => {
-      const apiUrl = await importApiUrl('https://play.babylon.market');
+      const apiUrl = await importApiUrl('https://play.feed.fun');
       expect(apiUrl('http://localhost:3000/api/foo')).toBe(
         'http://localhost:3000/api/foo'
       );
     });
 
     it('strips trailing slashes from base URL', async () => {
-      const apiUrl = await importApiUrl('https://play.babylon.market/');
-      expect(apiUrl('/api/posts')).toBe(
-        'https://play.babylon.market/api/posts'
-      );
+      const apiUrl = await importApiUrl('https://play.feed.fun/');
+      expect(apiUrl('/api/posts')).toBe('https://play.feed.fun/api/posts');
     });
 
     it('strips multiple trailing slashes from base URL', async () => {
-      const apiUrl = await importApiUrl('https://play.babylon.market///');
-      expect(apiUrl('/api/posts')).toBe(
-        'https://play.babylon.market/api/posts'
-      );
+      const apiUrl = await importApiUrl('https://play.feed.fun///');
+      expect(apiUrl('/api/posts')).toBe('https://play.feed.fun/api/posts');
     });
 
     it('handles staging URL', async () => {
-      const apiUrl = await importApiUrl('https://staging.babylon.market');
-      expect(apiUrl('/api/health')).toBe(
-        'https://staging.babylon.market/api/health'
-      );
+      const apiUrl = await importApiUrl('https://staging.feed.fun');
+      expect(apiUrl('/api/health')).toBe('https://staging.feed.fun/api/health');
     });
 
     it('handles path without leading slash', async () => {
-      const apiUrl = await importApiUrl('https://play.babylon.market');
+      const apiUrl = await importApiUrl('https://play.feed.fun');
       // This is technically a misuse but should still produce a valid URL
-      expect(apiUrl('api/posts')).toBe('https://play.babylon.market/api/posts');
+      expect(apiUrl('api/posts')).toBe('https://play.feed.fun/api/posts');
     });
   });
 
   describe('template literal paths (from fetch calls)', () => {
     it('handles interpolated paths', async () => {
-      const apiUrl = await importApiUrl('https://play.babylon.market');
+      const apiUrl = await importApiUrl('https://play.feed.fun');
       const agentId = 'agent-123';
       expect(apiUrl(`/api/agents/${agentId}/chat`)).toBe(
-        'https://play.babylon.market/api/agents/agent-123/chat'
+        'https://play.feed.fun/api/agents/agent-123/chat'
       );
     });
 
     it('handles URL-encoded params', async () => {
-      const apiUrl = await importApiUrl('https://play.babylon.market');
+      const apiUrl = await importApiUrl('https://play.feed.fun');
       const identifier = 'did:privy:abc%3A123';
       expect(apiUrl(`/api/profiles/resolve/${identifier}`)).toBe(
-        `https://play.babylon.market/api/profiles/resolve/${identifier}`
+        `https://play.feed.fun/api/profiles/resolve/${identifier}`
       );
     });
   });

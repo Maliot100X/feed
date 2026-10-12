@@ -1,12 +1,12 @@
 /**
- * Multi-Step Decision Template for Babylon Agents
+ * Multi-Step Decision Template for Feed Agents
  *
  * Determines the next action an agent should take in a tick.
  * Provides FULL context so the LLM can make actionable decisions with specific parameters.
  * Services are "dumb executors" - all reasoning happens here.
  */
 
-import { NPC_POST_QUALITY_RULES } from '@babylon/engine';
+import { NPC_POST_QUALITY_RULES } from '@feed/engine';
 
 // =============================================================================
 // Types
@@ -30,6 +30,7 @@ export interface PredictionMarketContext {
   yesPrice: number; // 0-1
   noPrice: number; // 0-1
   volume: number;
+  maxSafeBet: number;
   endDate: string;
 }
 
@@ -638,39 +639,34 @@ export interface PromptTokenBreakdown {
 }
 
 /**
- * Fit prompt sections within a token budget, dropping lowest priority first.
+ * Require complete prompt sections to fit the token budget.
  * Returns the assembled prompt and a breakdown of token usage per section.
  */
 export function fitSectionsWithinBudget(
   sections: PromptSection[],
   budget: number
 ): { prompt: string; breakdown: PromptTokenBreakdown } {
-  // Sort by priority (keep insertion order for equal priority)
-  const sorted = [...sections].sort((a, b) => a.priority - b.priority);
-
-  let totalTokens = 0;
-  const included: PromptSection[] = [];
-  const breakdown: Record<string, number> = {};
-
-  for (const section of sorted) {
-    if (!section.content) continue;
-    const tokens = estimateTokens(section.content);
-    if (totalTokens + tokens <= budget) {
-      included.push(section);
-      totalTokens += tokens;
-      breakdown[section.name] = tokens;
-    }
+  if (!Number.isFinite(budget) || budget <= 0)
+    throw new Error('Prompt budget must be positive');
+  const included = sections.filter((section) => section.content.length > 0);
+  const prompt = included.map((section) => section.content).join('\n');
+  const total = estimateTokens(prompt);
+  if (total > budget) {
+    throw new Error(
+      `Required agent context exceeds prompt budget: ${total} > ${budget}; no sections were dropped`
+    );
   }
-
-  // Re-sort by original insertion order (use index from original sections array)
-  const orderMap = new Map(sections.map((s, i) => [s.name, i]));
-  included.sort(
-    (a, b) => (orderMap.get(a.name) ?? 0) - (orderMap.get(b.name) ?? 0)
-  );
-
   return {
-    prompt: included.map((s) => s.content).join('\n'),
-    breakdown: { total: totalTokens, sections: breakdown },
+    prompt,
+    breakdown: {
+      total,
+      sections: Object.fromEntries(
+        included.map((section) => [
+          section.name,
+          estimateTokens(section.content),
+        ])
+      ),
+    },
   };
 }
 
@@ -688,6 +684,7 @@ export function fitSectionsWithinBudget(
  */
 export function buildMultiStepDecisionPrompt(params: {
   agentName: string;
+  tokenBudget?: number;
   iterationCount: number;
   maxIterations: number;
   traceActionResults: ActionTraceResult[];
@@ -952,8 +949,8 @@ ${
   // Prediction markets are shown read-only for conversation context.
   const npcUnifiedPipeline =
     isNpc &&
-    (process.env.BABYLON_UNIFIED_NPC_PIPELINE === 'true' ||
-      process.env.BABYLON_UNIFIED_NPC_PIPELINE === '1');
+    (process.env.FEED_UNIFIED_NPC_PIPELINE === 'true' ||
+      process.env.FEED_UNIFIED_NPC_PIPELINE === '1');
 
   // Build conditional sections (only show context for enabled features)
   const tradingSection = canTrade
@@ -1023,8 +1020,7 @@ ${context.groupChatIntel
     const messagesText =
       intel.recentMessages.length > 0
         ? intel.recentMessages
-            .slice(-5)
-            .map((m) => `  ${m.speaker}: ${m.content.slice(0, 120)}`)
+            .map((m) => `  ${m.speaker}: ${m.content}`)
             .join('\n')
         : '';
     return `**${intel.chatName}**: ${intel.summary}${factsText ? `\nKey facts:\n${factsText}` : ''}${messagesText ? `\nRecent:\n${messagesText}` : ''}`;
@@ -1051,14 +1047,15 @@ ${context.contextRefreshSummary}
     : '';
 
   // Build sections with priority for token budget management
-  const TOKEN_BUDGET = 6000;
+  const TOKEN_BUDGET = params.tokenBudget ?? 6000;
 
   const sections: PromptSection[] = [
     {
       name: 'system',
       priority: 1,
-      content: `You are ${agentName}, an autonomous agent on Babylon prediction markets.
+      content: `You are ${agentName}, an autonomous agent on Feed prediction markets.
 ${creatorSection}${npcContextSection}${tradePostEncouragement}${groupChatCoordinationEncouragement}# Current Execution Context
+**Current UTC time**: ${new Date().toISOString()}
 **Step**: ${iterationCount}/${maxIterations}
 **Actions Completed This Tick**: ${traceActionResults.length}
 
@@ -1213,7 +1210,7 @@ ${canGroupChat ? '- **INVITE_TO_GROUP**: Add someone interesting to your group (
 ${canGroupChat ? '- **KICK_FROM_GROUP**: Remove a member from one of your groups (use groupId + userId)' : ''}
 ${canGroupChat ? '- **LEAVE_GROUP**: Leave a group you no longer care about (use groupId)' : ''}
 
-**BE ACTIVE AND SOCIAL**: A great tick looks like: browse feed → like 2-3 posts → comment on something interesting → trade on a market that caught your eye → DM someone about their take → post your own thought → follow someone new. Do at least 5-8 actions before finishing. You have up to 12 iterations — USE THEM.`,
+**BE ACTIVE AND SOCIAL**: A great tick looks like: browse feed → like 2-3 posts → comment on something interesting → trade on a market that caught your eye → DM someone about their take → post your own thought → follow someone new. Choose actions that add value. You have up to ${maxIterations} iterations; FINISH when no further action is warranted.`,
     },
     {
       name: 'style',
@@ -1282,9 +1279,7 @@ function formatAgentPositions(
       const pnlSign = p.pnlPercent >= 0 ? '+' : '';
       const priceMovement = p.pnlPercent >= 0 ? '📈' : '📉';
       const priceInfo = `avg cost: $${p.avgPrice.toFixed(2)} | market: ${(p.currentPrice * 100).toFixed(0)}%`;
-      lines.push(
-        `  - ${p.side} on "${p.question.substring(0, 35)}..." (marketId: ${p.marketId})`
-      );
+      lines.push(`  - ${p.side} on "${p.question}" (marketId: ${p.marketId})`);
       lines.push(
         `    ${p.shares.toFixed(1)} shares | ${priceInfo} | ${priceMovement} ${pnlSign}${p.pnlPercent.toFixed(1)}% | held: ${p.timeHeld}`
       );
@@ -1368,21 +1363,21 @@ function formatPositionManagementGuidance(
       p.timeHeldMs > STAGNANT_TIME_MS
     ) {
       alerts.push(
-        `⚠️ STAGNANT: "${p.question.substring(0, 30)}..." ${p.side} hasn't moved (${p.pnlPercent >= 0 ? '+' : ''}${p.pnlPercent.toFixed(1)}%) in ${p.timeHeld}. To exit: use side="${sellAction}" on marketId ${p.marketId}.`
+        `⚠️ STAGNANT: "${p.question}" ${p.side} hasn't moved (${p.pnlPercent >= 0 ? '+' : ''}${p.pnlPercent.toFixed(1)}%) in ${p.timeHeld}. To exit: use side="${sellAction}" on marketId ${p.marketId}.`
       );
     } else if (p.pnlPercent < LOSS_THRESHOLD_PERCENT) {
       alerts.push(
-        `🔴 LOSING: "${p.question.substring(0, 30)}..." ${p.side} down ${p.pnlPercent.toFixed(1)}%. To cut losses: use side="${sellAction}" on marketId ${p.marketId}.`
+        `🔴 LOSING: "${p.question}" ${p.side} down ${p.pnlPercent.toFixed(1)}%. To cut losses: use side="${sellAction}" on marketId ${p.marketId}.`
       );
     } else if (p.pnlPercent > PROFIT_THRESHOLD_PERCENT) {
       alerts.push(
-        `🟢 PROFIT: "${p.question.substring(0, 30)}..." ${p.side} up +${p.pnlPercent.toFixed(1)}%. To take profits: use side="${sellAction}" on marketId ${p.marketId}.`
+        `🟢 PROFIT: "${p.question}" ${p.side} up +${p.pnlPercent.toFixed(1)}%. To take profits: use side="${sellAction}" on marketId ${p.marketId}.`
       );
     }
     // Very long hold - check if thesis still valid
     else if (p.timeHeldMs > LONG_HOLD_TIME_MS) {
       alerts.push(
-        `⏰ AGED: "${p.question.substring(0, 30)}..." ${p.side} held for ${p.timeHeld} (${p.pnlPercent >= 0 ? '+' : ''}${p.pnlPercent.toFixed(1)}%). To exit if thesis invalid: use side="${sellAction}" on marketId ${p.marketId}.`
+        `⏰ AGED: "${p.question}" ${p.side} held for ${p.timeHeld} (${p.pnlPercent >= 0 ? '+' : ''}${p.pnlPercent.toFixed(1)}%). To exit if thesis invalid: use side="${sellAction}" on marketId ${p.marketId}.`
       );
     }
   }
@@ -1406,8 +1401,9 @@ function formatPredictionMarkets(markets: PredictionMarketContext[]): string {
       const yesPct = (m.yesPrice * 100).toFixed(0);
       const noPct = (m.noPrice * 100).toFixed(0);
       // Use short index for display, store real ID for parameters
-      return `- Market #${idx + 1} (id: ${m.id}): "${m.question.substring(0, 60)}${m.question.length > 60 ? '...' : ''}"
-    YES: ${yesPct}% | NO: ${noPct}% | Ends: ${m.endDate}`;
+      return `- Market #${idx + 1} (id: ${m.id}): "${m.question}"
+    YES: ${yesPct}% | NO: ${noPct}% | Ends: ${m.endDate}
+    Maximum safe buy: $${m.maxSafeBet} including fees. Use amount <= min(this limit, your cash); 0 means no safe buy.`;
     })
     .join('\n');
 }
@@ -1431,18 +1427,14 @@ function formatRecentPosts(posts: PostContext[]): string {
     .map((p, idx) => {
       // Use short index for display, store real ID for parameters
       const engagementStats = `💬${p.commentCount} ❤️${p.likeCount ?? 0} 🔁${p.repostCount ?? 0}`;
-      const baseInfo = `- Post #${idx + 1} (id: ${p.id}) @${p.authorName} (userId: ${p.authorId}) (${p.timeAgo}): "${p.content.substring(0, 80)}${p.content.length > 80 ? '...' : ''}" [${engagementStats}]`;
+      const baseInfo = `- Post #${idx + 1} (id: ${p.id}) @${p.authorName} (userId: ${p.authorId}) (${p.timeAgo}): "${p.content}" [${engagementStats}]`;
 
       // Show agent's existing engagement
       const engagementNotes: string[] = [];
       if (p.agentLiked) engagementNotes.push('liked');
       if (p.agentReposted) engagementNotes.push('reposted');
       if (p.agentComment) {
-        const truncatedComment =
-          p.agentComment.length > 60
-            ? `${p.agentComment.substring(0, 60)}...`
-            : p.agentComment;
-        engagementNotes.push(`commented: "${truncatedComment}"`);
+        engagementNotes.push(`commented: "${p.agentComment}"`);
       }
 
       if (engagementNotes.length > 0) {
@@ -1458,7 +1450,6 @@ function formatPendingCommentReplies(replies: PendingCommentReply[]): string {
   if (replies.length === 0) return 'No pending comment replies.';
 
   return replies
-    .slice(0, 3)
     .map((r, idx) => {
       return `[${idx + 1}] Comment from @${r.author}
     commentId: ${r.id} | postId: ${r.postId}
@@ -1471,7 +1462,6 @@ function formatPendingChatMessages(messages: PendingChatMessage[]): string {
   if (messages.length === 0) return 'No pending chat messages.';
 
   return messages
-    .slice(0, 3)
     .map((m, idx) => {
       const chatType = m.isGroupChat ? '👥 Group' : '💬 DM';
       return `[${idx + 1}] ${chatType}: ${m.chatName} - from @${m.author}
@@ -1490,9 +1480,7 @@ function formatAgentOwnPosts(
   return ownPosts
     .map((p, i) => {
       const engagement = `❤️${p.likeCount} 💬${p.commentCount}`;
-      const truncatedContent =
-        p.content.length > 80 ? `${p.content.substring(0, 80)}...` : p.content;
-      return `[${i + 1}] "${truncatedContent}" (${p.timeAgo}) [${engagement}]`;
+      return `[${i + 1}] "${p.content}" (${p.timeAgo}) [${engagement}]`;
     })
     .join('\n');
 }
@@ -1524,7 +1512,7 @@ function formatRelationships(relationships: RelationshipContext[]): string {
     .map((r) => {
       const sentimentLabel =
         r.sentiment > 0.5 ? 'ally' : r.sentiment < -0.5 ? 'rival' : 'neutral';
-      return `- ${r.actorName}: ${r.relationshipType} (${sentimentLabel}, strength: ${r.strength.toFixed(1)})${r.history ? ` — ${r.history.slice(0, 60)}` : ''}`;
+      return `- ${r.actorName}: ${r.relationshipType} (${sentimentLabel}, strength: ${r.strength.toFixed(1)})${r.history ? ` — ${r.history}` : ''}`;
     })
     .join('\n');
 }
@@ -1618,6 +1606,8 @@ function formatActionSchemas(enabledFeatures: string[]): string {
       schemas.push(`FINISH (end this tick):
 {
   "action": "FINISH",
+  "thought": "Explain why no further action is warranted",
+  "parameters": {},
   "isFinish": true
 }`);
     } else if (action.name === Actions.WAIT) {
@@ -1625,6 +1615,8 @@ function formatActionSchemas(enabledFeatures: string[]): string {
       schemas.push(`WAIT (skip this iteration):
 {
   "action": "WAIT",
+  "thought": "Explain what you are waiting for",
+  "parameters": {},
   "isFinish": false
 }`);
     } else if (action.name === Actions.TRADE) {
@@ -1696,9 +1688,7 @@ function formatAgentTradeHistory(
         t.pnl != null
           ? ` → P&L: ${t.pnl >= 0 ? '+' : ''}$${t.pnl.toFixed(2)}`
           : '';
-      const reasonText = t.reasoning
-        ? ` — "${t.reasoning.length > 100 ? `${t.reasoning.slice(0, 100)}...` : t.reasoning}"`
-        : '';
+      const reasonText = t.reasoning ? ` — "${t.reasoning}"` : '';
       const timeAgo = formatTradeTimeAgo(t.executedAt);
       return `- [${timeAgo}] ${side} ${t.marketType} ${symbol} $${t.amount.toFixed(0)} @ $${t.price.toFixed(2)}${pnlText}${reasonText}`;
     })

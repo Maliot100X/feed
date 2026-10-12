@@ -5,6 +5,14 @@
  * Shows IDs for each comment so agent can reference them for replies.
  */
 
+import type {
+  Action,
+  ActionResult,
+  HandlerCallback,
+  IAgentRuntime,
+  Memory,
+  State,
+} from '@elizaos/core';
 import {
   and,
   comments,
@@ -16,17 +24,9 @@ import {
   posts,
   shares,
   users,
-} from '@babylon/db';
-import { StaticDataRegistry } from '@babylon/engine';
-import type { MessageTag } from '@babylon/shared';
-import type {
-  Action,
-  ActionResult,
-  HandlerCallback,
-  IAgentRuntime,
-  Memory,
-  State,
-} from '@elizaos/core';
+} from '@feed/db';
+import { StaticDataRegistry } from '@feed/engine';
+import type { MessageTag } from '@feed/shared';
 import { logger } from '../../../../shared/logger';
 
 /** Extended ActionResult with optional tag for UI */

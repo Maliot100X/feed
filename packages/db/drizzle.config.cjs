@@ -1,35 +1,44 @@
 const path = require('path');
 require('dotenv').config({ path: path.resolve(__dirname, '../../.env') });
 
+// Local mode must be declared explicitly. Absence of DIRECT_DATABASE_URL does
+// not imply a local database (production may set only DATABASE_URL).
 const isLocalDev =
   process.env.DEPLOYMENT_ENV === 'localnet' ||
-  process.env.NODE_ENV === 'development' ||
-  !process.env.DIRECT_DATABASE_URL;
+  process.env.NODE_ENV === 'development';
 
 const LOCAL_DATABASE_URL =
-  'postgresql://babylon:babylon_dev_password@localhost:5433/babylon';
+  'postgresql://feed:feed_dev_password@localhost:5433/feed';
 
-// In non-local environments, require explicit database URL - never fall back to localhost
-const databaseUrl = isLocalDev
-  ? process.env.DATABASE_URL || LOCAL_DATABASE_URL
-  : process.env.DIRECT_DATABASE_URL || process.env.DATABASE_URL;
+// Prefer the direct (non-pooled) URL for migrations. Only explicit local mode
+// may fall back to the docker-compose database.
+const databaseUrl =
+  process.env.DIRECT_DATABASE_URL ||
+  process.env.DATABASE_URL ||
+  (isLocalDev ? LOCAL_DATABASE_URL : undefined);
 
 if (!databaseUrl) {
   throw new Error(
-    'Missing DIRECT_DATABASE_URL or DATABASE_URL in non-local environment. ' +
-      'Refusing to default to LOCAL_DATABASE_URL to prevent accidental migrations against wrong database.'
+    'Missing DIRECT_DATABASE_URL or DATABASE_URL. Set DEPLOYMENT_ENV=localnet ' +
+      'to use the local docker-compose database. Refusing to guess a target ' +
+      'database to prevent accidental migrations against the wrong one.'
   );
 }
 
+// Drizzle Kit resolves `schema`/`out` relative to the current working
+// directory and mis-resolves absolute paths (it prefixes them with `./`), so
+// compute cwd-relative paths. This makes the config work both from the repo
+// root (`--config=packages/db/drizzle.config.cjs`) and from `packages/db`.
+const fromCwd = (target) =>
+  path.relative(process.cwd(), path.join(__dirname, target)) || '.';
+
 /** @type {import('drizzle-kit').Config} */
 module.exports = {
-  // NOTE: Keep `schema`/`out` as relative paths.
-  // Drizzle Kit currently mis-resolves absolute paths by prefixing them with `./`,
-  // which breaks reading existing snapshots under `drizzle/migrations/meta/*`.
-  // These scripts are run with `--cwd packages/db`, so relative paths are stable.
-  // eliza.ts is listed separately — see drizzle.config.ts for the full explanation.
-  schema: ['./src/schema/index.ts', './src/schema/eliza.ts'],
-  out: './drizzle/migrations',
+  // eliza.ts is listed separately rather than re-exported through
+  // src/schema/index.ts so @elizaos/plugin-sql is not traced into every
+  // bundle that imports @feed/db.
+  schema: [fromCwd('src/schema/index.ts'), fromCwd('src/schema/eliza.ts')],
+  out: fromCwd('drizzle/migrations'),
   dialect: 'postgresql',
   dbCredentials: {
     url: databaseUrl,

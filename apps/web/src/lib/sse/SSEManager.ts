@@ -23,7 +23,7 @@
  * ```
  */
 
-import { logger } from '@babylon/shared';
+import { logger } from '@feed/shared';
 import { apiUrl } from '@/utils/api-url';
 
 // ============================================================================
@@ -154,6 +154,13 @@ export class SSEManager {
   private authTokenProvider: AuthTokenProvider | null = null;
   private isAuthenticated = false;
   private authEpoch = 0;
+  /**
+   * Bumped whenever the current connection attempt/EventSource is torn down
+   * (unsubscribe-all, offline, auth change, manual reconnect, destroy). An
+   * attempt that awaited its token must not open an EventSource if the
+   * generation moved on meanwhile.
+   */
+  private connectGeneration = 0;
   private cachedToken: {
     token: string;
     expiresAt: number;
@@ -225,12 +232,25 @@ export class SSEManager {
    * This function will be called to get access tokens for SSE authentication.
    */
   setAuthProvider(provider: AuthTokenProvider): void {
+    const changed =
+      this.authTokenProvider !== null && this.authTokenProvider !== provider;
     if (this.authTokenProvider !== provider) {
       this.authEpoch += 1;
       this.cachedToken = null;
       this.pendingTokenFetch = null;
     }
     this.authTokenProvider = provider;
+    // A new identity must not keep streaming on the previous identity's
+    // connection: replace it.
+    if (
+      changed &&
+      (this.eventSource || this.connectionState === 'connecting') &&
+      this.requestedChannels.size > 0
+    ) {
+      this.closeEventSource();
+      this.notifyConnectionState('disconnected', null);
+      void this.ensureConnection(true);
+    }
   }
 
   /**
@@ -509,6 +529,9 @@ export class SSEManager {
   reconnect(): void {
     this.reconnectAttempts = 0;
     this.closeEventSource();
+    // Leave the 'connecting' state too, otherwise ensureConnection would
+    // treat the abandoned attempt as still in progress.
+    this.notifyConnectionState('disconnected', null);
     void this.ensureConnection(true);
   }
 
@@ -526,6 +549,9 @@ export class SSEManager {
    */
   destroy(): void {
     this.closeEventSource();
+    // Invalidate any in-flight token fetch so it cannot resurrect a stream.
+    this.authEpoch += 1;
+    this.pendingTokenFetch = null;
     this.cleanupNetworkListeners();
     this.channelSubscribers.clear();
     this.requestedChannels.clear();
@@ -543,6 +569,7 @@ export class SSEManager {
   // ============================================================================
 
   private closeEventSource(): void {
+    this.connectGeneration += 1;
     if (this.tokenRetryTimeout) {
       clearTimeout(this.tokenRetryTimeout);
       this.tokenRetryTimeout = null;
@@ -693,8 +720,23 @@ export class SSEManager {
     this.activeRequestedChannels = new Set(channelsList);
     this.pendingChannelReconnect = false;
 
+    const generation = this.connectGeneration;
+
     // Get auth token
     const token = await this.getAuthToken(channelsList);
+
+    // Anything may have happened while the token was pending: unsubscribe,
+    // offline, logout, destroy or a newer attempt. Only the current attempt
+    // may proceed.
+    if (
+      generation !== this.connectGeneration ||
+      !this.isOnline ||
+      !this.isAuthenticated ||
+      this.requestedChannels.size === 0
+    ) {
+      return;
+    }
+
     if (!token) {
       this.notifyConnectionState('disconnected', 'Missing realtime token');
       this.scheduleTokenRetry();
@@ -1030,10 +1072,13 @@ export class SSEManager {
       return this.pendingTokenFetch;
     }
 
-    this.pendingTokenFetch = this.fetchRealtimeToken(channels).finally(() => {
-      this.pendingTokenFetch = null;
+    const pending: Promise<string | null> = this.fetchRealtimeToken(
+      channels
+    ).finally(() => {
+      // Never clear a newer request's promise.
+      if (this.pendingTokenFetch === pending) this.pendingTokenFetch = null;
     });
-
-    return this.pendingTokenFetch;
+    this.pendingTokenFetch = pending;
+    return pending;
   }
 }

@@ -1,8 +1,8 @@
 'use client';
 
-import { formatCompactCurrency } from '@babylon/shared';
+import { formatCompactCurrency } from '@feed/shared';
 import { Loader2, Sparkles, Wallet } from 'lucide-react';
-import { useCallback, useState } from 'react';
+import { useState } from 'react';
 import { AgentWallet as SharedAgentWallet } from '@/components/agents/AgentWallet';
 import { BuyPointsModal } from '@/components/points/BuyPointsModal';
 import { useWalletBalance } from '@/hooks/useWalletBalance';
@@ -33,13 +33,7 @@ export function AgentPortfolio(props: AgentPortfolioProps) {
   const { entityType, entityName } = props;
 
   if (entityType === 'user') {
-    return (
-      <UserWallet
-        userId={props.userId}
-        entityName={entityName}
-        onUpdate={props.onUpdate}
-      />
-    );
+    return <UserWallet userId={props.userId} entityName={entityName} />;
   }
 
   return (
@@ -54,19 +48,12 @@ export function AgentPortfolio(props: AgentPortfolioProps) {
 function UserWallet({
   userId,
   entityName,
-  onUpdate,
 }: {
   userId: string;
   entityName: string;
-  onUpdate?: () => void;
 }) {
-  const { balance, loading, refresh } = useWalletBalance(userId);
+  const { balance, loading } = useWalletBalance(userId);
   const [buyPointsOpen, setBuyPointsOpen] = useState(false);
-
-  const handleBuyPointsSuccess = useCallback(() => {
-    refresh();
-    onUpdate?.();
-  }, [onUpdate, refresh]);
 
   if (loading) {
     return (
@@ -106,7 +93,6 @@ function UserWallet({
       <BuyPointsModal
         isOpen={buyPointsOpen}
         onClose={() => setBuyPointsOpen(false)}
-        onSuccess={handleBuyPointsSuccess}
       />
     </div>
   );

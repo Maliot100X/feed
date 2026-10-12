@@ -13,18 +13,9 @@
  * Based on: https://art.openpipe.ai/fundamentals/ruler
  */
 
-import {
-  and,
-  asc,
-  db,
-  eq,
-  inArray,
-  isNull,
-  not,
-  trajectories,
-} from '@babylon/db';
-import type { JsonValue } from '@babylon/shared';
 import { asUUID } from '@elizaos/core';
+import { and, asc, db, eq, inArray, isNull, not, trajectories } from '@feed/db';
+import type { JsonValue } from '@feed/shared';
 import { v4 as uuidv4 } from 'uuid';
 import {
   getLLMCaller,

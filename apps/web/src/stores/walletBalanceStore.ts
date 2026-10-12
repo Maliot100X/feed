@@ -22,7 +22,7 @@
 import { useCallback, useEffect, useRef } from 'react';
 import { create } from 'zustand';
 import { useShallow } from 'zustand/react/shallow';
-import { apiUrl } from '@/utils/api-url';
+import { apiFetch } from '@/utils/api-fetch';
 
 interface WalletBalanceState {
   // Data
@@ -35,6 +35,8 @@ interface WalletBalanceState {
 
   // Internal state
   fetchPromise: Promise<void> | null;
+  /** Identity of the latest fetch; only it may commit results. */
+  fetchSeq: number;
 
   // Actions
   fetchBalance: (userId: string, force?: boolean) => Promise<void>;
@@ -54,6 +56,7 @@ export const useWalletBalanceStore = create<WalletBalanceState>((set, get) => ({
   lastFetchedAt: null,
   userId: null,
   fetchPromise: null,
+  fetchSeq: 0,
 
   fetchBalance: async (userId: string, force = false) => {
     const state = get();
@@ -63,12 +66,6 @@ export const useWalletBalanceStore = create<WalletBalanceState>((set, get) => ({
       return state.fetchPromise;
     }
 
-    // If fetching for a different user, wait for current fetch to complete first
-    if (state.fetchPromise && state.userId !== userId) {
-      await state.fetchPromise;
-    }
-
-    // Re-fetch fresh state after await to avoid stale cache checks
     const currentState = get();
 
     // Return cached data if fresh and not forced
@@ -81,8 +78,12 @@ export const useWalletBalanceStore = create<WalletBalanceState>((set, get) => ({
       return;
     }
 
-    // Capture the requested userId to prevent cross-user data leakage
     const requestedUserId = userId;
+    const seq = currentState.fetchSeq + 1;
+    // Only the latest request for the current user may commit anything
+    // (a userId-only check fails for A -> B -> A switches).
+    const isCurrent = () =>
+      get().fetchSeq === seq && get().userId === requestedUserId;
 
     // Create and store the fetch promise
     const fetchPromise = (async () => {
@@ -96,8 +97,8 @@ export const useWalletBalanceStore = create<WalletBalanceState>((set, get) => ({
       set({ error: null, userId: requestedUserId });
 
       try {
-        const response = await fetch(
-          apiUrl(`/api/users/${encodeURIComponent(requestedUserId)}/balance`)
+        const response = await apiFetch(
+          `/api/users/${encodeURIComponent(requestedUserId)}/balance`
         );
 
         if (!response.ok) {
@@ -106,11 +107,7 @@ export const useWalletBalanceStore = create<WalletBalanceState>((set, get) => ({
 
         const data = await response.json();
 
-        // Verify user hasn't changed during fetch to prevent data leakage
-        if (get().userId !== requestedUserId) {
-          // User changed during fetch - discard stale response
-          return;
-        }
+        if (!isCurrent()) return;
 
         set({
           balance: Number(data.balance) || 0,
@@ -119,21 +116,19 @@ export const useWalletBalanceStore = create<WalletBalanceState>((set, get) => ({
           error: null,
         });
       } catch (err) {
-        // Only set error if user hasn't changed
-        if (get().userId === requestedUserId) {
+        if (isCurrent()) {
           const errorMessage =
             err instanceof Error ? err.message : 'Failed to fetch balance';
           set({ error: errorMessage });
         }
       } finally {
-        // Only clear loading/promise if this fetch is still relevant
-        if (get().userId === requestedUserId) {
-          set({ loading: false, fetchPromise: null });
-        }
+        // Never clear a newer request's loading flag or promise.
+        if (get().fetchSeq === seq) set({ fetchPromise: null });
+        if (isCurrent()) set({ loading: false });
       }
     })();
 
-    set({ fetchPromise });
+    set({ fetchPromise, fetchSeq: seq });
     return fetchPromise;
   },
 
@@ -147,8 +142,10 @@ export const useWalletBalanceStore = create<WalletBalanceState>((set, get) => ({
         lastFetchedAt: null,
         balance: 0,
         lifetimePnL: 0,
+        loading: false,
         error: null,
         fetchPromise: null,
+        fetchSeq: state.fetchSeq + 1,
       });
     }
   },
@@ -158,6 +155,9 @@ export const useWalletBalanceStore = create<WalletBalanceState>((set, get) => ({
   },
 
   reset: () => {
+    set((state) => ({
+      fetchSeq: state.fetchSeq + 1,
+    }));
     set({
       balance: 0,
       lifetimePnL: 0,

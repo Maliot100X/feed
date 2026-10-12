@@ -8,7 +8,7 @@
  * Run: bun packages/testing/manual/test-feed-generation.ts
  */
 
-import { BabylonLLMClient, FeedGenerator } from '@babylon/engine';
+import { FeedGenerator, FeedLLMClient } from '@feed/engine';
 import type {
   Actor,
   ActorRelationship,
@@ -16,7 +16,7 @@ import type {
   FeedPost,
   Organization,
   WorldEvent,
-} from '@babylon/shared';
+} from '@feed/shared';
 import { mkdir, writeFile } from 'fs/promises';
 import { join } from 'path';
 
@@ -248,7 +248,7 @@ function createRelationships(_actors: Actor[]): ActorRelationship[] {
 // Output Helpers
 // ============================================================================
 
-const OUTPUT_DIR = '/tmp/babylon-feed-tests';
+const OUTPUT_DIR = '/tmp/feed-feed-tests';
 
 async function ensureOutputDir(): Promise<void> {
   try {
@@ -284,7 +284,7 @@ interface OutputMetadata {
   hasHashtags: boolean;
   hasEmojis: boolean;
   hasRealNames: boolean;
-  characterLimitViolations: string[];
+  contentViolations: string[];
   uniqueAuthors: string[];
 }
 
@@ -331,9 +331,9 @@ async function writeOutputFiles(
   txtContent += `Has Real Names: ${data.output.metadata.hasRealNames}\n`;
   txtContent += `Unique Authors: ${data.output.metadata.uniqueAuthors.join(', ')}\n`;
 
-  if (data.output.metadata.characterLimitViolations.length > 0) {
-    txtContent += `\n⚠️ Character Limit Violations:\n`;
-    for (const v of data.output.metadata.characterLimitViolations) {
+  if (data.output.metadata.contentViolations.length > 0) {
+    txtContent += `\n⚠️ Content Violations:\n`;
+    for (const v of data.output.metadata.contentViolations) {
       txtContent += `  - ${v}\n`;
     }
   }
@@ -420,9 +420,9 @@ async function writeOutputFiles(
     mdContent += `- **${author}** (${authorPosts.length} posts)\n`;
   }
 
-  if (data.output.metadata.characterLimitViolations.length > 0) {
-    mdContent += `\n### ⚠️ Character Limit Violations\n\n`;
-    for (const v of data.output.metadata.characterLimitViolations) {
+  if (data.output.metadata.contentViolations.length > 0) {
+    mdContent += `\n### ⚠️ Content Violations\n\n`;
+    for (const v of data.output.metadata.contentViolations) {
       mdContent += `- ${v}\n`;
     }
   }
@@ -436,9 +436,10 @@ async function writeOutputFiles(
 // Validation Helpers
 // ============================================================================
 
-const HASHTAG_REGEX = /#\w+/g;
+// No /g flag: these are used with .test(), where /g makes results stateful.
+const HASHTAG_REGEX = /#\w+/;
 const EMOJI_REGEX =
-  /[\u{1F600}-\u{1F64F}\u{1F300}-\u{1F5FF}\u{1F680}-\u{1F6FF}\u{1F1E0}-\u{1F1FF}\u{2600}-\u{26FF}\u{2700}-\u{27BF}]/gu;
+  /[\u{1F600}-\u{1F64F}\u{1F300}-\u{1F5FF}\u{1F680}-\u{1F6FF}\u{1F1E0}-\u{1F1FF}\u{2600}-\u{26FF}\u{2700}-\u{27BF}]/u;
 const REAL_NAMES = [
   'Elon Musk',
   'Sam Altman',
@@ -479,12 +480,17 @@ function analyzeOutput(
     allContent.toLowerCase().includes(name.toLowerCase())
   );
 
-  const characterLimitViolations: string[] = [];
+  const contentViolations: string[] = [];
+  if (hasHashtags) contentViolations.push('Output contains hashtags');
+  if (hasEmojis) contentViolations.push('Output contains emojis');
+  if (hasRealNames) {
+    contentViolations.push('Output contains real names');
+  }
   for (const post of posts) {
     const postType = (post.type || 'UNKNOWN').toUpperCase();
     const limit = CHARACTER_LIMITS[postType];
     if (limit && post.post.length > limit) {
-      characterLimitViolations.push(
+      contentViolations.push(
         `${postType}: ${post.post.length} chars (max: ${limit})`
       );
     }
@@ -503,7 +509,7 @@ function analyzeOutput(
     hasHashtags,
     hasEmojis,
     hasRealNames,
-    characterLimitViolations,
+    contentViolations,
     uniqueAuthors,
   };
 }
@@ -571,6 +577,9 @@ async function testFullDayFeed(
   });
 
   console.log(`  ⏱️ Duration: ${duration}ms`);
+  if (!success) {
+    throw new Error(error ?? 'generation failed');
+  }
   return posts;
 }
 
@@ -648,6 +657,9 @@ async function testMinuteAmbientPost(
   });
 
   console.log(`  ⏱️ Duration: ${duration}ms`);
+  if (!success) {
+    throw new Error(error ?? 'generation failed');
+  }
   return posts;
 }
 
@@ -768,7 +780,7 @@ async function main(): Promise<void> {
 
   // Initialize FeedGenerator with real LLM
   console.log('\n🔌 Initializing FeedGenerator with LLM...');
-  const llm = new BabylonLLMClient();
+  const llm = new FeedLLMClient();
   const feedGenerator = new FeedGenerator(llm);
 
   // Configure generator
@@ -827,7 +839,7 @@ async function main(): Promise<void> {
       success: true,
       postCount: dayFeedPosts.length,
       duration: Date.now() - startTime1,
-      violations: metadata.characterLimitViolations,
+      violations: metadata.contentViolations,
       postTypes,
     });
   } catch (e) {
@@ -852,7 +864,7 @@ async function main(): Promise<void> {
       success: true,
       postCount: ambientPosts.length,
       duration: Date.now() - startTime2,
-      violations: metadata.characterLimitViolations,
+      violations: metadata.contentViolations,
       postTypes: { ambient: ambientPosts.length },
     });
   } catch (e) {
@@ -889,10 +901,17 @@ async function main(): Promise<void> {
   console.log(
     `  Character limits: ${!hasCharLimitViolations ? '✅' : '⚠️ Some violations (expected from LLM)'}`
   );
-  console.log(`  Multiple post types: ✅`);
+  const postTypeCount = new Set(
+    results.flatMap((r) => Object.keys(r.postTypes))
+  ).size;
+  console.log(`  Multiple post types: ${postTypeCount > 1 ? '✅' : '❌'}`);
 
-  console.log('\n✅ Test suite completed!');
-  process.exit(0);
+  const failed =
+    results.some((r) => !r.success || r.postCount === 0) ||
+    hasHashtagViolations ||
+    hasEmojiViolations;
+  console.log(failed ? '\n❌ Test suite failed' : '\n✅ Test suite completed!');
+  process.exitCode = failed ? 1 : 0;
 }
 
 // Run main

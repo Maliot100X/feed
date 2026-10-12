@@ -1,5 +1,5 @@
 /**
- * Canonical Public Configuration for Babylon
+ * Canonical Public Configuration for Feed
  *
  * Environment-aware configuration for contract addresses and endpoints.
  * Import this instead of reading from environment variables.
@@ -9,8 +9,7 @@ import type { Address } from 'viem';
 import { base, baseSepolia, hardhat, mainnet, sepolia } from 'viem/chains';
 import configData from './public-config.json';
 
-// Re-export viem chain objects for NFT services (chains.ts was removed in Phase 1).
-// TODO: Remove these exports once NFT code is fully deleted in a future phase.
+// Re-export supported chain definitions.
 export { base, baseSepolia, hardhat, mainnet, sepolia };
 
 // =============================================================================
@@ -25,7 +24,6 @@ export interface CoreContractAddresses {
 export interface EthereumContractAddresses {
   identityRegistry: Address;
   reputationSystem: Address;
-  nft: Address;
 }
 
 export interface NetworkConfig {
@@ -84,7 +82,7 @@ export function getCurrentChainId(): number {
   return 31337;
 }
 
-/** Numeric chain ID for the current environment. Used by NFT services. */
+/** Numeric chain ID for the current environment. */
 export const CHAIN_ID = getCurrentChainId();
 
 function getCurrentNetwork(): NetworkConfig | EthereumNetworkConfig {
@@ -113,9 +111,10 @@ export function getRpcUrlForChainId(chainId: number): string {
 export function getCurrentContractAddresses():
   | CoreContractAddresses
   | EthereumContractAddresses {
-  const contracts = getCurrentNetwork().contracts;
+  const network = getCurrentNetwork();
+  const contracts = network.contracts;
 
-  if ('nft' in contracts) {
+  if (network.chainId === mainnet.id) {
     return contracts;
   }
 
@@ -165,13 +164,11 @@ export function getCurrentRpcUrl(): string {
  * Priority order:
  * 0. `window.location.origin` (browser runtime, always accurate)
  * 1. NEXT_PUBLIC_APP_URL (explicit override for all environments)
- * 2. NEXT_PUBLIC_VERCEL_URL or VERCEL_URL (Vercel auto-set for preview/staging/production)
- * 3. http://localhost:3000 (local development fallback)
+ * 2. http://localhost:3000 (local development fallback)
  *
  * This ensures:
- * - Production: Uses babylon.market (via NEXT_PUBLIC_APP_URL)
- * - Staging: Uses staging.babylon.market (via NEXT_PUBLIC_APP_URL)
- * - Preview: Uses unique Vercel URL (e.g., babylon-pr-123.vercel.app via VERCEL_URL)
+ * - Production: Uses feed.fun (via NEXT_PUBLIC_APP_URL)
+ * - Staging: Uses staging.feed.fun (via NEXT_PUBLIC_APP_URL)
  * - Local: Uses localhost:3000
  */
 function normalizeBaseUrl(input: string): string {
@@ -194,14 +191,7 @@ export function getBaseUrl(): string {
     return normalizeBaseUrl(process.env.NEXT_PUBLIC_APP_URL);
   }
 
-  // 2. Vercel auto-set variables (preview/staging/production)
-  const vercelUrl =
-    process.env.NEXT_PUBLIC_VERCEL_URL || process.env.VERCEL_URL;
-  if (vercelUrl) {
-    return normalizeBaseUrl(vercelUrl);
-  }
-
-  // 3. Local development fallback
+  // 2. Local development fallback
   return 'http://localhost:3000';
 }
 

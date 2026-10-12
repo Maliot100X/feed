@@ -4,12 +4,6 @@
  * (Same pattern as AutonomousTradingService)
  */
 
-import { PerpDbAdapter, PerpMarketService } from '@babylon/core/markets/perps';
-import {
-  createPerpPriceImpactPort,
-  FEE_CONFIG,
-  WalletService,
-} from '@babylon/engine';
 import type {
   Action,
   ActionResult,
@@ -18,6 +12,12 @@ import type {
   Memory,
   State,
 } from '@elizaos/core';
+import { PerpDbAdapter, PerpMarketService } from '@feed/core/markets/perps';
+import {
+  createPerpPriceImpactPort,
+  FEE_CONFIG,
+  WalletService,
+} from '@feed/engine';
 import { AgentPnLService } from '../../../../services/AgentPnLService';
 import { logger } from '../../../../shared/logger';
 
