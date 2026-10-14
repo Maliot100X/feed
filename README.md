@@ -23,7 +23,7 @@ Feed is a live social simulation where players trade on prediction markets along
 
 > **Status:** Active development. The core game loop, auth, and feed generation are production-ready. The crypto stack is disabled. Training and agent frameworks are in active iteration.
 
-> **Slop bounty:** Feed is registered as a featured [Slop](https://slop.cash) bounty repository with a pledged $1,000/month pool, currently paused pending verification and maintainer activation (see [status and terms](CONTRIBUTING.md)). Before you start, star and fork this repository and read [CONTRIBUTING.md](CONTRIBUTING.md). Accepted work: reproduced bugs, tests that prove real behavior, validation, security, measured quality improvements, and validation of the trading algorithm and simulations. Not accepted: UI or copy changes, preference refactors, speculative features, mock-only proof, and busywork. Use real LLM calls for evidence. There is no PRD or MVP plan file in this repository, so a maintainer must confirm scope on an issue before feature work.
+> **Slop bounty:** Feed is registered as a featured [Slop](https://slop.cash) bounty repository with a pledged $1,000/month pool, currently paused pending verification and maintainer activation (see [status and terms](CONTRIBUTING.md)). Before you start, star and fork this repository and read [CONTRIBUTING.md](CONTRIBUTING.md). Accepted work: reproduced bugs, tests that prove real behavior, validation, security, measured quality improvements, and validation of the trading algorithm and simulations. Not accepted: UI or copy changes, preference refactors, speculative features, mock-only proof, and busywork. Use real LLM calls for evidence. All work is downstream of the [PRD](docs/product/prd.md) and its [MVP plan](docs/product/mvp-plan.md); any new feature or approach requires an approved PRD update before implementation.
 
 ---
 
@@ -482,10 +482,23 @@ For OpenAI Codex CLI: `CODEX_HOME="$(pwd)/.codex"`
 
 ## Contributing
 
+Everything is downstream of the [PRD](docs/product/prd.md): the
+[MVP plan](docs/product/mvp-plan.md), issues, implementation approaches, code,
+tests, documentation, and PR reviews must follow it. Before implementing any
+new feature or approach, update the PRD, obtain maintainer approval, and update
+the affected MVP phase and acceptance criteria. A defect fix must cite the
+requirement it restores; an open issue or passing CI does not authorize new scope.
+
+Agents must always reiterate to the user what the relevant PRD sections say at
+the start of a task, cite those sections and the applicable MVP phase, and explain
+how the work follows them. Repeat this when scope or approach changes. Final
+handoffs must restate those requirements and separate verified acceptance
+evidence from remaining work.
+
 Read [CONTRIBUTING.md](CONTRIBUTING.md) first. The first step is to star and fork the repository. The short version:
 
 1. Default branch is **`staging`**. Open PRs from your fork into `staging`.
-2. Work only on reproduced defects or maintainer-confirmed scope. There is no PRD or MVP plan file.
+2. All work must conform to the [PRD](docs/product/prd.md) and [MVP plan](docs/product/mvp-plan.md), including phase dependencies, non-goals, and exit criteria.
 3. No UI, style, or copy changes, unless the PR fixes a broken flow and includes before and after video.
 4. Use real LLM calls for evidence, and test in more than one agent client.
 5. Run `bun run check`, `bun run typecheck`, `bun run lint`, and the relevant tests before you open a PR.
