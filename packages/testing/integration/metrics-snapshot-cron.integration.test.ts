@@ -14,6 +14,7 @@ import {
   eq,
   generateSnowflakeId,
   inArray,
+  realtimeOutboxes,
   systemMetricsSnapshots,
 } from '@feed/db';
 import { getAdminToken } from './helpers';
@@ -314,5 +315,52 @@ describe('Metrics Snapshot Cron Job', () => {
         }
       }
     });
+  });
+});
+
+describe('Realtime queue health', () => {
+  test('measures pending outbox age in UTC, excluding older sent rows', async () => {
+    const ids = await Promise.all([0, 1, 2].map(() => generateSnowflakeId()));
+    const createdAt = new Date('1990-01-02T12:34:56.123Z');
+    await db.insert(realtimeOutboxes).values([
+      {
+        id: ids[0]!,
+        channel: 'health-test',
+        type: 'test',
+        payload: {},
+        createdAt,
+        updatedAt: createdAt,
+      },
+      {
+        id: ids[1]!,
+        channel: 'health-test',
+        type: 'test',
+        payload: {},
+        createdAt: new Date('1990-01-03T12:34:56.123Z'),
+        updatedAt: createdAt,
+      },
+      {
+        id: ids[2]!,
+        channel: 'health-test',
+        type: 'test',
+        payload: {},
+        status: 'sent',
+        createdAt: new Date('1990-01-01T12:34:56.123Z'),
+        updatedAt: createdAt,
+      },
+    ]);
+    try {
+      const snapshot = await getSystemStatusSnapshot();
+      const expectedLag = Math.floor(
+        (Date.parse(snapshot.timestamp) - createdAt.getTime()) / 1000
+      );
+      expect(snapshot.realtime.outboxPending).toBeGreaterThanOrEqual(2);
+      expect(snapshot.realtime.outboxLagSeconds).toBe(expectedLag);
+      expect(snapshot.realtime.isHealthy).toBe(false);
+    } finally {
+      await db
+        .delete(realtimeOutboxes)
+        .where(inArray(realtimeOutboxes.id, ids));
+    }
   });
 });

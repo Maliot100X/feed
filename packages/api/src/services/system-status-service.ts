@@ -1,10 +1,13 @@
 import { createHash } from 'node:crypto';
 import {
   checkDatabaseHealth,
+  count,
   db,
   desc,
   eq,
+  min,
   queryMonitor,
+  realtimeOutboxes,
   systemMetricsSnapshots,
 } from '@feed/db';
 import { logger } from '@feed/shared';
@@ -924,16 +927,13 @@ export async function getSystemStatusSnapshot(): Promise<SystemStatusSnapshot> {
       ORDER BY pg_total_relation_size(s.relid) DESC
       LIMIT 20
     `,
-    db.$queryRaw<{
-      pending: string;
-      oldest: Date | null;
-    }>`
-      SELECT 
-        COUNT(*) as pending,
-        MIN("createdAt") as oldest
-      FROM "RealtimeOutbox"
-      WHERE "status" = 'pending'
-    `,
+    db
+      .select({
+        pending: count(),
+        oldest: min(realtimeOutboxes.createdAt),
+      })
+      .from(realtimeOutboxes)
+      .where(eq(realtimeOutboxes.status, 'pending')),
     db.generationLock.findMany({
       where: { expiresAt: { gt: generatedAt } },
       orderBy: { lockedAt: 'desc' },
@@ -970,9 +970,7 @@ export async function getSystemStatusSnapshot(): Promise<SystemStatusSnapshot> {
   const outboxPending = outboxStats[0] ? Number(outboxStats[0].pending) : 0;
   const outboxOldest = outboxStats[0]?.oldest ?? null;
   const outboxLagSeconds = outboxOldest
-    ? Math.floor(
-        (generatedAt.getTime() - new Date(outboxOldest).getTime()) / 1000
-      )
+    ? Math.floor((generatedAt.getTime() - outboxOldest.getTime()) / 1000)
     : 0;
   const lookaheadMinutes = latestPost
     ? Math.floor(
