@@ -24,7 +24,11 @@ import {
 import { GROQ_MODELS, getAgentLLMBridge, type JsonValue } from '@feed/shared';
 import { generateObject, generateText, jsonSchema } from 'ai';
 import { getEncoding } from 'js-tiktoken';
-import { createAgentGroq, resolveGroqModel } from '../llm/direct-groq';
+import {
+  createAgentGroq,
+  resolveAgentInferenceProvider,
+  resolveGroqModel,
+} from '../llm/direct-groq';
 import { buildReasoningTraceMetadata } from '../llm/reasoning-trace';
 import { getAgentLLMTimeoutMs } from '../llm/request-timeout';
 import {
@@ -94,6 +98,7 @@ async function generateGroqText(
   }
 ) {
   if (!params.prompt?.trim()) throw new Error('Agent LLM prompt is required');
+  const provider = resolveAgentInferenceProvider(params.runtime);
   const startTime = Date.now();
   let trajectoryLogger = params.trajectoryLogger;
   let trajectoryId = params.trajectoryId;
@@ -137,7 +142,7 @@ async function generateGroqText(
       });
     }
     getAgentLLMBridge()?.({
-      provider: 'groq',
+      provider,
       model,
       promptType: 'groq_plugin_text',
       temperature: params.temperature,
@@ -154,7 +159,7 @@ async function generateGroqText(
     throw error;
   });
   getAgentLLMBridge()?.({
-    provider: 'groq',
+    provider,
     model,
     promptType: params.actionType || 'groq_plugin_text',
     temperature: params.temperature,
@@ -227,6 +232,7 @@ async function generateGroqObject(
   if (params.output && params.output !== 'object') {
     throw new Error(`Unsupported agent object output: ${params.output}`);
   }
+  const provider = resolveAgentInferenceProvider(runtime);
   const system = runtime.character.system;
   const startTime = Date.now();
   const activeStep = await ensureTrajectoryStep(runtime);
@@ -261,7 +267,7 @@ async function generateGroqObject(
         metadata: { success: false, error: error.message },
       });
     getAgentLLMBridge()?.({
-      provider: 'groq',
+      provider,
       model,
       promptType: 'groq_plugin_object',
       temperature: params.temperature,
@@ -283,7 +289,7 @@ async function generateGroqObject(
   const valid =
     typeof object === 'object' && object !== null && !Array.isArray(object);
   getAgentLLMBridge()?.({
-    provider: 'groq',
+    provider,
     model,
     promptType: 'groq_plugin_object',
     temperature: params.temperature,

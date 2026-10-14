@@ -1,5 +1,9 @@
-import { beforeEach, describe, expect, it, mock } from 'bun:test';
+import { afterEach, beforeEach, describe, expect, it, mock } from 'bun:test';
 import type { IAgentRuntime } from '@elizaos/core';
+import type { AgentLLMBridgeData } from '@feed/shared';
+
+let surplusConfigured = false;
+const mockUsageBridge = mock((_call: AgentLLMBridgeData) => {});
 
 const mockLanguageModel = mock((model: string) => `language-model:${model}`);
 const mockCreateGroq = mock(() => ({
@@ -33,8 +37,15 @@ mock.module('@feed/engine/embedding', () => ({
 }));
 
 mock.module('@feed/shared', () => ({
-  getSurplusConfig: () => null,
-  getAgentLLMBridge: () => undefined,
+  getSurplusConfig: () =>
+    surplusConfigured
+      ? {
+          apiKey: 'test-surplus-key',
+          baseURL: 'https://surplus.example/v1',
+          model: 'surplus-model',
+        }
+      : null,
+  getAgentLLMBridge: () => mockUsageBridge,
   GROQ_MODELS: {
     FREE: { modelId: 'groq-small-model' },
     PRO: { modelId: 'groq-large-model' },
@@ -279,4 +290,77 @@ it('tokenizes for non-tiktoken provider models instead of throwing', async () =>
   expect(
     await decode(runtime, { tokens, modelType: ModelType.TEXT_LARGE } as never)
   ).toBe('hello world');
+});
+
+describe('native inference usage attribution', () => {
+  const savedCloudKey = process.env.ELIZACLOUD_API_KEY;
+  beforeEach(() => {
+    delete process.env.ELIZACLOUD_API_KEY;
+    mockUsageBridge.mockClear();
+  });
+  afterEach(() => {
+    surplusConfigured = false;
+    if (savedCloudKey === undefined) delete process.env.ELIZACLOUD_API_KEY;
+    else process.env.ELIZACLOUD_API_KEY = savedCloudKey;
+  });
+
+  const cloudRuntime = {
+    ...runtime,
+    getSetting: (key: string) =>
+      key === 'ELIZACLOUD_API_KEY' ? 'test-cloud-key' : runtime.getSetting(key),
+  };
+  for (const provider of ['surplus', 'elizacloud', 'groq'] as const) {
+    for (const modelType of [
+      ModelType.TEXT_SMALL,
+      ModelType.TEXT_LARGE,
+      ModelType.OBJECT_SMALL,
+      ModelType.OBJECT_LARGE,
+    ]) {
+      it(`${provider} ${modelType} reports the selected provider and usage`, async () => {
+        surplusConfigured = provider === 'surplus';
+        // Surplus must take precedence even when a runtime cloud key is set.
+        const selectedRuntime = provider === 'groq' ? runtime : cloudRuntime;
+        await groqPlugin.models![modelType]!(selectedRuntime, {
+          prompt: 'Hello',
+        });
+        expect(mockUsageBridge).toHaveBeenCalledTimes(1);
+        expect(mockUsageBridge.mock.calls[0]?.[0]).toMatchObject({
+          provider,
+          model:
+            provider === 'surplus'
+              ? 'surplus-model'
+              : modelType === ModelType.TEXT_SMALL ||
+                  modelType === ModelType.OBJECT_SMALL
+                ? 'groq-small-model'
+                : 'groq-large-model',
+          success: true,
+          inputTokens: 10,
+          outputTokens: 5,
+          totalTokens: 15,
+        });
+      });
+      it(`${provider} ${modelType} reports the selected provider on failure`, async () => {
+        surplusConfigured = provider === 'surplus';
+        const selectedRuntime = provider === 'groq' ? runtime : cloudRuntime;
+        const failure = new Error('provider unavailable');
+        const generator =
+          modelType === ModelType.TEXT_SMALL ||
+          modelType === ModelType.TEXT_LARGE
+            ? mockGenerateText
+            : mockGenerateObject;
+        generator.mockRejectedValueOnce(failure);
+        await expect(
+          groqPlugin.models![modelType]!(selectedRuntime, { prompt: 'Hello' })
+        ).rejects.toThrow('provider unavailable');
+        expect(mockUsageBridge).toHaveBeenCalledTimes(1);
+        expect(mockUsageBridge.mock.calls[0]?.[0]).toMatchObject({
+          provider,
+          success: false,
+          error: 'provider unavailable',
+          inputTokens: 0,
+          outputTokens: 0,
+        });
+      });
+    }
+  }
 });
