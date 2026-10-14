@@ -9,7 +9,11 @@ import {
   uninstallLLMInterceptor,
 } from '../../engine/src/dag-trace/llm-interceptor';
 import type { LLMCallInput } from '../../engine/src/dag-trace/types';
-import { FeedLLMClient } from '../../engine/src/llm/openai-client';
+import {
+  FeedLLMClient,
+  setTokenUsageCallback,
+  type TokenUsageCallback,
+} from '../../engine/src/llm/openai-client';
 import { tracedCompletion } from '../../engine/src/llm/traced-completion';
 
 const calls: LLMCallInput[] = [];
@@ -19,7 +23,11 @@ const requestPaths: string[] = [];
 const saved = { ...process.env };
 let responseText = 'A model response';
 let status = 200;
-let queuedResponses: Array<{ content: string; finish: string }> = [];
+let queuedResponses: Array<{
+  content: string;
+  finish: string;
+  status?: number;
+}> = [];
 const server = Bun.serve({
   hostname: '127.0.0.1',
   port: 0,
@@ -35,6 +43,12 @@ const server = Bun.serve({
       content: responseText,
       finish: 'stop',
     };
+    if (next.status) {
+      return Response.json(
+        { error: { message: 'Controlled continuation failure' } },
+        { status: next.status, headers: { 'x-should-retry': 'false' } }
+      );
+    }
     return Response.json({
       id: 'audit-call',
       object: 'chat.completion',
@@ -174,6 +188,36 @@ describe('actual provider transport and trajectory bridge', () => {
     expect(captured[1]?.messages?.[3]?.content).toContain('JSON');
     expect(captured.reduce((sum, call) => sum + call.totalTokens, 0)).toBe(80);
   });
+  test('token totals retain consumed continuation tokens when an engine attempt retries', async () => {
+    const usage: Array<Parameters<TokenUsageCallback>[0]> = [];
+    const before = calls.length;
+    queuedResponses = [
+      { content: '{"items":[', finish: 'length' },
+      { content: '', finish: 'stop', status: 503 },
+      { content: '{"items":[1]}', finish: 'stop' },
+    ];
+    setTokenUsageCallback((call) => usage.push(call));
+    try {
+      const client = new FeedLLMClient(undefined, 'groq');
+      expect(
+        await client.generateJSON<{ items: number[] }>(
+          'Generate items',
+          undefined,
+          {
+            format: 'json',
+            maxTokens: 100,
+          }
+        )
+      ).toEqual({ items: [1] });
+      expect(calls.slice(before)).toHaveLength(3);
+      expect(usage.map((call) => call.success)).toEqual([false, true]);
+      expect(usage.reduce((sum, call) => sum + call.inputTokens, 0)).toBe(60);
+      expect(usage.reduce((sum, call) => sum + call.outputTokens, 0)).toBe(20);
+      expect(usage.reduce((sum, call) => sum + call.totalTokens, 0)).toBe(80);
+    } finally {
+      setTokenUsageCallback(null);
+    }
+  }, 15000);
   test('malformed engine XML is a failed trajectory with raw output and usage preserved', async () => {
     responseText =
       '<decisions><decision><npcId>org-example</npcName></decision></decisions>';

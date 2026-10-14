@@ -442,7 +442,10 @@ WORLD RULES:
         parsedResponse: null,
         inputTokens: response.usage?.prompt_tokens ?? 0,
         outputTokens: response.usage?.completion_tokens ?? 0,
-        totalTokens: response.usage?.total_tokens ?? 0,
+        totalTokens:
+          response.usage?.total_tokens ??
+          (response.usage?.prompt_tokens ?? 0) +
+            (response.usage?.completion_tokens ?? 0),
         durationMs: Date.now() - started,
         success: Boolean(content.trim()),
         ...(content.trim() ? {} : { error: 'LLM response missing content' }),
@@ -459,6 +462,7 @@ WORLD RULES:
       attemptCalls = [];
       let parsedResponse: JsonValue | null = null;
       let outcomeError: string | undefined;
+      let failedAttemptDurationMs: number | undefined;
       try {
         callStartTime = Date.now();
         const response = await requestCompletion(messages);
@@ -468,12 +472,6 @@ WORLD RULES:
         }
         let content = firstChoice.message.content;
         let finishReason = firstChoice.finish_reason;
-
-        // Extract token usage from response
-        const usage = response.usage;
-        let inputTokens = usage?.prompt_tokens ?? 0;
-        let outputTokens = usage?.completion_tokens ?? 0;
-        let totalTokens = usage?.total_tokens ?? inputTokens + outputTokens;
 
         // Log prompt and response for monitoring
         const fullInput = `System: ${systemContent}\n\nUser: ${prompt}`;
@@ -531,9 +529,6 @@ WORLD RULES:
 
             const continuationResponse =
               await requestCompletion(continuationMessages);
-            inputTokens += continuationResponse.usage?.prompt_tokens ?? 0;
-            outputTokens += continuationResponse.usage?.completion_tokens ?? 0;
-            totalTokens += continuationResponse.usage?.total_tokens ?? 0;
 
             const contChoice = first(continuationResponse.choices);
             if (!contChoice || !contChoice.message.content) {
@@ -589,20 +584,6 @@ WORLD RULES:
           // Log parsed output for monitoring
           await this.logParsedOutput(xmlResult.data, promptType);
 
-          // Report token usage via callback
-          if (globalTokenUsageCallback) {
-            globalTokenUsageCallback({
-              provider: this.provider,
-              model,
-              inputTokens,
-              outputTokens,
-              totalTokens,
-              promptType,
-              durationMs: Date.now() - callStartTime,
-              success: true,
-            });
-          }
-
           parsedResponse = xmlResult.data;
           return xmlResult.data as T;
         }
@@ -621,23 +602,10 @@ WORLD RULES:
         // Log parsed output for monitoring
         await this.logParsedOutput(parsed, promptType);
 
-        // Report token usage via callback
-        if (globalTokenUsageCallback) {
-          globalTokenUsageCallback({
-            provider: this.provider,
-            model,
-            inputTokens,
-            outputTokens,
-            totalTokens,
-            promptType,
-            durationMs: Date.now() - callStartTime,
-            success: true,
-          });
-        }
-
         parsedResponse = parsed;
         return parsed as T;
       } catch (error: unknown) {
+        failedAttemptDurationMs = Date.now() - callStartTime;
         outcomeError = error instanceof Error ? error.message : String(error);
         const err = error as {
           status?: number;
@@ -746,34 +714,31 @@ WORLD RULES:
           continue;
         }
 
-        // Report failed call via callback (if we have basic info)
-        if (globalTokenUsageCallback) {
-          const errMessage = err?.message || 'Unknown error';
-          globalTokenUsageCallback({
-            provider: this.provider,
-            model,
-            inputTokens: attemptCalls.reduce(
-              (sum, call) => sum + call.inputTokens,
-              0
-            ),
-            outputTokens: attemptCalls.reduce(
-              (sum, call) => sum + call.outputTokens,
-              0
-            ),
-            totalTokens: attemptCalls.reduce(
-              (sum, call) => sum + call.totalTokens,
-              0
-            ),
-            promptType,
-            durationMs: Date.now() - callStartTime,
-            success: false,
-            error: errMessage,
-          });
-        }
-
         // Re-throw if not a retryable error or retries exhausted
         throw error;
       } finally {
+        // Publish every attempt, including retries that already consumed tokens.
+        // Continuations belong to the same attempt and must be counted once.
+        globalTokenUsageCallback?.({
+          provider: this.provider,
+          model,
+          inputTokens: attemptCalls.reduce(
+            (sum, call) => sum + call.inputTokens,
+            0
+          ),
+          outputTokens: attemptCalls.reduce(
+            (sum, call) => sum + call.outputTokens,
+            0
+          ),
+          totalTokens: attemptCalls.reduce(
+            (sum, call) => sum + call.totalTokens,
+            0
+          ),
+          promptType,
+          durationMs: failedAttemptDurationMs ?? Date.now() - callStartTime,
+          success: outcomeError === undefined,
+          ...(outcomeError === undefined ? {} : { error: outcomeError }),
+        });
         for (const call of attemptCalls) {
           getLLMCallCallback()?.({
             ...call,
