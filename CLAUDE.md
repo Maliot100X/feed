@@ -9,6 +9,28 @@ commit. `.cursorrules` points to `CLAUDE.md`. Do not run `bun run ruler:apply`
 for these files: the `.ruler/` sources are older, and Ruler overwrites
 `AGENTS.md` and `CLAUDE.md`.
 
+## PRD authority and required communication
+
+All work is downstream of the [PRD](docs/product/prd.md). The
+[MVP plan](docs/product/mvp-plan.md), issues, implementation approaches, code,
+tests, documentation, and PR reviews must conform to its requirements and
+non-goals. Follow the MVP phase dependencies and exit criteria; a passing test
+or an open issue does not authorize a different product direction.
+
+Before implementing any new feature or approach, update the PRD to describe
+it and obtain maintainer approval of that change. Update the affected MVP
+phase and acceptance criteria as well. Do not use an implementation or a PR
+as retroactive approval. Existing defect fixes must cite the requirement they
+restore; they must not silently introduce new scope.
+
+At the start of every task, agents must reiterate to the user, in plain
+language, what the relevant PRD sections say, cite those sections and the
+applicable MVP phase, and explain how the proposed work follows them. Repeat
+this when scope or approach changes. In the final handoff, restate the relevant
+requirements and distinguish verified acceptance evidence from remaining work.
+If requirements conflict or are missing, report that gap instead of inventing
+scope or claiming MVP completion.
+
 ## Slop bounty rules
 
 Feed is registered as a featured [Slop](https://slop.cash) bounty repository;
@@ -18,9 +40,9 @@ the program is paused pending activation. Read
 1. **Star and fork first.** Star and fork `feedforagents/feed` with the
    contributor's own GitHub account. Slop uses this for tracking. Work from the
    fork. Open PRs into `staging`.
-2. **Scope is binding.** There is no PRD or MVP plan file in this repository.
-   Work only on defects in existing behavior, or on work that a maintainer
-   confirmed in a GitHub issue. Never invent scope or a PRD.
+2. **Scope is binding.** All work must follow the PRD and MVP plan linked
+   above. Cite the requirement and phase; new features or approaches require
+   an approved PRD update before implementation. Never invent scope.
 3. **Accepted work:** reproduced bugs, tests that prove real behavior,
    validation, security, measured quality improvements, and validation of the
    trading algorithm and simulations.

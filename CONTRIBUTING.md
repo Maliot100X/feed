@@ -41,8 +41,21 @@ Do all work on a branch in your fork. Open pull requests (PRs) into `staging`.
 
 ## 2. Scope: the PRD and MVP plan are binding
 
-The product requirements document (PRD) and the minimum viable product (MVP)
-implementation plan define the approved scope. Work only inside that scope.
+Everything is downstream of the product requirements document (PRD): the MVP
+plan, issues, implementation approaches, code, tests, documentation, and PR
+reviews must conform to its requirements and non-goals. Follow the MVP phase
+dependencies and exit criteria; green checks alone do not prove MVP completion.
+
+Before implementing any new feature or approach, update the PRD to describe
+it, obtain maintainer approval, and update the affected MVP phase and acceptance
+criteria. An issue or implementation cannot substitute for that approval.
+Existing defect fixes must identify the PRD requirement they restore.
+
+At the start of every task, agents must reiterate to the user in plain language
+what the relevant PRD sections say, cite those sections and the applicable MVP
+phase, and explain how their work follows them. Repeat this whenever scope or
+approach changes. The final handoff must restate the relevant requirements and
+identify verified acceptance evidence and remaining work.
 
 The PRD is [docs/product/prd.md](docs/product/prd.md). The MVP plan is
 [docs/product/mvp-plan.md](docs/product/mvp-plan.md). Other files in `docs/`
@@ -54,9 +67,8 @@ approve new work.
 - Before you start a feature or a behavior change, get written scope
   confirmation from a maintainer on the issue. See `.github/CODEOWNERS` for
   maintainers by area.
-- An open issue is not feature approval. A feature that is not in the PRD and
-  MVP plan also needs an approved PRD and MVP plan update before you implement
-  it.
+- An open issue is not feature approval. Any new feature or approach requires
+  an approved PRD update and corresponding MVP plan update before implementation.
 
 ## 3. What we accept
 
