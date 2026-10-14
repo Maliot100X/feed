@@ -166,7 +166,7 @@ These variables are not read by the application runtime. They control tests.
 
 | Variable | Purpose | Needed for |
 |---|---|---|
-| `RUN_LIVE_LLM_TESTS` | `1`/`true` enables live LLM tests. The check in `packages/testing/integration/helpers/live-runtime.ts` also needs `GROQ_API_KEY`, `ANTHROPIC_API_KEY`, or `OPENAI_API_KEY`. | `bun run test:integration:live`, `real-engine-tick` |
+| `RUN_LIVE_LLM_TESTS` | `1`/`true` enables live LLM tests. The check in `packages/testing/integration/helpers/live-runtime.ts` also needs `SURPLUS_API_KEY`, `GROQ_API_KEY`, `ANTHROPIC_API_KEY`, or `OPENAI_API_KEY`. | `bun run test:integration:live`, `real-engine-tick` |
 | `RUN_OPTIONAL_INTEGRATION_TESTS` | `1` includes the optional integration files (agent ticks, production tick, trading, Agent0, localnet) | `test:integration:all`, `test:integration:live` |
 | `RUN_REAL_ENGINE_TESTS` | `true` runs the real engine tick tests in `packages/engine` | Engine integration tests |
 | `RUN_INTEGRATION_TESTS` | `true` runs DB-backed engine integration tests | `narrative-state`, `npc-post-voice` tests |
@@ -215,7 +215,7 @@ bun run build
 Tests with real LLM calls (required as evidence when behavior depends on an LLM):
 
 ```bash
-# Set GROQ_API_KEY, ANTHROPIC_API_KEY, or OPENAI_API_KEY in .env
+# Set SURPLUS_API_KEY (or GROQ_API_KEY, ANTHROPIC_API_KEY, OPENAI_API_KEY) in .env
 bun run test:integration:live
 ```
 
