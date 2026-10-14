@@ -425,7 +425,7 @@ export const POST = withErrorHandling(async function POST(_req: NextRequest) {
             autonomousCoordinator.executeAutonomousTick(
               npc.id,
               runtime,
-              true,
+              NPC_TICK_CONFIG.recordTrajectories,
               true,
               signal
             )

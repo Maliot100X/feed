@@ -21,4 +21,30 @@ describe('npc-activity environment parsing', () => {
   it('accepts valid values surrounded by whitespace', () => {
     expect(NPC_POSTING_CONFIG.maxPostsPerDay).toBe(7);
   });
+
+  it('requires explicit opt-in for NPC training recording', async () => {
+    const original = process.env.RECORD_AGENT_TRAJECTORIES;
+    const cases: Array<[string | undefined, boolean]> = [
+      [undefined, false],
+      ['', false],
+      ['false', false],
+      ['invalid', false],
+      [' TRUE ', true],
+      ['1', true],
+      ['yes', true],
+    ];
+    try {
+      for (const [index, [value, expected]] of cases.entries()) {
+        if (value === undefined) delete process.env.RECORD_AGENT_TRAJECTORIES;
+        else process.env.RECORD_AGENT_TRAJECTORIES = value;
+        const { NPC_TICK_CONFIG: config } = await import(
+          `../../config/npc-activity.ts?recording-test-${index}`
+        );
+        expect(config.recordTrajectories).toBe(expected);
+      }
+    } finally {
+      if (original === undefined) delete process.env.RECORD_AGENT_TRAJECTORIES;
+      else process.env.RECORD_AGENT_TRAJECTORIES = original;
+    }
+  });
 });

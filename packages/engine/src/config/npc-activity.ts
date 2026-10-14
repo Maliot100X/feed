@@ -776,6 +776,15 @@ export const NPC_FOLLOWING_CONFIG = {
  */
 export const NPC_TICK_CONFIG = {
   /**
+   * Opt in to NPC-only training trajectories from product ticks.
+   * User product ticks never record; dedicated training callers opt in separately.
+   *
+   * @default false
+   * @env RECORD_AGENT_TRAJECTORIES
+   */
+  recordTrajectories: envBoolean('RECORD_AGENT_TRAJECTORIES', false),
+
+  /**
    * Number of NPCs to process per tick.
    * Higher batch size = more NPCs considered = better rotation across all NPCs.
    * With 140 NPCs and ~59 active at any time, 12/tick ensures good coverage.

@@ -615,7 +615,7 @@ export const POST = withErrorHandling(async function POST(_req: NextRequest) {
             return autonomousCoordinator.executeAutonomousTick(
               eligibleAgent.user.id,
               runtime,
-              true,
+              false,
               false,
               signal
             );
