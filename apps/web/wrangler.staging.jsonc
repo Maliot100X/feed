@@ -23,7 +23,8 @@
       { "name": "API_KEY_USAGE", "class_name": "FeedApiKeyUsage" },
       { "name": "ORG_COORDINATION", "class_name": "FeedOrgCoordination" },
       { "name": "ALERT_RESERVATIONS", "class_name": "FeedAlertReservations" },
-      { "name": "TASKS", "class_name": "FeedTasks" }
+      { "name": "TASKS", "class_name": "FeedTasks" },
+      { "name": "CACHE", "class_name": "FeedCache" }
     ]
   },
   "migrations": [
@@ -42,7 +43,8 @@
       "tag": "feed-alert-reservations-v1",
       "new_sqlite_classes": ["FeedAlertReservations"]
     },
-    { "tag": "feed-tasks-v1", "new_sqlite_classes": ["FeedTasks"] }
+    { "tag": "feed-tasks-v1", "new_sqlite_classes": ["FeedTasks"] },
+    { "tag": "feed-cache-v1", "new_sqlite_classes": ["FeedCache"] }
   ],
   "hyperdrive": [
     {
@@ -83,6 +85,7 @@
     "ORG_COORDINATION_BACKEND": "redis",
     "ALERT_RESERVATIONS_BACKEND": "redis",
     "TASK_STORAGE_BACKEND": "redis",
+    "CACHE_BACKEND": "redis",
     "DEPLOYMENT_PLATFORM": "cloudflare",
     "DEPLOYMENT_ENV": "staging",
     "NEXT_PUBLIC_APP_URL": "https://staging.feed.fun",

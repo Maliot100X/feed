@@ -1,4 +1,11 @@
 import {
+  CACHE_RESOURCE,
+  createCloudflareCache,
+} from '../../packages/api/src/cache/cloudflare-cache-backend';
+
+export { FeedCache } from '../../packages/api/src/cache/cloudflare-cache-object';
+
+import {
   createCloudflareTaskStore,
   TASK_STORAGE_RESOURCE,
 } from '../../packages/a2a/src/cloudflare-task-backend';
@@ -82,6 +89,8 @@ interface FeedCloudflareEnv {
   ALERT_RESERVATIONS: DurableObjectNamespace;
   TASK_STORAGE_BACKEND?: string;
   TASKS: DurableObjectNamespace;
+  CACHE_BACKEND?: string;
+  CACHE: DurableObjectNamespace;
 }
 
 export default {
@@ -279,6 +288,20 @@ export default {
           env.TASK_STORAGE_BACKEND !== 'redis'
         ) {
           throw new Error('Unsupported task storage backend');
+        }
+        if (env.CACHE_BACKEND === 'cloudflare') {
+          const stub = env.CACHE.get(env.CACHE.idFromName('cache-v1'));
+          requestResource(CACHE_RESOURCE, () =>
+            createCloudflareCache((body) =>
+              stub.fetch('https://cache.internal/', {
+                method: 'POST',
+                headers: { 'content-type': 'application/json' },
+                body,
+              })
+            )
+          );
+        } else if (env.CACHE_BACKEND && env.CACHE_BACKEND !== 'redis') {
+          throw new Error('Unsupported cache backend');
         }
         await ensureRedisReady();
         return handler.fetch(request, env, {

@@ -1,3 +1,6 @@
+import { runInBackground } from '@feed/shared/server/request-scope';
+import { cacheGlobToRegExp } from './cache-pattern';
+import { cloudflareCache } from './cloudflare-cache-backend';
 /**
  * Cache Service
  *
@@ -67,15 +70,7 @@ const MAX_REDIS_PAYLOAD_BYTES = 8 * 1024 * 1024;
  * Convert a Redis glob pattern (`*`, `?`) into an anchored RegExp so memory
  * invalidation matches exactly the keys Redis SCAN MATCH would.
  */
-export function cacheGlobToRegExp(pattern: string): RegExp {
-  let source = '';
-  for (const char of pattern) {
-    if (char === '*') source += '.*';
-    else if (char === '?') source += '.';
-    else source += char.replace(/[.+^${}()|[\]\\]/g, '\\$&');
-  }
-  return new RegExp(`^${source}$`);
-}
+export { cacheGlobToRegExp } from './cache-pattern';
 
 /**
  * Cache entry structure
@@ -305,25 +300,25 @@ export async function getCache<T>(
 ): Promise<T | null> {
   const fullKey = options.namespace ? `${options.namespace}:${key}` : key;
 
-  const client = getRedisClient();
+  const client = cloudflareCache() ?? getRedisClient();
   if (client) {
     const cached = await client.get(fullKey);
 
     if (cached !== null && cached !== undefined) {
       if (!cached || cached.trim() === '') {
         logger.warn(
-          'Empty cached value in Redis',
+          'Empty cached value in shared storage',
           { key: fullKey },
           'CacheService'
         );
         return null;
       }
 
-      logger.debug('Cache hit (Redis)', { key: fullKey }, 'CacheService');
+      logger.debug('Cache hit (Shared)', { key: fullKey }, 'CacheService');
       return parseCacheValue<T>(cached);
     }
 
-    logger.debug('Cache miss (Redis)', { key: fullKey }, 'CacheService');
+    logger.debug('Cache miss (Shared)', { key: fullKey }, 'CacheService');
     return null;
   }
 
@@ -370,6 +365,11 @@ export async function setCache<T>(
   const ttl = options.ttl || 300;
 
   const serialized = serializeCacheValue(value);
+  const cloudflare = cloudflareCache();
+  if (cloudflare) {
+    await cloudflare.setMany([[fullKey, serialized]], ttl);
+    return;
+  }
   const client = getRedisClient();
 
   if (client) {
@@ -415,10 +415,14 @@ export async function invalidateCache(
 ): Promise<void> {
   const fullKey = options.namespace ? `${options.namespace}:${key}` : key;
 
-  const client = getRedisClient();
+  const client = cloudflareCache() ?? getRedisClient();
   if (client) {
     await client.del(fullKey);
-    logger.debug('Cache invalidated (Redis)', { key: fullKey }, 'CacheService');
+    logger.debug(
+      'Cache invalidated (Shared)',
+      { key: fullKey },
+      'CacheService'
+    );
   }
 
   memoryCache.delete(fullKey);
@@ -447,6 +451,12 @@ export async function invalidateCachePattern(
   const fullPattern = options.namespace
     ? `${options.namespace}:${pattern}`
     : pattern;
+
+  const cloudflare = cloudflareCache();
+  if (cloudflare) {
+    await cloudflare.invalidate(fullPattern);
+    return;
+  }
 
   // Invalidate in Redis
   const client = getRedisClient();
@@ -525,7 +535,7 @@ export async function getCacheOrFetch<T>(
   const ttl = options.ttl || 300;
 
   // Try to get from cache with TTL info for thundering herd protection
-  const client = getRedisClient();
+  const client = cloudflareCache() ?? getRedisClient();
   let cached: T | null = null;
   let remainingTtl = 0;
 
@@ -590,18 +600,20 @@ export async function getCacheOrFetch<T>(
         'CacheService'
       );
       // Refresh in background, return cached data immediately
-      void (async () => {
-        try {
-          const freshData = await fetchFn();
-          await setCache(key, freshData, options);
-        } catch (error) {
-          logger.warn(
-            'Background cache refresh failed',
-            { key: fullKey, error },
-            'CacheService'
-          );
-        }
-      })();
+      runInBackground(
+        (async () => {
+          try {
+            const freshData = await fetchFn();
+            await setCache(key, freshData, options);
+          } catch (error) {
+            logger.warn(
+              'Background cache refresh failed',
+              { key: fullKey, error },
+              'CacheService'
+            );
+          }
+        })()
+      );
     }
 
     return cached;
@@ -673,6 +685,16 @@ export async function getCacheBatch<T>(
   );
   const keyToOriginal = new Map(fullKeys.map((fk, i) => [fk, keys[i]]));
 
+  const cloudflare = cloudflareCache();
+  if (cloudflare) {
+    const values = await cloudflare.mget(...fullKeys);
+    for (let i = 0; i < keys.length; i++) {
+      const value = values[i];
+      if (value !== null && value !== undefined && value.trim() !== '')
+        result.set(keys[i]!, parseCacheValue<T>(value));
+    }
+    return result;
+  }
   const client = getRedisClient();
   if (client) {
     try {
@@ -765,6 +787,17 @@ export async function setCacheBatch<T>(
 
   const ttl = options.ttl || 300;
 
+  const cloudflare = cloudflareCache();
+  if (cloudflare) {
+    await cloudflare.setMany(
+      entriesArray.map(([key, value]) => [
+        options.namespace ? `${options.namespace}:${key}` : key,
+        serializeCacheValue(value),
+      ]),
+      ttl
+    );
+    return;
+  }
   const client = getRedisClient();
   if (client) {
     // Reads go to Redis whenever a client exists, so failures here are logged
@@ -923,8 +956,9 @@ export function getCacheStats() {
 /**
  * Clear all cache (use with caution!)
  *
- * @description Clears all in-memory cache entries. Redis cache clearing is not
- * implemented for safety reasons (to avoid clearing other application data).
+ * @description Clears the dedicated Cloudflare cache when selected and all
+ * in-memory entries. Redis-wide clearing remains disabled because that instance
+ * also holds non-cache application state.
  *
  * @returns {Promise<void>}
  *
@@ -932,6 +966,13 @@ export function getCacheStats() {
  * impact application performance.
  */
 export async function clearAllCache(): Promise<void> {
+  const cloudflare = cloudflareCache();
+  if (cloudflare) {
+    await cloudflare.clear();
+    memoryCache.clear();
+    return;
+  }
+
   logger.warn('Clearing all cache', undefined, 'CacheService');
 
   // Clear memory cache
