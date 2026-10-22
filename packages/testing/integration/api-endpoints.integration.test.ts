@@ -489,8 +489,17 @@ describe('API Endpoints - Complete Coverage', () => {
   // ============================================
   describe('NPC', () => {
     test('POST /api/npc/allocation', async () => {
-      const res = await post('/api/npc/allocation', {});
-      // Cron-secret route: requireCronAuth rejects with AuthorizationError (403)
+      const res = await fetch(`${BASE_URL}/api/npc/allocation`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: 'Bearer invalid-cron-integration-proof',
+        },
+        body: '{}',
+        signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+      });
+      // Invalid credentials must fail in both development and production.
+      // Development permits an absent header, so that is not an auth probe.
       expect(res.status).toBe(403);
     });
 

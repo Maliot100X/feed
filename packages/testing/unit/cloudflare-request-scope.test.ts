@@ -1,6 +1,7 @@
 import { describe, expect, test } from 'bun:test';
 import {
   requestResource,
+  runInBackground,
   withRequestResources,
 } from '../../shared/src/server/request-scope';
 
@@ -95,6 +96,41 @@ describe('Cloudflare request resources', () => {
         (task) => tasks.push(task)
       )
     ).rejects.toThrow('handler failed');
+    await Promise.all(tasks);
+    expect(closed).toBe(true);
+  });
+
+  test('a deferred write keeps its fallback connection alive after the response', async () => {
+    const primary = deferred();
+    const fallback = deferred();
+    const tasks: Promise<unknown>[] = [];
+    let closed = false;
+    let fallbackStarted = false;
+    const response = await withRequestResources(
+      async () => {
+        requestResource(
+          'database',
+          () => ({}),
+          async () => {
+            closed = true;
+          }
+        );
+        runInBackground(
+          primary.promise.then(() => {
+            fallbackStarted = true;
+            runInBackground(fallback.promise);
+          })
+        );
+        return new Response('authenticated');
+      },
+      (task) => tasks.push(task)
+    );
+    expect(await response.text()).toBe('authenticated');
+    primary.release();
+    await primary.promise;
+    expect(fallbackStarted).toBe(true);
+    expect(closed).toBe(false);
+    fallback.release();
     await Promise.all(tasks);
     expect(closed).toBe(true);
   });
