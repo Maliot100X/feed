@@ -16,10 +16,14 @@
     }
   ],
   "durable_objects": {
-    "bindings": [{ "name": "RATE_LIMITS", "class_name": "FeedRateLimits" }]
+    "bindings": [
+      { "name": "RATE_LIMITS", "class_name": "FeedRateLimits" },
+      { "name": "DEVICES", "class_name": "FeedDevices" }
+    ]
   },
   "migrations": [
-    { "tag": "feed-rate-limits-v1", "new_sqlite_classes": ["FeedRateLimits"] }
+    { "tag": "feed-rate-limits-v1", "new_sqlite_classes": ["FeedRateLimits"] },
+    { "tag": "feed-devices-v1", "new_sqlite_classes": ["FeedDevices"] }
   ],
   "hyperdrive": [
     {
@@ -54,6 +58,7 @@
   },
   "vars": {
     "RATE_LIMIT_BACKEND": "redis",
+    "DEVICE_REGISTRY_BACKEND": "redis",
     "DEPLOYMENT_PLATFORM": "cloudflare",
     "DEPLOYMENT_ENV": "staging",
     "NEXT_PUBLIC_APP_URL": "https://staging.feed.fun",

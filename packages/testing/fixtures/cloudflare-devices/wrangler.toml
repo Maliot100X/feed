@@ -1,0 +1,12 @@
+name = "feed-devices-local-test"
+main = "worker.ts"
+compatibility_date = "2026-10-10"
+compatibility_flags = ["nodejs_compat"]
+
+[[durable_objects.bindings]]
+name = "DEVICES"
+class_name = "FeedDevices"
+
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["FeedDevices"]

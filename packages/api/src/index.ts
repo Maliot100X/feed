@@ -159,6 +159,7 @@ export {
 export { cronMetrics, recordCronExecution } from './monitoring/cron-metrics';
 // Performance monitoring (moved from @feed/shared)
 export { performanceMonitor } from './monitoring/performance-monitor';
+export { getDeviceRegistry } from './notifications/device-registry';
 // Profile utilities
 export {
   checkProfileUpdateRateLimit,

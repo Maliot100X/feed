@@ -14,7 +14,13 @@ import {
   RATE_LIMIT_RESOURCE,
 } from '../../packages/api/src/rate-limiting/cloudflare-backend';
 
+export { FeedDevices } from '../../packages/api/src/notifications/cloudflare-object';
 export { FeedRateLimits } from '../../packages/api/src/rate-limiting/cloudflare-object';
+
+import {
+  createCloudflareDeviceRegistry,
+  DEVICE_REGISTRY_RESOURCE,
+} from '../../packages/api/src/notifications/device-registry';
 
 import { ensureRedisReady } from '../../packages/api/src/redis/client';
 // OpenNext generates this module during build.
@@ -29,6 +35,8 @@ interface FeedCloudflareEnv {
   COMMIT_SHA?: string;
   RATE_LIMIT_BACKEND?: string;
   RATE_LIMITS: DurableObjectNamespace;
+  DEVICE_REGISTRY_BACKEND?: string;
+  DEVICES: DurableObjectNamespace;
 }
 
 export default {
@@ -110,6 +118,26 @@ export default {
           env.RATE_LIMIT_BACKEND !== 'redis'
         ) {
           throw new Error('Unsupported rate limit backend');
+        }
+        if (env.DEVICE_REGISTRY_BACKEND === 'cloudflare') {
+          const stub = env.DEVICES.get(
+            env.DEVICES.idFromName('device-registry-v1')
+          );
+          requestResource(DEVICE_REGISTRY_RESOURCE, () =>
+            createCloudflareDeviceRegistry((body) =>
+              stub.fetch('https://devices.internal/', {
+                method: 'POST',
+                signal: request.signal as unknown as WorkerAbortSignal,
+                headers: { 'content-type': 'application/json' },
+                body,
+              })
+            )
+          );
+        } else if (
+          env.DEVICE_REGISTRY_BACKEND &&
+          env.DEVICE_REGISTRY_BACKEND !== 'redis'
+        ) {
+          throw new Error('Unsupported device registry backend');
         }
         await ensureRedisReady();
         return handler.fetch(request, env, {

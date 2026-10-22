@@ -10,32 +10,23 @@
  * (not per-platform) — logout should silence push across all sessions.
  */
 
-import { authenticate, withErrorHandling } from '@feed/api';
+import { authenticate, getDeviceRegistry, withErrorHandling } from '@feed/api';
 import type { NextRequest } from 'next/server';
 import { NextResponse } from 'next/server';
-
-const DEVICE_TOKEN_PREFIX = 'push:device:';
-
-async function getRedis() {
-  const { getRedisClient } = await import('@feed/api');
-  return getRedisClient();
-}
 
 export const POST = withErrorHandling(async (request: NextRequest) => {
   const authUser = await authenticate(request);
   const userId = authUser.dbUserId ?? authUser.userId;
 
-  const redis = await getRedis();
-  if (!redis) {
+  const registry = getDeviceRegistry();
+  if (!registry) {
     return NextResponse.json(
       { error: 'Push notification service unavailable' },
       { status: 503 }
     );
   }
 
-  // Remove all device tokens for this user
-  const key = `${DEVICE_TOKEN_PREFIX}${userId}`;
-  await redis.del(key);
+  await registry.remove(userId);
 
   return NextResponse.json({ success: true });
 });
