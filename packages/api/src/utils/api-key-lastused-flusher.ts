@@ -21,10 +21,10 @@
  */
 
 import { randomBytes } from 'node:crypto';
-
 import { asSystem, eq, sql, userApiKeys } from '@feed/db';
 import { logger } from '@feed/shared';
 import { getRedisClient, isRedisAvailable } from '../redis';
+import { cloudflareApiKeyUsage } from './cloudflare-api-key-usage';
 
 /**
  * Redis keys for write-back cache.
@@ -128,6 +128,38 @@ const globalFlusherState = globalThis as typeof globalThis & {
 async function flushPendingUpdates(
   maxEntries: number = FLUSH_BATCH_SIZE
 ): Promise<number> {
+  const cloudflare = cloudflareApiKeyUsage();
+  if (cloudflare) {
+    try {
+      const entries = await cloudflare.batch(maxEntries);
+      if (entries.length === 0) return 0;
+      // Concurrent flushes are safe: database writes are monotonic, and the
+      // acknowledgement removes only the exact value committed by this batch.
+      await asSystem(async (dbClient) => {
+        await dbClient.transaction(async (tx) => {
+          for (const entry of entries)
+            await tx
+              .update(userApiKeys)
+              .set({
+                lastUsedAt: monotonicLastUsedAt(new Date(entry.timestamp)),
+              })
+              .where(eq(userApiKeys.id, entry.keyId));
+        });
+      });
+      await cloudflare.acknowledge(entries);
+      totalUpdatesFlushed += entries.length;
+      flushSuccessCount++;
+      return entries.length;
+    } catch (error) {
+      flushFailureCount++;
+      logger.error(
+        'Failed to flush Cloudflare API key usage; unacknowledged entries can be replayed',
+        { error },
+        'ApiKeyFlusher'
+      );
+      throw error;
+    }
+  }
   const redisClient = getRedisClient();
   if (!redisClient || !isRedisAvailable()) {
     logger.debug(

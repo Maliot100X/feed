@@ -23,6 +23,7 @@ import { runInBackground } from '@feed/shared/server/request-scope';
 import crypto from 'crypto';
 import { getRedisClient, isRedisAvailable } from '../redis';
 import { monotonicLastUsedAt } from './api-key-lastused-flusher';
+import { cloudflareApiKeyUsage } from './cloudflare-api-key-usage';
 
 // ============================================================================
 // Cache Configuration
@@ -157,6 +158,20 @@ function scheduleLastUsedUpdate(
   // WHY: Redis writes are fast (microseconds) vs DB writes (milliseconds). By writing to Redis
   // first, we don't block the authentication flow. The flush service will batch these updates
   // and write to DB periodically, reducing database load by 90%+ through batching.
+  const cloudflare = cloudflareApiKeyUsage();
+  if (cloudflare) {
+    runInBackground(
+      cloudflare.record({ keyId, timestamp: now }).catch((error) => {
+        logger.warn(
+          'Failed to buffer API key usage in Cloudflare',
+          { keyId, error },
+          'ApiKeyAuth'
+        );
+        fallbackToDirectDbWrite(keyId);
+      })
+    );
+    return;
+  }
   const redisClient = getRedisClient();
   if (redisClient && isRedisAvailable()) {
     const timestamp = new Date().toISOString();

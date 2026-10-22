@@ -1,4 +1,11 @@
 import {
+  API_KEY_USAGE_RESOURCE,
+  createCloudflareApiKeyUsage,
+} from '../../packages/api/src/utils/cloudflare-api-key-usage';
+
+export { FeedApiKeyUsage } from '../../packages/api/src/utils/cloudflare-api-key-usage-object';
+
+import {
   createCloudflarePaymentStorage,
   PAYMENT_STORAGE_RESOURCE,
 } from '../../packages/a2a/src/payments/cloudflare-backend';
@@ -46,6 +53,8 @@ interface FeedCloudflareEnv {
   DEVICES: DurableObjectNamespace;
   PAYMENT_STORAGE_BACKEND?: string;
   PAYMENTS: DurableObjectNamespace;
+  API_KEY_USAGE_BACKEND?: string;
+  API_KEY_USAGE: DurableObjectNamespace;
 }
 
 export default {
@@ -167,6 +176,25 @@ export default {
           env.PAYMENT_STORAGE_BACKEND !== 'redis'
         ) {
           throw new Error('Unsupported payment storage backend');
+        }
+        if (env.API_KEY_USAGE_BACKEND === 'cloudflare') {
+          const stub = env.API_KEY_USAGE.get(
+            env.API_KEY_USAGE.idFromName('api-key-usage-v1')
+          );
+          requestResource(API_KEY_USAGE_RESOURCE, () =>
+            createCloudflareApiKeyUsage((body) =>
+              stub.fetch('https://api-key-usage.internal/', {
+                method: 'POST',
+                headers: { 'content-type': 'application/json' },
+                body,
+              })
+            )
+          );
+        } else if (
+          env.API_KEY_USAGE_BACKEND &&
+          env.API_KEY_USAGE_BACKEND !== 'redis'
+        ) {
+          throw new Error('Unsupported API key usage backend');
         }
         await ensureRedisReady();
         return handler.fetch(request, env, {

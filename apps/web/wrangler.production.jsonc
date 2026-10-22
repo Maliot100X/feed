@@ -19,13 +19,18 @@
     "bindings": [
       { "name": "RATE_LIMITS", "class_name": "FeedRateLimits" },
       { "name": "DEVICES", "class_name": "FeedDevices" },
-      { "name": "PAYMENTS", "class_name": "FeedPayments" }
+      { "name": "PAYMENTS", "class_name": "FeedPayments" },
+      { "name": "API_KEY_USAGE", "class_name": "FeedApiKeyUsage" }
     ]
   },
   "migrations": [
     { "tag": "feed-rate-limits-v1", "new_sqlite_classes": ["FeedRateLimits"] },
     { "tag": "feed-devices-v1", "new_sqlite_classes": ["FeedDevices"] },
-    { "tag": "feed-payments-v1", "new_sqlite_classes": ["FeedPayments"] }
+    { "tag": "feed-payments-v1", "new_sqlite_classes": ["FeedPayments"] },
+    {
+      "tag": "feed-api-key-usage-v1",
+      "new_sqlite_classes": ["FeedApiKeyUsage"]
+    }
   ],
   "hyperdrive": [
     {
@@ -62,6 +67,7 @@
     "RATE_LIMIT_BACKEND": "redis",
     "DEVICE_REGISTRY_BACKEND": "redis",
     "PAYMENT_STORAGE_BACKEND": "redis",
+    "API_KEY_USAGE_BACKEND": "redis",
     "DEPLOYMENT_PLATFORM": "cloudflare",
     "DEPLOYMENT_ENV": "production",
     "NEXT_PUBLIC_APP_URL": "https://feed.fun",
