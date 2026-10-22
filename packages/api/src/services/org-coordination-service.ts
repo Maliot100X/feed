@@ -11,6 +11,7 @@
 
 import { logger } from '@feed/shared';
 import { getRedisClient } from '../redis/client';
+import { cloudflareOrgCoordination } from './cloudflare-org-coordination';
 
 const ORG_REACTIONS_PREFIX = 'org-reactions:';
 const REACTION_TTL_SECONDS = 43200; // 12 hours
@@ -42,6 +43,11 @@ export class OrgCoordinationService {
     orgId: string,
     reaction: OrgReaction
   ): Promise<boolean> {
+    const cloudflare = cloudflareOrgCoordination();
+    if (cloudflare) {
+      await cloudflare.record(orgId, reaction);
+      return true;
+    }
     const client = getRedisClient();
     if (!client) return false;
 
@@ -83,6 +89,25 @@ export class OrgCoordinationService {
     eventId: string,
     orgNames: Map<string, string>
   ): Promise<OrgCoordinationContext[]> {
+    const cloudflare = cloudflareOrgCoordination();
+    if (cloudflare) {
+      const contexts: OrgCoordinationContext[] = [];
+      for (const orgId of npcOrgIds) {
+        const recentReactions = await cloudflare.read(orgId, eventId);
+        const avoidAngles = recentReactions.map((reaction) => reaction.angle);
+        contexts.push({
+          orgId,
+          orgName: orgNames.get(orgId) ?? orgId,
+          recentReactions,
+          avoidAngles,
+          suggestedAngles: this.generateAlternativeAngles(
+            avoidAngles,
+            recentReactions.map((reaction) => reaction.sentiment)
+          ),
+        });
+      }
+      return contexts;
+    }
     const client = getRedisClient();
     if (!client) return [];
 
@@ -200,6 +225,9 @@ export class OrgCoordinationService {
     eventId: string,
     threshold: number = 3
   ): Promise<boolean> {
+    const cloudflare = cloudflareOrgCoordination();
+    if (cloudflare)
+      return (await cloudflare.count(orgId, eventId)) >= threshold;
     const client = getRedisClient();
     if (!client) return false;
 
@@ -216,6 +244,8 @@ export class OrgCoordinationService {
    * Get the count of reactions for an org-event pair.
    */
   async getReactionCount(orgId: string, eventId: string): Promise<number> {
+    const cloudflare = cloudflareOrgCoordination();
+    if (cloudflare) return cloudflare.count(orgId, eventId);
     const client = getRedisClient();
     if (!client) return 0;
 

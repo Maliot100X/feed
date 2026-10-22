@@ -20,7 +20,8 @@
       { "name": "RATE_LIMITS", "class_name": "FeedRateLimits" },
       { "name": "DEVICES", "class_name": "FeedDevices" },
       { "name": "PAYMENTS", "class_name": "FeedPayments" },
-      { "name": "API_KEY_USAGE", "class_name": "FeedApiKeyUsage" }
+      { "name": "API_KEY_USAGE", "class_name": "FeedApiKeyUsage" },
+      { "name": "ORG_COORDINATION", "class_name": "FeedOrgCoordination" }
     ]
   },
   "migrations": [
@@ -30,6 +31,10 @@
     {
       "tag": "feed-api-key-usage-v1",
       "new_sqlite_classes": ["FeedApiKeyUsage"]
+    },
+    {
+      "tag": "feed-org-coordination-v1",
+      "new_sqlite_classes": ["FeedOrgCoordination"]
     }
   ],
   "hyperdrive": [
@@ -68,6 +73,7 @@
     "DEVICE_REGISTRY_BACKEND": "redis",
     "PAYMENT_STORAGE_BACKEND": "redis",
     "API_KEY_USAGE_BACKEND": "redis",
+    "ORG_COORDINATION_BACKEND": "redis",
     "DEPLOYMENT_PLATFORM": "cloudflare",
     "DEPLOYMENT_ENV": "production",
     "NEXT_PUBLIC_APP_URL": "https://feed.fun",

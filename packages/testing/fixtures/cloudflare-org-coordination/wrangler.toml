@@ -1,0 +1,12 @@
+name = "feed-org-coordination-local-test"
+main = "worker.ts"
+compatibility_date = "2026-10-10"
+compatibility_flags = ["nodejs_compat"]
+
+[[durable_objects.bindings]]
+name = "ORG_COORDINATION"
+class_name = "FeedOrgCoordination"
+
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["FeedOrgCoordination"]

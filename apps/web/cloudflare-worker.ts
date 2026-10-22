@@ -1,4 +1,11 @@
 import {
+  createCloudflareOrgCoordination,
+  ORG_COORDINATION_RESOURCE,
+} from '../../packages/api/src/services/cloudflare-org-coordination';
+
+export { FeedOrgCoordination } from '../../packages/api/src/services/cloudflare-org-coordination-object';
+
+import {
   API_KEY_USAGE_RESOURCE,
   createCloudflareApiKeyUsage,
 } from '../../packages/api/src/utils/cloudflare-api-key-usage';
@@ -55,6 +62,8 @@ interface FeedCloudflareEnv {
   PAYMENTS: DurableObjectNamespace;
   API_KEY_USAGE_BACKEND?: string;
   API_KEY_USAGE: DurableObjectNamespace;
+  ORG_COORDINATION_BACKEND?: string;
+  ORG_COORDINATION: DurableObjectNamespace;
 }
 
 export default {
@@ -195,6 +204,26 @@ export default {
           env.API_KEY_USAGE_BACKEND !== 'redis'
         ) {
           throw new Error('Unsupported API key usage backend');
+        }
+        if (env.ORG_COORDINATION_BACKEND === 'cloudflare') {
+          const stub = env.ORG_COORDINATION.get(
+            env.ORG_COORDINATION.idFromName('org-coordination-v1')
+          );
+          requestResource(ORG_COORDINATION_RESOURCE, () =>
+            createCloudflareOrgCoordination((body) =>
+              stub.fetch('https://org-coordination.internal/', {
+                method: 'POST',
+                signal: request.signal as unknown as WorkerAbortSignal,
+                headers: { 'content-type': 'application/json' },
+                body,
+              })
+            )
+          );
+        } else if (
+          env.ORG_COORDINATION_BACKEND &&
+          env.ORG_COORDINATION_BACKEND !== 'redis'
+        ) {
+          throw new Error('Unsupported org coordination backend');
         }
         await ensureRedisReady();
         return handler.fetch(request, env, {
