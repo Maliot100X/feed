@@ -1,4 +1,11 @@
 import {
+  ALERT_RESERVATIONS_RESOURCE,
+  createCloudflareAlertReservations,
+} from '../../packages/api/src/services/cloudflare-alert-reservations';
+
+export { FeedAlertReservations } from '../../packages/api/src/services/cloudflare-alert-reservations-object';
+
+import {
   createCloudflareOrgCoordination,
   ORG_COORDINATION_RESOURCE,
 } from '../../packages/api/src/services/cloudflare-org-coordination';
@@ -64,6 +71,8 @@ interface FeedCloudflareEnv {
   API_KEY_USAGE: DurableObjectNamespace;
   ORG_COORDINATION_BACKEND?: string;
   ORG_COORDINATION: DurableObjectNamespace;
+  ALERT_RESERVATIONS_BACKEND?: string;
+  ALERT_RESERVATIONS: DurableObjectNamespace;
 }
 
 export default {
@@ -224,6 +233,25 @@ export default {
           env.ORG_COORDINATION_BACKEND !== 'redis'
         ) {
           throw new Error('Unsupported org coordination backend');
+        }
+        if (env.ALERT_RESERVATIONS_BACKEND === 'cloudflare') {
+          const stub = env.ALERT_RESERVATIONS.get(
+            env.ALERT_RESERVATIONS.idFromName('alert-reservations-v1')
+          );
+          requestResource(ALERT_RESERVATIONS_RESOURCE, () =>
+            createCloudflareAlertReservations((body) =>
+              stub.fetch('https://alerts.internal/', {
+                method: 'POST',
+                headers: { 'content-type': 'application/json' },
+                body,
+              })
+            )
+          );
+        } else if (
+          env.ALERT_RESERVATIONS_BACKEND &&
+          env.ALERT_RESERVATIONS_BACKEND !== 'redis'
+        ) {
+          throw new Error('Unsupported alert reservations backend');
         }
         await ensureRedisReady();
         return handler.fetch(request, env, {

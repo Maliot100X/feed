@@ -15,6 +15,7 @@ import type { CronJobStats } from '../monitoring/cron-metrics';
 import { cronMetrics } from '../monitoring/cron-metrics';
 import { getRedisClient, isRedisAvailable } from '../redis/client';
 import { getDeploymentEnvironment } from '../utils/environment';
+import { cloudflareAlertReservations } from './cloudflare-alert-reservations';
 
 const GAME_TICK_WARNING_MS = 5 * 60 * 1000;
 const GAME_TICK_CRITICAL_MS = 10 * 60 * 1000;
@@ -1093,13 +1094,16 @@ function getDiscordWebhookUrl(): string | null {
   return value && value.length > 0 ? value : null;
 }
 
-async function reserveAlertWindow(fingerprint: string): Promise<boolean> {
+async function reserveAlertWindow(fingerprint: string): Promise<string | null> {
+  const cloudflare = cloudflareAlertReservations();
+  if (cloudflare)
+    return cloudflare.reserve(fingerprint, ALERT_THROTTLE_SECONDS);
   const nowMs = Date.now();
   const expiresAt = nowMs + ALERT_THROTTLE_SECONDS * 1000;
   cleanupExpiredAlertReservations(nowMs);
 
   if ((inMemoryAlertReservations.get(fingerprint) ?? 0) > nowMs) {
-    return false;
+    return null;
   }
 
   const redis = getRedisClient();
@@ -1115,7 +1119,7 @@ async function reserveAlertWindow(fingerprint: string): Promise<boolean> {
       );
       if (!wasSet) {
         inMemoryAlertReservations.set(fingerprint, expiresAt);
-        return false;
+        return null;
       }
     } catch (error) {
       logger.warn(
@@ -1127,10 +1131,18 @@ async function reserveAlertWindow(fingerprint: string): Promise<boolean> {
   }
 
   inMemoryAlertReservations.set(fingerprint, expiresAt);
-  return true;
+  return 'legacy';
 }
 
-async function releaseAlertWindow(fingerprint: string): Promise<void> {
+async function releaseAlertWindow(
+  fingerprint: string,
+  token: string
+): Promise<void> {
+  const cloudflare = cloudflareAlertReservations();
+  if (cloudflare) {
+    await cloudflare.release(fingerprint, token);
+    return;
+  }
   inMemoryAlertReservations.delete(fingerprint);
   const redis = getRedisClient();
   if (!redis) {
@@ -1210,7 +1222,7 @@ export async function sendDiscordSystemAlertIfNeeded(
     });
 
     if (!response.ok) {
-      await releaseAlertWindow(fingerprint);
+      await releaseAlertWindow(fingerprint, reserved);
       logger.error(
         'Discord system alert failed',
         {
@@ -1224,7 +1236,7 @@ export async function sendDiscordSystemAlertIfNeeded(
 
     return { sent: true, reason: 'sent' };
   } catch (error) {
-    await releaseAlertWindow(fingerprint);
+    await releaseAlertWindow(fingerprint, reserved);
     logger.error(
       'Discord system alert threw',
       { error: error instanceof Error ? error.message : String(error) },

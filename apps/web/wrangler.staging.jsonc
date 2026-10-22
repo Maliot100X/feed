@@ -21,7 +21,8 @@
       { "name": "DEVICES", "class_name": "FeedDevices" },
       { "name": "PAYMENTS", "class_name": "FeedPayments" },
       { "name": "API_KEY_USAGE", "class_name": "FeedApiKeyUsage" },
-      { "name": "ORG_COORDINATION", "class_name": "FeedOrgCoordination" }
+      { "name": "ORG_COORDINATION", "class_name": "FeedOrgCoordination" },
+      { "name": "ALERT_RESERVATIONS", "class_name": "FeedAlertReservations" }
     ]
   },
   "migrations": [
@@ -35,6 +36,10 @@
     {
       "tag": "feed-org-coordination-v1",
       "new_sqlite_classes": ["FeedOrgCoordination"]
+    },
+    {
+      "tag": "feed-alert-reservations-v1",
+      "new_sqlite_classes": ["FeedAlertReservations"]
     }
   ],
   "hyperdrive": [
@@ -74,6 +79,7 @@
     "PAYMENT_STORAGE_BACKEND": "redis",
     "API_KEY_USAGE_BACKEND": "redis",
     "ORG_COORDINATION_BACKEND": "redis",
+    "ALERT_RESERVATIONS_BACKEND": "redis",
     "DEPLOYMENT_PLATFORM": "cloudflare",
     "DEPLOYMENT_ENV": "staging",
     "NEXT_PUBLIC_APP_URL": "https://staging.feed.fun",
