@@ -1,3 +1,4 @@
+import { cloudflareStreams } from './cloudflare-streams';
 /**
  * Redis Streams Support
  *
@@ -32,6 +33,8 @@ export async function streamAdd(
   payload: Record<string, JsonValue>,
   opts?: { maxlen?: number }
 ): Promise<string | null> {
+  const cloudflare = cloudflareStreams();
+  if (cloudflare) return cloudflare.add(stream, payload, opts?.maxlen);
   const client = getRedisClient();
   if (!client) {
     logger.warn(
@@ -122,8 +125,18 @@ const extractPayload = (fields: unknown[]): Record<string, unknown> | null => {
 export async function streamRead(
   streams: string[],
   ids: string[],
-  opts?: { count?: number; block?: number; client?: RedisInstance }
+  opts?: {
+    count?: number;
+    block?: number;
+    client?: RedisInstance;
+    signal?: AbortSignal;
+  }
 ): Promise<StreamMessage[]> {
+  const cloudflare = cloudflareStreams();
+  if (cloudflare) {
+    if (streams.length === 0 && ids.length === 0) return [];
+    return cloudflare.read(streams, ids, opts);
+  }
   // Use provided client or fall back to getRedisClient()
   const client = opts?.client ?? getRedisClient();
   if (!client || streams.length === 0 || ids.length === 0) {

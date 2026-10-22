@@ -170,7 +170,10 @@ describeTests('ParodyHeadlineGenerator', () => {
     const parody = parodies[0];
     expect(parody?.parodyTitle).toBeDefined();
     expect(parody?.originalTitle).toBe('Elon Musk announces new Tesla product');
-  });
+    // Two quality-gate attempts can each make three 30-second embedding
+    // requests (in parallel per text pair). Include their retry and DB budget.
+    // This proves persistence, not successful provider inference.
+  }, 210_000);
 
   test('should get recent parodies', async () => {
     if (!dbAvailable) {

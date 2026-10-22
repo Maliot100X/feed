@@ -18,6 +18,7 @@ const paramsSchema = z
   })
   .strict();
 const schema = z.discriminatedUnion('operation', [
+  z.object({ operation: z.literal('health') }).strict(),
   z
     .object({
       operation: z.literal('save'),
@@ -119,6 +120,13 @@ export class FeedTasks {
     if (!parsed.success)
       return new Response('Invalid task operation', { status: 400 });
     const input = parsed.data;
+    if (input.operation === 'health') {
+      this.ctx.storage.sql.exec('SELECT 1 FROM tasks LIMIT 1').toArray();
+      return Response.json(
+        { healthy: true },
+        { headers: { 'cache-control': 'no-store' } }
+      );
+    }
     let saved: Task | undefined;
     if (input.operation === 'save') {
       let value: unknown;

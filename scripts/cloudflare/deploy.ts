@@ -1,8 +1,10 @@
 #!/usr/bin/env bun
 import { spawnSync } from 'node:child_process';
-import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
+import { z } from 'zod';
+import { validateSharedStateDeployment } from './shared-state';
 
 const environment = process.argv[2];
 if (environment !== 'staging' && environment !== 'production')
@@ -42,10 +44,17 @@ for (const name of [
   if (!value) throw new Error(`Missing runtime secret: ${name}`);
   runtime[name] = value;
 }
-if (!runtime.REDIS_URL)
-  throw new Error(
-    'REDIS_URL is required for distributed caching and realtime delivery'
+const appConfig = z
+  .object({ vars: z.record(z.string(), z.string()) })
+  .parse(
+    Bun.JSONC.parse(
+      await readFile(
+        join(root, 'apps/web', `wrangler.${environment}.jsonc`),
+        'utf8'
+      )
+    )
   );
+validateSharedStateDeployment(appConfig.vars, runtime);
 if (new URL(runtime.STEWARD_API_URL!).protocol !== 'https:')
   throw new Error('STEWARD_API_URL must use HTTPS');
 const sha = process.env.COMMIT_SHA;

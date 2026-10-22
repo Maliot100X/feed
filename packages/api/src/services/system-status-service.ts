@@ -14,6 +14,10 @@ import { logger } from '@feed/shared';
 import type { CronJobStats } from '../monitoring/cron-metrics';
 import { cronMetrics } from '../monitoring/cron-metrics';
 import { getRedisClient, isRedisAvailable } from '../redis/client';
+import {
+  getSharedStateHealth,
+  type SharedStateHealth,
+} from '../redis/shared-state-health';
 import { getDeploymentEnvironment } from '../utils/environment';
 import { cloudflareAlertReservations } from './cloudflare-alert-reservations';
 
@@ -158,6 +162,7 @@ export interface SystemStatusSubsystem {
   key:
     | 'database'
     | 'redis'
+    | 'shared-state'
     | 'game-engine'
     | 'cron'
     | 'realtime'
@@ -190,6 +195,7 @@ export interface SystemStatusSnapshot {
   health: {
     database: boolean;
     redis: boolean;
+    sharedState: SharedStateHealth;
     overall: boolean;
     timestamp: string;
   };
@@ -241,6 +247,7 @@ export interface BuildSystemStatusInput {
   generatedAt?: Date;
   databaseHealthy: boolean;
   redisHealthy: boolean;
+  sharedState?: SharedStateHealth;
   game: SystemGameSource | null;
   activityMetrics: SystemActivityMetrics;
   cron: {
@@ -609,6 +616,16 @@ export function buildSystemStatusSnapshot(
   input: BuildSystemStatusInput
 ): SystemStatusSnapshot {
   const generatedAt = input.generatedAt ?? new Date();
+  const sharedState = input.sharedState ?? {
+    healthy: input.redisHealthy,
+    backends: [
+      {
+        name: 'redis',
+        provider: 'redis' as const,
+        healthy: input.redisHealthy,
+      },
+    ],
+  };
 
   const subsystems: SystemStatusSubsystem[] = [
     {
@@ -625,13 +642,16 @@ export function buildSystemStatusSnapshot(
       },
     },
     {
-      key: 'redis',
-      label: 'Redis',
-      status: input.redisHealthy ? 'healthy' : 'warning',
-      summary: input.redisHealthy ? 'Available' : 'Unavailable',
-      details: input.redisHealthy
-        ? 'Redis-backed cache and coordination are available.'
-        : 'Redis is unavailable; fallbacks may reduce observability quality.',
+      key: 'shared-state',
+      label: 'Shared state',
+      status: sharedState.healthy ? 'healthy' : 'warning',
+      summary: sharedState.healthy ? 'Available' : 'Unavailable',
+      details: sharedState.backends
+        .map(
+          (backend) =>
+            `${backend.name} (${backend.provider}): ${backend.healthy ? 'available' : 'unavailable'}`
+        )
+        .join('; '),
     },
     getGameEngineSubsystem(input, generatedAt),
     getCronSubsystem(input),
@@ -727,7 +747,8 @@ export function buildSystemStatusSnapshot(
     health: {
       database: input.databaseHealthy,
       redis: input.redisHealthy,
-      overall: input.databaseHealthy && input.redisHealthy,
+      sharedState,
+      overall: input.databaseHealthy && sharedState.healthy,
       timestamp: generatedAt.toISOString(),
     },
     game: input.game
@@ -786,6 +807,7 @@ export async function getSystemStatusSnapshot(): Promise<SystemStatusSnapshot> {
     Boolean(databaseHealthResult[0].value);
 
   const redisHealthy = isRedisAvailable();
+  const sharedState = await getSharedStateHealth(redisHealthy);
 
   const inMemoryCronDashboard = cronMetrics.getDashboardMetrics();
 
@@ -837,6 +859,7 @@ export async function getSystemStatusSnapshot(): Promise<SystemStatusSnapshot> {
       generatedAt,
       databaseHealthy,
       redisHealthy,
+      sharedState,
       game: null,
       activityMetrics: {
         lastHour: { newUsers: 0, newPosts: 0 },
@@ -984,6 +1007,7 @@ export async function getSystemStatusSnapshot(): Promise<SystemStatusSnapshot> {
     generatedAt,
     databaseHealthy,
     redisHealthy,
+    sharedState,
     game: currentGame
       ? {
           id: currentGame.id,

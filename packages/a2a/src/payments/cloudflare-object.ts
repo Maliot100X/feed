@@ -8,6 +8,7 @@ const ttl = z
   .positive()
   .max(90 * 24 * 60 * 60);
 const schema = z.discriminatedUnion('operation', [
+  z.object({ operation: z.literal('health') }).strict(),
   z.object({ operation: z.literal('get'), key }).strict(),
   z.object({ operation: z.literal('del'), key }).strict(),
   z
@@ -67,6 +68,15 @@ export class FeedPayments {
     if (!parsed.success)
       return new Response('Invalid payment storage operation', { status: 400 });
     const input = parsed.data;
+    if (input.operation === 'health') {
+      this.ctx.storage.sql
+        .exec('SELECT 1 FROM payment_state LIMIT 1')
+        .toArray();
+      return Response.json(
+        { healthy: true },
+        { headers: { 'cache-control': 'no-store' } }
+      );
+    }
     // Schedule cleanup before committing a new expiry. A failed alarm write
     // must reject the request instead of acknowledging partially stored state.
     if (input.operation === 'set' && input.ttl !== undefined) {

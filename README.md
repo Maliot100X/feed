@@ -403,8 +403,11 @@ as a repository variable. In each environment set:
   needs Workers Routes edit and Zone read for `feed.fun`.
 - `CRON_SECRET`: distinct random value per environment.
 - `CLOUDFLARE_RUNTIME_SECRETS`: JSON string map of runtime credentials. Required:
-  `REDIS_URL`, `STEWARD_API_URL`, `STEWARD_JWT_SECRET`, `STEWARD_TENANT_API_KEY`,
+  `STEWARD_API_URL`, `STEWARD_JWT_SECRET`, `STEWARD_TENANT_API_KEY`,
   `STEWARD_PLATFORM_KEYS`, `AGENT_ENCRYPTION_KEY`.
+  `REDIS_URL` is required while any shared-state backend selects Redis. Backend
+  selectors belong in the environment-specific Wrangler configuration, not the
+  runtime secret map. All nine must select Cloudflare before omitting Redis.
   Include existing application signing/encryption secrets and any enabled payment,
   email, RPC, and social integration settings. Preserve encryption keys for existing
   data; generating replacement keys can make that data unreadable. Legacy agent

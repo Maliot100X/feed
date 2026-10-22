@@ -236,3 +236,29 @@ describe('system-status-service', () => {
     expect(llm?.metric?.value).toBe('n/a');
   });
 });
+
+test('healthy Cloudflare shared state does not require Redis for overall health', () => {
+  const input = createBaseInput();
+  input.redisHealthy = false;
+  input.sharedState = {
+    healthy: true,
+    backends: [{ name: 'STREAMS', provider: 'cloudflare', healthy: true }],
+  };
+  const result = buildSystemStatusSnapshot(input);
+  expect(result.health.redis).toBe(false);
+  expect(result.health.overall).toBe(true);
+  expect(
+    result.subsystems.find((subsystem) => subsystem.key === 'shared-state')
+      ?.status
+  ).toBe('healthy');
+  input.sharedState = {
+    healthy: false,
+    backends: [{ name: 'STREAMS', provider: 'cloudflare', healthy: false }],
+  };
+  const failed = buildSystemStatusSnapshot(input);
+  expect(failed.health.overall).toBe(false);
+  expect(
+    failed.subsystems.find((subsystem) => subsystem.key === 'shared-state')
+      ?.details
+  ).toContain('unavailable');
+});

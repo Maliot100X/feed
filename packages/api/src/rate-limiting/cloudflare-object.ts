@@ -2,6 +2,7 @@ import type { DurableObjectState } from '@cloudflare/workers-types';
 import { z } from 'zod';
 
 const inputSchema = z.discriminatedUnion('operation', [
+  z.object({ operation: z.literal('health') }).strict(),
   z.object({
     operation: z.literal('check'),
     userId: z.string().min(1),
@@ -76,6 +77,13 @@ export class FeedRateLimits {
     if (!parsed.success)
       return new Response('Invalid rate limit operation', { status: 400 });
     const input = parsed.data;
+    if (input.operation === 'health') {
+      this.ctx.storage.sql.exec('SELECT 1 FROM rate_keys LIMIT 1').toArray();
+      return Response.json(
+        { healthy: true },
+        { headers: { 'cache-control': 'no-store' } }
+      );
+    }
     const now = Date.now();
     if (
       (input.operation === 'check' || input.operation === 'status') &&

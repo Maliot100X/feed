@@ -1,4 +1,11 @@
 import {
+  createCloudflareStreams,
+  STREAMS_RESOURCE,
+} from '../../packages/api/src/redis/cloudflare-streams';
+
+export { FeedStreams } from '../../packages/api/src/redis/cloudflare-streams-object';
+
+import {
   CACHE_RESOURCE,
   createCloudflareCache,
 } from '../../packages/api/src/cache/cloudflare-cache-backend';
@@ -64,7 +71,18 @@ import {
   DEVICE_REGISTRY_RESOURCE,
 } from '../../packages/api/src/notifications/device-registry';
 
-import { ensureRedisReady } from '../../packages/api/src/redis/client';
+import {
+  ensureRedisReady,
+  getRedisClient,
+} from '../../packages/api/src/redis/client';
+import {
+  checkCloudflareState,
+  createSharedStateHealth,
+  requiresRedis,
+  SHARED_STATE_HEALTH_RESOURCE,
+  type SharedStateProbe,
+  selectedStateBackends,
+} from '../../packages/api/src/redis/shared-state-health';
 // OpenNext generates this module during build.
 // @ts-ignore generated module
 import handler from './.open-next/worker.js';
@@ -91,6 +109,8 @@ interface FeedCloudflareEnv {
   TASKS: DurableObjectNamespace;
   CACHE_BACKEND?: string;
   CACHE: DurableObjectNamespace;
+  STREAMS_BACKEND?: string;
+  STREAMS: DurableObjectNamespace;
 }
 
 export default {
@@ -303,7 +323,53 @@ export default {
         } else if (env.CACHE_BACKEND && env.CACHE_BACKEND !== 'redis') {
           throw new Error('Unsupported cache backend');
         }
-        await ensureRedisReady();
+        if (env.STREAMS_BACKEND === 'cloudflare') {
+          const stub = env.STREAMS.get(env.STREAMS.idFromName('streams-v1'));
+          requestResource(STREAMS_RESOURCE, () =>
+            createCloudflareStreams((body, signal) =>
+              stub.fetch('https://streams.internal/', {
+                method: 'POST',
+                signal: signal as unknown as WorkerAbortSignal | undefined,
+                headers: { 'content-type': 'application/json' },
+                body,
+              })
+            )
+          );
+        } else if (env.STREAMS_BACKEND && env.STREAMS_BACKEND !== 'redis') {
+          throw new Error('Unsupported streams backend');
+        }
+        const probes: SharedStateProbe[] = selectedStateBackends(env)
+          .filter((backend) => backend.provider === 'cloudflare')
+          .map((backend) => ({
+            name: backend.binding,
+            provider: 'cloudflare',
+            async check() {
+              const namespace = env[backend.binding];
+              const response = await namespace
+                .get(namespace.idFromName(backend.object))
+                .fetch('https://state.internal/', {
+                  method: 'POST',
+                  body: JSON.stringify({ operation: 'health' }),
+                  signal: AbortSignal.timeout(
+                    5000
+                  ) as unknown as WorkerAbortSignal,
+                });
+              return checkCloudflareState(response);
+            },
+          }));
+        if (requiresRedis(env)) {
+          await ensureRedisReady();
+          probes.push({
+            name: 'redis',
+            provider: 'redis',
+            async check() {
+              return (await getRedisClient()?.ping()) === 'PONG';
+            },
+          });
+        }
+        requestResource(SHARED_STATE_HEALTH_RESOURCE, () =>
+          createSharedStateHealth(probes)
+        );
         return handler.fetch(request, env, {
           waitUntil,
           passThroughOnException: () => ctx.passThroughOnException(),

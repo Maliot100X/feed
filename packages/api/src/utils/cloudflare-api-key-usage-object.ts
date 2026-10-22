@@ -3,6 +3,7 @@ import { z } from 'zod';
 import { type UsageEntry, usageEntrySchema } from './cloudflare-api-key-usage';
 
 const schema = z.discriminatedUnion('operation', [
+  z.object({ operation: z.literal('health') }).strict(),
   z
     .object({ operation: z.literal('record'), entry: usageEntrySchema })
     .strict(),
@@ -44,6 +45,15 @@ export class FeedApiKeyUsage {
     if (!parsed.success)
       return new Response('Invalid usage operation', { status: 400 });
     const input = parsed.data;
+    if (input.operation === 'health') {
+      this.ctx.storage.sql
+        .exec('SELECT 1 FROM api_key_usage LIMIT 1')
+        .toArray();
+      return Response.json(
+        { healthy: true },
+        { headers: { 'cache-control': 'no-store' } }
+      );
+    }
     const result = this.ctx.storage.transactionSync(() => {
       if (input.operation === 'batch')
         return this.ctx.storage.sql

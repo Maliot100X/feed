@@ -4,6 +4,7 @@ import { orgReactionSchema } from './cloudflare-org-coordination';
 
 const pair = { orgId: z.string().min(1), eventId: z.string().min(1) };
 const schema = z.discriminatedUnion('operation', [
+  z.object({ operation: z.literal('health') }).strict(),
   z
     .object({ operation: z.literal('record'), ...pair, reaction: z.string() })
     .strict(),
@@ -60,6 +61,13 @@ export class FeedOrgCoordination {
     if (!parsed.success)
       return new Response('Invalid coordination operation', { status: 400 });
     const input = parsed.data;
+    if (input.operation === 'health') {
+      this.ctx.storage.sql.exec('SELECT 1 FROM org_events LIMIT 1').toArray();
+      return Response.json(
+        { healthy: true },
+        { headers: { 'cache-control': 'no-store' } }
+      );
+    }
     let timestamp = 0;
     if (input.operation === 'record') {
       let reaction: unknown;

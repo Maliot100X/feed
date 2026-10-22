@@ -3,6 +3,7 @@ import { z } from 'zod';
 import { cacheGlobToRegExp } from './cache-pattern';
 
 const schema = z.discriminatedUnion('operation', [
+  z.object({ operation: z.literal('health') }).strict(),
   z.object({ operation: z.literal('get'), key: z.string() }).strict(),
   z.object({ operation: z.literal('ttl'), key: z.string() }).strict(),
   z
@@ -91,6 +92,15 @@ export class FeedCache {
     if (!parsed.success)
       return new Response('Invalid cache operation', { status: 400 });
     const input = parsed.data;
+    if (input.operation === 'health') {
+      this.ctx.storage.sql
+        .exec('SELECT 1 FROM cache_entries LIMIT 1')
+        .toArray();
+      return Response.json(
+        { healthy: true },
+        { headers: { 'cache-control': 'no-store' } }
+      );
+    }
     if (input.operation === 'set') {
       const expires = Date.now() + input.ttl * 1000;
       if (!Number.isSafeInteger(expires))

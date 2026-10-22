@@ -3,7 +3,12 @@
   "name": "feed-web-production",
   "main": "cloudflare-worker.ts",
   "compatibility_date": "2026-10-10",
-  "compatibility_flags": ["nodejs_compat", "global_fetch_strictly_public"],
+  "compatibility_flags": [
+    "nodejs_compat",
+    "global_fetch_strictly_public",
+    "enable_request_signal",
+    "request_signal_passthrough"
+  ],
   "workers_dev": true,
   "assets": {
     "directory": ".open-next/assets",
@@ -24,7 +29,8 @@
       { "name": "ORG_COORDINATION", "class_name": "FeedOrgCoordination" },
       { "name": "ALERT_RESERVATIONS", "class_name": "FeedAlertReservations" },
       { "name": "TASKS", "class_name": "FeedTasks" },
-      { "name": "CACHE", "class_name": "FeedCache" }
+      { "name": "CACHE", "class_name": "FeedCache" },
+      { "name": "STREAMS", "class_name": "FeedStreams" }
     ]
   },
   "migrations": [
@@ -44,7 +50,8 @@
       "new_sqlite_classes": ["FeedAlertReservations"]
     },
     { "tag": "feed-tasks-v1", "new_sqlite_classes": ["FeedTasks"] },
-    { "tag": "feed-cache-v1", "new_sqlite_classes": ["FeedCache"] }
+    { "tag": "feed-cache-v1", "new_sqlite_classes": ["FeedCache"] },
+    { "tag": "feed-streams-v1", "new_sqlite_classes": ["FeedStreams"] }
   ],
   "hyperdrive": [
     {
@@ -86,6 +93,7 @@
     "ALERT_RESERVATIONS_BACKEND": "redis",
     "TASK_STORAGE_BACKEND": "redis",
     "CACHE_BACKEND": "redis",
+    "STREAMS_BACKEND": "redis",
     "DEPLOYMENT_PLATFORM": "cloudflare",
     "DEPLOYMENT_ENV": "production",
     "NEXT_PUBLIC_APP_URL": "https://feed.fun",

@@ -6,6 +6,7 @@ const identity = {
   token: z.string().uuid(),
 };
 const schema = z.discriminatedUnion('operation', [
+  z.object({ operation: z.literal('health') }).strict(),
   z
     .object({
       operation: z.literal('reserve'),
@@ -52,6 +53,15 @@ export class FeedAlertReservations {
     if (!parsed.success)
       return new Response('Invalid alert operation', { status: 400 });
     const input = parsed.data;
+    if (input.operation === 'health') {
+      this.ctx.storage.sql
+        .exec('SELECT 1 FROM alert_reservations LIMIT 1')
+        .toArray();
+      return Response.json(
+        { healthy: true },
+        { headers: { 'cache-control': 'no-store' } }
+      );
+    }
     if (input.operation === 'reserve') {
       const next = Date.now() + input.ttlSeconds * 1000;
       const alarm = await this.ctx.storage.getAlarm();
