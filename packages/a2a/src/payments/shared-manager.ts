@@ -1,14 +1,16 @@
 /**
- * Shared, Redis-backed X402 manager.
+ * Shared X402 manager with request-scoped durable storage.
  *
  * Payment requests are created and verified in different requests (and often
  * different isolates/instances), so every caller must use managers backed by
- * the same durable store. Without Redis the manager falls back to
- * process-local state, which only works within a single process.
+ * the same durable store. Cloudflare mode requires its private storage binding.
+ * The legacy Redis path retains its existing behavior while cutover is pending.
  */
 
 import { ensureRedisReady, type RedisInstance } from '@feed/api';
 import { getCurrentRpcUrl } from '@feed/shared';
+import { getRequestResource } from '@feed/shared/server/request-scope';
+import { PAYMENT_STORAGE_RESOURCE } from './cloudflare-backend';
 import { type RedisClient, X402Manager } from './x402-manager';
 
 /** Payment requests stay valid for 15 minutes. */
@@ -34,12 +36,25 @@ export function ioredisToX402Redis(redis: RedisInstance): RedisClient {
 }
 
 /**
- * Create an X402 manager bound to the current Redis client. A new manager is
- * created per call because Redis clients can be request-scoped (Workers); all
- * payment state lives in Redis, so managers created in different requests
- * observe the same requests and transaction claims.
+ * Create an X402 manager bound to the current shared storage backend. A new
+ * manager is created per request so separate isolates observe the same durable
+ * payment requests and transaction claims.
  */
 export async function getSharedX402Manager(): Promise<X402Manager> {
+  const cloudflare = getRequestResource<RedisClient>(PAYMENT_STORAGE_RESOURCE);
+  if (cloudflare)
+    return new X402Manager({
+      rpcUrl: getCurrentRpcUrl(),
+      paymentTimeout: PAYMENT_TIMEOUT_MS,
+      redis: cloudflare,
+    });
+  if (process.env.PAYMENT_STORAGE_BACKEND === 'cloudflare')
+    throw new Error('Cloudflare payment storage binding unavailable');
+  if (
+    process.env.PAYMENT_STORAGE_BACKEND &&
+    process.env.PAYMENT_STORAGE_BACKEND !== 'redis'
+  )
+    throw new Error('Unsupported payment storage backend');
   const redis = await ensureRedisReady();
   return new X402Manager({
     rpcUrl: getCurrentRpcUrl(),

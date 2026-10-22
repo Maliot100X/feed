@@ -1,0 +1,12 @@
+name = "feed-payments-local-test"
+main = "worker.ts"
+compatibility_date = "2026-10-10"
+compatibility_flags = ["nodejs_compat"]
+
+[[durable_objects.bindings]]
+name = "PAYMENTS"
+class_name = "FeedPayments"
+
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["FeedPayments"]

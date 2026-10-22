@@ -1,3 +1,10 @@
+import {
+  createCloudflarePaymentStorage,
+  PAYMENT_STORAGE_RESOURCE,
+} from '../../packages/a2a/src/payments/cloudflare-backend';
+
+export { FeedPayments } from '../../packages/a2a/src/payments/cloudflare-object';
+
 import type {
   DurableObjectNamespace,
   ExecutionContext,
@@ -37,6 +44,8 @@ interface FeedCloudflareEnv {
   RATE_LIMITS: DurableObjectNamespace;
   DEVICE_REGISTRY_BACKEND?: string;
   DEVICES: DurableObjectNamespace;
+  PAYMENT_STORAGE_BACKEND?: string;
+  PAYMENTS: DurableObjectNamespace;
 }
 
 export default {
@@ -138,6 +147,26 @@ export default {
           env.DEVICE_REGISTRY_BACKEND !== 'redis'
         ) {
           throw new Error('Unsupported device registry backend');
+        }
+        if (env.PAYMENT_STORAGE_BACKEND === 'cloudflare') {
+          const stub = env.PAYMENTS.get(
+            env.PAYMENTS.idFromName('payment-storage-v1')
+          );
+          requestResource(PAYMENT_STORAGE_RESOURCE, () =>
+            createCloudflarePaymentStorage((body) =>
+              stub.fetch('https://payments.internal/', {
+                method: 'POST',
+                signal: request.signal as unknown as WorkerAbortSignal,
+                headers: { 'content-type': 'application/json' },
+                body,
+              })
+            )
+          );
+        } else if (
+          env.PAYMENT_STORAGE_BACKEND &&
+          env.PAYMENT_STORAGE_BACKEND !== 'redis'
+        ) {
+          throw new Error('Unsupported payment storage backend');
         }
         await ensureRedisReady();
         return handler.fetch(request, env, {
