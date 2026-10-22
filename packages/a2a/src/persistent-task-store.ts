@@ -1,8 +1,9 @@
 /**
  * Persistent Task Store
  *
- * Extends ExtendedTaskStore with Redis-backed persistence so tasks survive
- * restarts and are visible across instances (e.g. Cloudflare Worker isolates).
+ * Extends ExtendedTaskStore with shared persistence across instances.
+ * Cloudflare mode uses its private durable binding for all storage operations
+ * and surfaces failures. The default Redis path retains the behavior below.
  *
  * - Writes go to the local store and, when Redis is available, to Redis.
  * - Reads prefer Redis when available (another instance may have updated the
@@ -16,7 +17,7 @@
 import type { Task } from '@a2a-js/sdk';
 import { getRedisClient, isRedisAvailable } from '@feed/api';
 import { logger } from '@feed/shared';
-import { z } from 'zod';
+import { cloudflareTaskStore } from './cloudflare-task-backend';
 import {
   ExtendedTaskStore,
   type ListTasksParams,
@@ -25,45 +26,7 @@ import {
   resolvePage,
   taskTimestamp,
 } from './extended-task-store';
-
-const TASK_STATES = [
-  'submitted',
-  'working',
-  'input-required',
-  'completed',
-  'canceled',
-  'failed',
-  'rejected',
-  'auth-required',
-  'unknown',
-] as const;
-
-/**
- * Zod schema for TaskStatus validation
- */
-const TaskStatusSchema = z.object({
-  state: z.enum(TASK_STATES),
-  timestamp: z.string().optional(),
-  message: z.record(z.string(), z.unknown()).optional(),
-});
-
-/**
- * Zod schema for full Task validation
- * Validates all required properties according to the A2A SDK Task interface
- */
-const TaskSchema = z.object({
-  id: z.string(),
-  contextId: z.string(),
-  kind: z.literal('task'),
-  status: TaskStatusSchema,
-  artifacts: z.array(z.record(z.string(), z.unknown())).optional(),
-  history: z.array(z.record(z.string(), z.unknown())).optional(),
-  metadata: z.record(z.string(), z.unknown()).optional(),
-});
-
-function isValidTask(obj: unknown): obj is Task {
-  return TaskSchema.safeParse(obj).success;
-}
+import { isValidTask, TASK_STATES } from './task-schema';
 
 /**
  * Parse a stored task. Accepts the current single-encoded JSON and the legacy
@@ -128,7 +91,7 @@ function statusIndexKey(status: string): string {
 }
 
 /**
- * Persistent task store with Redis backing
+ * Persistent task store with request-scoped Cloudflare or Redis backing
  */
 export class PersistentTaskStore extends ExtendedTaskStore {
   private lastCleanup = Date.now();
@@ -160,6 +123,11 @@ export class PersistentTaskStore extends ExtendedTaskStore {
    * Save task locally and, when available, to Redis with its indexes.
    */
   async save(task: Task): Promise<void> {
+    const cloudflare = cloudflareTaskStore();
+    if (cloudflare) {
+      await cloudflare.save(task, DEFAULT_TTL_SECONDS, MAX_INDEX_SIZE);
+      return;
+    }
     this.maybeCleanupMemory();
     await super.save(task);
 
@@ -244,6 +212,8 @@ export class PersistentTaskStore extends ExtendedTaskStore {
    * Load a task, preferring Redis when it is available.
    */
   async load(taskId: string): Promise<Task | undefined> {
+    const cloudflare = cloudflareTaskStore();
+    if (cloudflare) return cloudflare.load(taskId);
     this.maybeCleanupMemory();
 
     const client = this.redis();
@@ -314,6 +284,8 @@ export class PersistentTaskStore extends ExtendedTaskStore {
     // Validate pagination up front so invalid input is never mistaken for a
     // Redis failure below.
     resolvePage(params);
+    const cloudflare = cloudflareTaskStore();
+    if (cloudflare) return cloudflare.list(params);
 
     if (params.contextId && this.redis()) {
       try {
@@ -331,6 +303,18 @@ export class PersistentTaskStore extends ExtendedTaskStore {
     }
 
     return super.list(params);
+  }
+
+  async clear(): Promise<void> {
+    const cloudflare = cloudflareTaskStore();
+    if (cloudflare) return cloudflare.clear();
+    return super.clear();
+  }
+
+  async getAllTasks(): Promise<Task[]> {
+    const cloudflare = cloudflareTaskStore();
+    if (cloudflare) return cloudflare.all();
+    return super.getAllTasks();
   }
 
   /**

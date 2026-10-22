@@ -1,4 +1,11 @@
 import {
+  createCloudflareTaskStore,
+  TASK_STORAGE_RESOURCE,
+} from '../../packages/a2a/src/cloudflare-task-backend';
+
+export { FeedTasks } from '../../packages/a2a/src/cloudflare-task-object';
+
+import {
   ALERT_RESERVATIONS_RESOURCE,
   createCloudflareAlertReservations,
 } from '../../packages/api/src/services/cloudflare-alert-reservations';
@@ -73,6 +80,8 @@ interface FeedCloudflareEnv {
   ORG_COORDINATION: DurableObjectNamespace;
   ALERT_RESERVATIONS_BACKEND?: string;
   ALERT_RESERVATIONS: DurableObjectNamespace;
+  TASK_STORAGE_BACKEND?: string;
+  TASKS: DurableObjectNamespace;
 }
 
 export default {
@@ -252,6 +261,24 @@ export default {
           env.ALERT_RESERVATIONS_BACKEND !== 'redis'
         ) {
           throw new Error('Unsupported alert reservations backend');
+        }
+        if (env.TASK_STORAGE_BACKEND === 'cloudflare') {
+          const stub = env.TASKS.get(env.TASKS.idFromName('task-storage-v1'));
+          requestResource(TASK_STORAGE_RESOURCE, () =>
+            createCloudflareTaskStore((body) =>
+              stub.fetch('https://tasks.internal/', {
+                method: 'POST',
+                signal: request.signal as unknown as WorkerAbortSignal,
+                headers: { 'content-type': 'application/json' },
+                body,
+              })
+            )
+          );
+        } else if (
+          env.TASK_STORAGE_BACKEND &&
+          env.TASK_STORAGE_BACKEND !== 'redis'
+        ) {
+          throw new Error('Unsupported task storage backend');
         }
         await ensureRedisReady();
         return handler.fetch(request, env, {

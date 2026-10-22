@@ -22,7 +22,8 @@
       { "name": "PAYMENTS", "class_name": "FeedPayments" },
       { "name": "API_KEY_USAGE", "class_name": "FeedApiKeyUsage" },
       { "name": "ORG_COORDINATION", "class_name": "FeedOrgCoordination" },
-      { "name": "ALERT_RESERVATIONS", "class_name": "FeedAlertReservations" }
+      { "name": "ALERT_RESERVATIONS", "class_name": "FeedAlertReservations" },
+      { "name": "TASKS", "class_name": "FeedTasks" }
     ]
   },
   "migrations": [
@@ -40,7 +41,8 @@
     {
       "tag": "feed-alert-reservations-v1",
       "new_sqlite_classes": ["FeedAlertReservations"]
-    }
+    },
+    { "tag": "feed-tasks-v1", "new_sqlite_classes": ["FeedTasks"] }
   ],
   "hyperdrive": [
     {
@@ -80,6 +82,7 @@
     "API_KEY_USAGE_BACKEND": "redis",
     "ORG_COORDINATION_BACKEND": "redis",
     "ALERT_RESERVATIONS_BACKEND": "redis",
+    "TASK_STORAGE_BACKEND": "redis",
     "DEPLOYMENT_PLATFORM": "cloudflare",
     "DEPLOYMENT_ENV": "production",
     "NEXT_PUBLIC_APP_URL": "https://feed.fun",
