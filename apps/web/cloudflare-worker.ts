@@ -2,6 +2,10 @@ import {
   createCloudflareStreams,
   STREAMS_RESOURCE,
 } from '../../packages/api/src/redis/cloudflare-streams';
+import {
+  sharedStateMigrationGate,
+  sharedStateMigrationPaused,
+} from '../../packages/api/src/redis/shared-state-cutover';
 
 export { FeedStreams } from '../../packages/api/src/redis/cloudflare-streams-object';
 
@@ -78,6 +82,7 @@ import {
 import {
   checkCloudflareState,
   createSharedStateHealth,
+  getSharedStateHealth,
   requiresRedis,
   SHARED_STATE_HEALTH_RESOURCE,
   type SharedStateProbe,
@@ -111,13 +116,19 @@ interface FeedCloudflareEnv {
   CACHE: DurableObjectNamespace;
   STREAMS_BACKEND?: string;
   STREAMS: DurableObjectNamespace;
+  SHARED_STATE_MIGRATION_PAUSED?: string;
+  CRON_SECRET?: string;
 }
 
 export default {
   async fetch(request: Request, env: FeedCloudflareEnv, ctx: ExecutionContext) {
-    // packages/db reads DATABASE_URL; the binding's local endpoint is the only database route.
-    process.env.DATABASE_URL = env.HYPERDRIVE.connectionString;
     const url = new URL(request.url);
+    const migrationGate = sharedStateMigrationGate(
+      request,
+      env.SHARED_STATE_MIGRATION_PAUSED,
+      env.CRON_SECRET
+    );
+    if (migrationGate) return migrationGate;
     if (url.pathname === '/__deployment') {
       return Response.json(
         {
@@ -128,6 +139,8 @@ export default {
         { headers: { 'Cache-Control': 'no-store' } }
       );
     }
+    // packages/db reads DATABASE_URL; the binding's local endpoint is the only database route.
+    process.env.DATABASE_URL = env.HYPERDRIVE.connectionString;
     if (url.pathname.startsWith('/media/')) {
       if (request.method !== 'GET' && request.method !== 'HEAD') {
         return new Response('Method not allowed', {
@@ -370,6 +383,21 @@ export default {
         requestResource(SHARED_STATE_HEALTH_RESOURCE, () =>
           createSharedStateHealth(probes)
         );
+        if (url.pathname === '/__shared-state') {
+          const health = await getSharedStateHealth(false);
+          return Response.json(
+            {
+              ...health,
+              paused: sharedStateMigrationPaused(
+                env.SHARED_STATE_MIGRATION_PAUSED
+              ),
+            },
+            {
+              status: health.healthy ? 200 : 503,
+              headers: { 'Cache-Control': 'no-store' },
+            }
+          );
+        }
         return handler.fetch(request, env, {
           waitUntil,
           passThroughOnException: () => ctx.passThroughOnException(),

@@ -304,3 +304,32 @@ test('all nine Cloudflare state backends answer real SQLite health probes', asyn
   expect(new Set(result.backends.map((backend) => backend.name)).size).toBe(9);
   expect(result.backends.every((backend) => backend.healthy)).toBe(true);
 });
+
+test('paused ingress blocks requests while authenticated readiness checks all real state backends', async () => {
+  const blocked = await fetch(`${endpoint}/cutover/api/posts`, {
+    method: 'POST',
+  });
+  expect(blocked.status).toBe(503);
+  expect(blocked.headers.get('retry-after')).toBe('60');
+  expect((await fetch(`${endpoint}/cutover/__shared-state`)).status).toBe(401);
+  const ready = await fetch(`${endpoint}/cutover/__shared-state`, {
+    headers: { authorization: 'Bearer fixture-secret' },
+  });
+  expect(ready.status).toBe(200);
+  const state = (await ready.json()) as {
+    healthy: boolean;
+    paused: boolean;
+    backends: object[];
+  };
+  expect(state.healthy).toBe(true);
+  expect(state.paused).toBe(true);
+  expect(state.backends).toHaveLength(9);
+  expect(
+    (
+      await fetch(`${endpoint}/cutover/api/posts`, {
+        method: 'POST',
+        headers: { 'x-fixture-paused': 'false' },
+      })
+    ).status
+  ).toBe(200);
+});

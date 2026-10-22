@@ -437,6 +437,19 @@ bun scripts/cloudflare/provision.ts staging
 bun scripts/cloudflare/deploy.ts staging
 ```
 
+For a shared-state handoff, set the environment variable
+`SHARED_STATE_MIGRATION_PAUSED=true` in the GitHub deployment environment and
+apply the same setting to the live app Worker. This rejects application traffic
+with 503 while keeping deployment identity, liveness, and authenticated
+`/__shared-state` checks available. The latter requires `CRON_SECRET` and checks
+the actual selected storage backends; it does not certify model-provider health.
+Pause the cron Worker with `CRON_ENABLED=false` as well. Fence existing source
+writers, transfer state with original expiry, and verify the source is stopped
+before enabling the new owner. Keep ingress paused through deployment; the deploy
+script keeps its cron deployment paused and verifies both backend selection and
+pause state. Resume traffic and cron
+work only after handoff checks pass, and reconcile queued/dead-letter work.
+
 The deploy command requires `COMMIT_SHA` and all runtime secrets. `/__deployment`
 reports the deployed commit; check it, `/api/health`, login, authenticated writes,
 uploads, SSE, agent actions, and Surplus generation on staging before promotion.

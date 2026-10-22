@@ -4,7 +4,11 @@ import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { z } from 'zod';
-import { validateSharedStateDeployment } from './shared-state';
+import { sharedStateMigrationPaused } from '../../packages/api/src/redis/shared-state-cutover';
+import {
+  validateSharedStateDeployment,
+  verifySharedStateDeployment,
+} from './shared-state';
 
 const environment = process.argv[2];
 if (environment !== 'staging' && environment !== 'production')
@@ -55,6 +59,13 @@ const appConfig = z
     )
   );
 validateSharedStateDeployment(appConfig.vars, runtime);
+runtime.SHARED_STATE_MIGRATION_PAUSED =
+  process.env.SHARED_STATE_MIGRATION_PAUSED ??
+  runtime.SHARED_STATE_MIGRATION_PAUSED ??
+  'false';
+const migrationPaused = sharedStateMigrationPaused(
+  runtime.SHARED_STATE_MIGRATION_PAUSED
+);
 if (new URL(runtime.STEWARD_API_URL!).protocol !== 'https:')
   throw new Error('STEWARD_API_URL must use HTTPS');
 const sha = process.env.COMMIT_SHA;
@@ -100,6 +111,8 @@ try {
     `workers/cron/wrangler.${environment}.jsonc`,
     '--secrets-file',
     cronSecrets,
+    '--var',
+    `CRON_ENABLED:${migrationPaused ? 'false' : 'true'}`,
   ]);
 } finally {
   await rm(dir, { recursive: true, force: true });
@@ -155,4 +168,15 @@ const health = await fetch(`${origin}/api/health`, {
 if (!health.ok)
   throw new Error(`Live health check returned HTTP ${health.status}`);
 await health.arrayBuffer();
+const sharedState = await fetch(`${origin}/__shared-state`, {
+  headers: { Authorization: `Bearer ${runtime.CRON_SECRET}` },
+  signal: AbortSignal.timeout(30_000),
+});
+if (!sharedState.ok)
+  throw new Error(`Shared state check returned HTTP ${sharedState.status}`);
+verifySharedStateDeployment(
+  await sharedState.json(),
+  appConfig.vars,
+  migrationPaused
+);
 console.info(`Verified ${sha} at ${origin}`);
