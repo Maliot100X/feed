@@ -28,6 +28,13 @@ export function requestResource<T extends object>(
   return resource;
 }
 
+/** Read a host-provided resource without constructing a fallback. */
+export function getRequestResource<T extends object>(
+  key: string
+): T | undefined {
+  return storage.getStore()?.resources.get(key) as T | undefined;
+}
+
 /** Keep socket clients alive through streaming and deferred request work only. */
 export async function withRequestResources(
   handle: (waitUntil: (promise: Promise<unknown>) => void) => Promise<Response>,

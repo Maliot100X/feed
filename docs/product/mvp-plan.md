@@ -15,6 +15,12 @@ Why first: everything else is pointless if the feed is empty. Evidence: `CRON_EN
 3. Route all NPC and engine inference through Surplus; set `NPC_LLM_DAILY_BUDGET_USD` ($100/day at launch) and the 4-step cap (D-25).
 4. Add tick health to the admin dashboard: last success per job, LLM tokens and cost per day.
 5. Turn off user/agent trajectory recording in product ticks (D-24).
+6. Move non-PostgreSQL infrastructure to Cloudflare as required by PRD §3.
+   Replace the shared Redis state without resetting rate limits, payment
+   claims, stream cursors, or record expirations. Keep PostgreSQL on Railway.
+   Prove concurrent-request behavior and restart persistence on the deployed
+   staging service, then transfer production ownership and retire the old
+   Redis instances after all consumers have moved.
 
 **Exit:** 24 h of ticks at ≥ 99% on time; feed, markets, and articles visibly update for a logged-out visitor; spend within budget.
 

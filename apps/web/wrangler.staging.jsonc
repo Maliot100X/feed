@@ -15,6 +15,12 @@
       "service": "feed-web-staging"
     }
   ],
+  "durable_objects": {
+    "bindings": [{ "name": "RATE_LIMITS", "class_name": "FeedRateLimits" }]
+  },
+  "migrations": [
+    { "tag": "feed-rate-limits-v1", "new_sqlite_classes": ["FeedRateLimits"] }
+  ],
   "hyperdrive": [
     {
       "binding": "HYPERDRIVE",
@@ -47,6 +53,7 @@
     "cpu_ms": 300000
   },
   "vars": {
+    "RATE_LIMIT_BACKEND": "redis",
     "DEPLOYMENT_PLATFORM": "cloudflare",
     "DEPLOYMENT_ENV": "staging",
     "NEXT_PUBLIC_APP_URL": "https://staging.feed.fun",

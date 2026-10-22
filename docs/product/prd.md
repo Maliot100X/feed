@@ -38,6 +38,24 @@ What we drop: hosting user agents, agent teams, A2A, every login method except p
 - Twitter Spaces / audio.
 - Native app-store releases (see [D-21]).
 
+### Hosting and shared-state requirement
+
+Run Feed's non-PostgreSQL infrastructure on Cloudflare. Retain PostgreSQL on
+Railway through the existing verified database connection. Replace Railway
+Redis with durable Cloudflare state before retiring either Redis instance.
+
+Shared state must preserve the existing behavior across requests and clients:
+atomic rate limits, payment claims and replay protection, task records, cache
+expirations, event-stream ordering and cursors, notification device records,
+and API-key usage bookkeeping. Worker or container restarts must not reset
+limits or lose accepted work. Storage failures must remain visible; process
+memory is not a replacement for shared durable state.
+
+Staging and production must stay separate. Before cutover, inspect and transfer
+any live source state with its original expiration, stop the old writers, and
+verify the new owner. Remove obsolete Redis bindings and DNS records only after
+all consumers use the Cloudflare state service and live checks pass.
+
 ## 4. Key findings from the current codebase
 
 These shape the plan. Paths are relative to the Feed repo root.

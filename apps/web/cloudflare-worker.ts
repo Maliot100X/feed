@@ -1,9 +1,21 @@
 import type {
+  DurableObjectNamespace,
   ExecutionContext,
   Hyperdrive,
   R2Bucket,
+  AbortSignal as WorkerAbortSignal,
 } from '@cloudflare/workers-types';
-import { withRequestResources } from '@feed/shared/server/request-scope';
+import {
+  requestResource,
+  withRequestResources,
+} from '@feed/shared/server/request-scope';
+import {
+  createCloudflareRateLimitBackend,
+  RATE_LIMIT_RESOURCE,
+} from '../../packages/api/src/rate-limiting/cloudflare-backend';
+
+export { FeedRateLimits } from '../../packages/api/src/rate-limiting/cloudflare-object';
+
 import { ensureRedisReady } from '../../packages/api/src/redis/client';
 // OpenNext generates this module during build.
 // @ts-ignore generated module
@@ -15,6 +27,8 @@ interface FeedCloudflareEnv {
   HYPERDRIVE: Hyperdrive;
   DEPLOYMENT_ENV: string;
   COMMIT_SHA?: string;
+  RATE_LIMIT_BACKEND?: string;
+  RATE_LIMITS: DurableObjectNamespace;
 }
 
 export default {
@@ -76,6 +90,27 @@ export default {
     }
     return withRequestResources(
       async (waitUntil) => {
+        if (env.RATE_LIMIT_BACKEND === 'cloudflare') {
+          const stub = env.RATE_LIMITS.get(
+            env.RATE_LIMITS.idFromName('shared')
+          );
+          requestResource(RATE_LIMIT_RESOURCE, () =>
+            createCloudflareRateLimitBackend((body) =>
+              stub.fetch('https://rate-limit.internal/', {
+                method: 'POST',
+                // Both types describe the same Worker runtime signal.
+                signal: request.signal as unknown as WorkerAbortSignal,
+                headers: { 'content-type': 'application/json' },
+                body,
+              })
+            )
+          );
+        } else if (
+          env.RATE_LIMIT_BACKEND &&
+          env.RATE_LIMIT_BACKEND !== 'redis'
+        ) {
+          throw new Error('Unsupported rate limit backend');
+        }
         await ensureRedisReady();
         return handler.fetch(request, env, {
           waitUntil,

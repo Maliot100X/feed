@@ -10,6 +10,7 @@ import { logger } from '@feed/shared';
 
 import { randomUUID } from 'crypto';
 import { getRedisClient, isRedisAvailable } from '../redis/client';
+import { cloudflareRateLimitBackend } from './cloudflare-backend';
 
 interface RateLimitRecord {
   recentActions: number[]; // Timestamps of recent actions for sliding window
@@ -317,6 +318,8 @@ export async function checkRateLimitAsync(
   userId: string,
   config: RateLimitConfig
 ): Promise<{ allowed: boolean; retryAfter?: number; remaining?: number }> {
+  const durable = cloudflareRateLimitBackend();
+  if (durable) return durable.check(userId, config);
   const redis = getRedisClient();
 
   // Use Redis if available for distributed rate limiting
@@ -552,6 +555,8 @@ export async function resetRateLimit(
   userId: string,
   actionType: string
 ): Promise<void> {
+  const durable = cloudflareRateLimitBackend();
+  if (durable) return durable.reset(userId, actionType);
   // Clear from Redis if available
   const redis = getRedisClient();
   if (redis && isRedisAvailable()) {
@@ -574,6 +579,8 @@ const MAX_SCAN_ITERATIONS = 1000;
  * Useful for testing
  */
 export async function clearAllRateLimits(): Promise<void> {
+  const durable = cloudflareRateLimitBackend();
+  if (durable) return durable.clear();
   // Clear from Redis if available
   const redis = getRedisClient();
   if (redis && isRedisAvailable()) {
@@ -628,6 +635,8 @@ export async function getRateLimitStatus(
   userId: string,
   config: RateLimitConfig
 ): Promise<{ count: number; remaining: number; resetAt: Date }> {
+  const durable = cloudflareRateLimitBackend();
+  if (durable) return durable.status(userId, config);
   const redis = getRedisClient();
   const now = Date.now();
 
