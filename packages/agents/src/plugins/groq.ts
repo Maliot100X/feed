@@ -219,6 +219,35 @@ async function generateGroqText(
 }
 
 /**
+ * Provider-reported usage carried by a structured-output failure, when the SDK
+ * supplies it. `NoObjectGeneratedError` reports usage for a completion that
+ * arrived but failed parsing or schema validation. Transport failures usually
+ * carry none, and a count the provider never reported stays absent instead of
+ * becoming an estimate.
+ */
+function failedObjectUsage(error: unknown): {
+  inputTokens?: number;
+  outputTokens?: number;
+  totalTokens?: number;
+} {
+  const candidate =
+    (error as { usage?: unknown })?.usage ??
+    (error as { cause?: { usage?: unknown } })?.cause?.usage;
+  if (!candidate || typeof candidate !== 'object') return {};
+  const { inputTokens, outputTokens, totalTokens } = candidate as Record<
+    string,
+    unknown
+  >;
+  if (typeof inputTokens !== 'number' && typeof outputTokens !== 'number')
+    return {};
+  return {
+    inputTokens: typeof inputTokens === 'number' ? inputTokens : undefined,
+    outputTokens: typeof outputTokens === 'number' ? outputTokens : undefined,
+    totalTokens: typeof totalTokens === 'number' ? totalTokens : undefined,
+  };
+}
+
+/**
  * Generates structured object using Groq API
  * @internal
  */
@@ -253,6 +282,10 @@ async function generateGroqObject(
       })
     : generateObject({ ...options, output: 'no-schema' })
   ).catch((error: Error) => {
+    // A structured-output failure can still carry the provider's reported usage
+    // when the completion arrived and parsing or validation failed. Keep it, and
+    // keep an unreported count absent rather than recording a second guess.
+    const failedUsage = failedObjectUsage(error);
     if (activeStep)
       activeStep.logger.logLLMCall(activeStep.stepId, {
         model,
@@ -264,6 +297,8 @@ async function generateGroqObject(
         purpose: 'action',
         actionType: 'groq_plugin_object',
         latencyMs: Date.now() - startTime,
+        promptTokens: failedUsage.inputTokens,
+        completionTokens: failedUsage.outputTokens,
         metadata: { success: false, error: error.message },
       });
     getAgentLLMBridge()?.({
@@ -276,8 +311,9 @@ async function generateGroqObject(
       systemPrompt: system || '',
       userPrompt: params.prompt,
       rawResponse: '',
-      inputTokens: 0,
-      outputTokens: 0,
+      inputTokens: failedUsage.inputTokens ?? 0,
+      outputTokens: failedUsage.outputTokens ?? 0,
+      totalTokens: failedUsage.totalTokens,
       success: false,
       error: error.message,
       durationMs: Date.now() - startTime,
