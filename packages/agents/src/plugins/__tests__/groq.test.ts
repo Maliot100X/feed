@@ -396,7 +396,9 @@ describe('native inference usage attribution', () => {
   it('reads usage the SDK nests on the error cause', async () => {
     const wrapped = Object.assign(
       new Error('No object generated: schema validation failed.'),
-      { cause: { usage: { inputTokens: 20, outputTokens: 7, totalTokens: 27 } } }
+      {
+        cause: { usage: { inputTokens: 20, outputTokens: 7, totalTokens: 27 } },
+      }
     );
     mockGenerateObject.mockRejectedValueOnce(wrapped);
     await expect(
